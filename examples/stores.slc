@@ -1,0 +1,107 @@
+-- §18, §19 and §25: managed stores, generational IDs, data stacks.
+
+local Node = struct {
+    value: U32,
+}
+
+local Graph = struct {
+    nodes: Store Node,
+}
+
+function Graph:add(value: U32): Id Node
+    return self.nodes:add Node {
+        value = value,
+    }
+end
+
+-- §19: specialization removes the condition and the static multiplier; the
+-- store insertion stays, because it changes runtime storage
+local insert = do(
+    enabled: Bool,
+    k: U32,
+    graph: Ref Graph,
+    value: U32
+): Id Node
+
+    if enabled then
+        return graph:add(value * k)
+    end
+
+    return graph:add value
+end
+
+local insert_double = insert(true, 2)
+export insert_double
+
+-- §25: a computation that needs dynamic native storage
+local populate = do(
+    scale: U32,
+    g: Ref Graph,
+    n: U32
+): Unit
+
+    for i: U32 = 1, n do
+        g:add(i * scale)
+    end
+end
+
+local populate_double = populate(2)
+
+local run = do(n: U32): U32
+    local g: Graph = Graph {
+        nodes = Store(Node) {},
+    }
+
+    populate_double(Ref(g), n)
+
+    return g.nodes.length
+end
+
+export run
+
+-- IDs: stale handles never identify a replacement object
+local churn = do(n: U32): U32
+    local g: Graph = Graph { nodes = Store(Node) {} }
+    local first: Id Node = g:add(1)
+    local removed = g.nodes:remove(first)
+    local second: Id Node = g:add(2)
+    local stale_ok = g.nodes:has(first)
+    local fresh_ok = g.nodes:has(second)
+    local result: U32 = 0
+    if removed and fresh_ok and not stale_ok and first ~= second then
+        result = g.nodes[second].value + n
+    end
+    return result
+end
+export churn
+
+-- a Grow array, and a recursive word that keeps no data stack live across
+-- its recursive call
+local Bytes = Grow U8
+
+local digits = do(x: U32): U32
+    local buf: Bytes = Bytes {}
+    local v: U32 = x
+    while v > 0 do
+        buf:push(U8(v % 10))
+        v = v / 10
+    end
+    return buf.length
+end
+export digits
+
+local function depth(n: U32): U32
+    if n == 0 then
+        return 0
+    end
+    return 1 + depth(n - 1)
+end
+local sum_depths = do(n: U32): U32
+    local g: Graph = Graph { nodes = Store(Node) {} }
+    g:add(depth(n))
+    return g.nodes.length + depth(n)
+end
+export sum_depths
+
+-- the graph is passed by reference to a materialized word
+export populate_double as "populate_double"

@@ -1,0 +1,90 @@
+-- Atomics, driven by real threads from the C harness.
+
+-- an atomic counter: relaxed adds are enough for a total
+local Counter = struct { n: Atomic U64 }
+local bump = do(c: Ref Counter, times: U32): Unit
+    local i: U32 = 0
+    while i < times do
+        c.n:add(1, "relaxed")
+        i = i + 1
+    end
+end
+export bump
+
+local read_counter = do(c: Ref Counter): U64 = c.n:load("acquire")
+export read_counter
+
+-- a spinlock as an activity: acquire, run the body, release; the release
+-- cannot be skipped, like any activity's completion
+local SpinLock = struct { held: Atomic Bool }
+local with_lock = do(lock: Ref SpinLock, body): Unit
+    while not lock.held:cas(false, true, "acquire") do
+    end
+    body()
+    lock.held:store(false, "release")
+end
+
+-- a plain total, guarded by the lock
+local Shared = struct { lock: SpinLock, total: U64 }
+local add_locked = do(s: Ref Shared, times: U32): Unit
+    local i: U32 = 0
+    while i < times do
+        with_lock(Ref(s.lock)) do
+            s.total = s.total + 1
+        end
+        i = i + 1
+    end
+end
+export add_locked
+
+-- a single-producer single-consumer ring, shaped like io_uring's: the producer
+-- publishes with a release store of its tail, the consumer with its head
+local Ring = struct { head: Atomic U32, tail: Atomic U32, mask: U32, slots: Ptr U32 }
+
+local push = do(r: Ref Ring, v: U32): Bool
+    local tail: U32 = r.tail:load("relaxed")
+    local head: U32 = r.head:load("acquire")
+    if tail - head > r.mask then
+        return false                      -- full
+    end
+    r.slots[band(tail, r.mask)] = v
+    r.tail:store(tail + 1, "release")
+    return true
+end
+export push
+
+local Taken = oneof { empty: Unit, value: U32 }
+local pop = do(r: Ref Ring): Taken
+    local head: U32 = r.head:load("relaxed")
+    local tail: U32 = r.tail:load("acquire")
+    if head == tail then
+        return Taken.empty()
+    end
+    local v: U32 = r.slots[band(head, r.mask)]
+    r.head:store(head + 1, "release")
+    return Taken.value(v)
+end
+
+-- the consumer side as one word: pop until n values arrived, return their sum
+local drain = do(r: Ref Ring, n: U32): U64
+    local got: U32 = 0
+    local sum: U64 = 0
+    while got < n do
+        pop(r) {
+            empty = do end,
+            value = do(v)
+                sum = sum + U64(v)
+                got = got + 1
+            end,
+        }
+    end
+    return sum
+end
+export drain
+
+-- a fence, and a ring head reached through a plain pointer (as from mmap)
+local publish = do(head: Ptr U32, v: U32): Unit
+    fence "release"
+    atomic_ptr(head)[0]:store(v, "relaxed")
+end
+export publish

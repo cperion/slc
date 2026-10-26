@@ -1,0 +1,110 @@
+-- libc as activities.
+--
+-- libc is C and slc emits C: these are externs, wrapped so that every resource
+-- with a lifetime is an activity. An activity's completion cannot be skipped
+-- (a body's `return` leaves only the body), so a file opened by with_file is
+-- always closed and a buffer from with_buffer always freed, short of a trap.
+-- Everything is evaluated in place: the wrappers leave no calls of their own.
+--
+--     local c = import "libc"
+--     ...
+--         local c...
+--         with_file(path, "w") do(file...)
+--             say("n = ", n, "\n")
+--         end
+
+local FILE = opaque "FILE"
+
+local stdio = { header = "<stdio.h>" }
+local fopen   = extern("fopen",   { CString, CString }, Ptr FILE, stdio)
+local fclose  = extern("fclose",  { Ptr FILE }, I32, stdio)
+local fputs   = extern("fputs",   { CString, Ptr FILE }, I32, stdio)
+local fputc   = extern("fputc",   { I32, Ptr FILE }, I32, stdio)
+local fgetc   = extern("fgetc",   { Ptr FILE }, I32, stdio)
+local fprintf = extern("fprintf", { Ptr FILE, CString }, I32, { header = "<stdio.h>", variadic = true })
+local printf  = extern("printf",  { CString }, I32, { header = "<stdio.h>", variadic = true })
+
+local stdlib = { header = "<stdlib.h>" }
+local malloc  = extern("malloc",  { U64 }, Ptr U8, stdlib)
+local free    = extern("free",    { Ptr U8 }, Unit, stdlib)
+
+local string_h = { header = "<string.h>" }
+local memset  = extern("memset",  { Ptr U8, I32, U64 }, Ptr U8, string_h)
+
+-- formatted output: the format is built from the arguments' types while
+-- specializing, so it always matches them
+local say = do(...parts): Unit
+    printf(cformat(...parts))
+end
+
+-- files ----------------------------------------------------------------------------------------
+
+-- the vocabulary inside with_file
+local File = struct { handle: Ptr FILE }
+
+function File:write(s: CString): Unit
+    fputs(s, self.handle)
+end
+
+function File:put(byte: U8): Unit
+    fputc(I32(byte), self.handle)
+end
+
+-- the next byte, or -1 at the end
+function File:next_byte(): I32
+    return fgetc(self.handle)
+end
+
+function File:say(...parts): Unit
+    fprintf(self.handle, cformat(...parts))
+end
+
+-- open, run the body, close; false if the file could not be opened
+local with_file = do(path: CString, mode: CString, body): Bool
+    local h: Ptr FILE = fopen(path, mode)
+    if h == null(FILE) then
+        return false
+    end
+    local file: File = File { handle = h }
+    body(Ref(file))
+    fclose(h)
+    return true
+end
+
+-- each byte of a file, until its end; false if it could not be opened
+local each_byte = do(path: CString, body): Bool
+    return with_file(path, "rb") do(reading...)
+        local b: I32 = next_byte()
+        while b >= 0 do
+            body(U8(b))
+            b = next_byte()
+        end
+    end
+end
+
+-- memory ---------------------------------------------------------------------------------------
+
+-- the vocabulary inside with_buffer: the bytes and how many
+local Buffer = struct { data: Ptr U8, size: U32 }
+
+function Buffer:fill(byte: U8): Unit
+    memset(self.data, I32(byte), U64(self.size))
+end
+
+-- allocate, run the body, free; false if the allocation failed
+local with_buffer = do(size: U32, body): Bool
+    local p: Ptr U8 = malloc(U64(size))
+    if p == null(U8) then
+        return false
+    end
+    local buffer: Buffer = Buffer { data = p, size = size }
+    body(Ref(buffer))
+    free(p)
+    return true
+end
+
+return {
+    FILE = FILE, File = File, Buffer = Buffer,
+    say = say, with_file = with_file, each_byte = each_byte, with_buffer = with_buffer,
+    printf = printf, fopen = fopen, fclose = fclose, malloc = malloc, free = free,
+}

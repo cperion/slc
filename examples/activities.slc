@@ -1,0 +1,203 @@
+-- Activities (Let design guide §5) and spread (spread.md) in slc.
+--
+-- An activity word sets up a context, runs a body that opens it and speaks its
+-- verbs, and owns completion. Words are evaluated in place, so the context is
+-- an ordinary tracked local: when it stays private it disappears from the C.
+
+local Document = struct { length: U32, cursor: U32, edits: U32 }
+local Editing = struct { length: U32, cursor: U32, edits: U32 }
+
+function Editing:insert(n: U32): Unit
+    self.length = self.length + n
+    self.cursor = self.cursor + n
+    self.edits = self.edits + 1
+end
+
+function Editing:move_left(): Unit
+    if self.cursor > 0 then
+        self.cursor = self.cursor - 1
+    end
+end
+
+-- the activity: work on a copy, commit at the end (keyed spread both ways)
+local transaction = do(document: Ref Document, body): Unit
+    local editing: Editing = Editing { ...document }
+    body(Ref(editing))
+    document = Document { ...editing }
+end
+
+local type_text = do(doc: Ref Document, n: U32): Unit
+    transaction(doc) do(editing...)
+        insert n
+        move_left()
+        if cursor > 3 then
+            insert 1
+        end
+    end
+end
+export type_text
+
+-- open to work; bind to remember
+local back_and_forth = do(doc: Ref Document): U32
+    local moved: U32 = 0
+    transaction(doc) do(editing...)
+        local before = cursor
+        move_left()
+        moved = before - cursor
+    end
+    return moved
+end
+export back_and_forth
+
+-- a private document: the whole activity folds away
+local fresh_length = do(n: U32): U32
+    local doc: Document = Document { length = 0, cursor = 0, edits = 0 }
+    transaction(Ref(doc)) do(editing...)
+        insert n
+        insert 2
+    end
+    return doc.length * 100 + doc.edits
+end
+export fresh_length
+
+-- an activity that owns temporary state and returns a result; the unnamed home
+local Counting = struct { count: U32 }
+function Counting:tick(): Unit
+    self.count = self.count + 1
+end
+local counting = do(body): U32
+    local counting: Counting = Counting { count = 0 }
+    body(Ref(counting))
+    return counting.count
+end
+local evens = do(n: U32): U32 =
+    counting do(...)
+        for i: U32 = 1, n do
+            if i % 2 == 0 then
+                tick()
+            end
+        end
+    end
+export evens
+
+-- a store slot, opened: g.nodes[id] is a place, checked at every use
+local Node = struct { value: U32, weight: U32 }
+local Graph = struct { nodes: Store Node }
+local double_node = do(g: Ref Graph, id: Id Node): Unit
+    local node... = g.nodes[id]
+    value = value * 2
+    weight = weight + 1
+end
+export double_node
+
+local roundtrip = do(x: U32): U32
+    local g: Graph = Graph { nodes = Store(Node) {} }
+    local id: Id Node = g.nodes:add(Node { value = x, weight = 0 })
+    double_node(Ref(g), id)
+    double_node(Ref(g), id)
+    local n: Node = g.nodes[id]
+    return n.value * 10 + n.weight
+end
+export roundtrip
+
+-- record update: explicit fields override the spread
+local Point = struct { x: I32, y: I32 }
+local moved_x = do(p: Point, dx: I32): Point = Point { ...p, x = p.x + dx }
+local shift = do(x: I32, y: I32): I32
+    local q: Point = moved_x(Point { x = x, y = y }, 5)
+    return q.x * 100 + q.y
+end
+export shift
+
+-- a pack: a compile-time callable and the remaining components
+local log_call = extern("log_call", { U32 }, Unit)
+local twice = do(x: U32): U32 = x * 2
+local add3 = do(a: U32, b: U32, c: U32): U32 = a + b + c
+local logged = do(f, ...args): U32
+    log_call(args.length)
+    return f(...args)
+end
+local use_logged = do(x: U32, y: U32): U32 = logged(twice, x) + logged(add3, x, y, 1)
+export use_logged
+
+-- a vocabulary table opened in a body
+local units = { kilo = 1000, mega = 1000000 }
+local to_base = do(k: U32, m: U32): U32
+    local units...
+    return k * kilo + m * mega
+end
+export to_base
+
+-- a spine of activities, closed with endall
+local trace = extern("trace", { U32 }, Unit)
+local traced = do(tag, body): Unit
+    trace(tag)
+    body()
+    trace(tag + 100)
+end
+local import_rows = do(doc: Ref Document, n: U32): Unit
+    traced 1 do
+    traced 2 do
+    transaction(doc) do(editing...)
+        insert n
+    endall
+    trace(9)
+end
+export import_rows
+
+-- callbacks: staged control flow; `return` leaves only the callback
+local apply = do(f, x: U32): U32 = f(x)
+local clamp_cb = do(x: U32): U32
+    return apply(do(v)
+        if v > 10 then return v - 10 end
+        return v
+    end, x) + 1
+end
+export clamp_cb
+
+-- anonymous spread: an unnamed home
+local Vec = struct { x: F64, y: F64 }
+
+-- an unnamed home: its fields are in scope, the home itself is (...)
+local squared = do(...: Vec): F64 = x*x + y*y
+export squared
+
+local Terminal = struct { width: U32, drawn: U32 }
+function Terminal:draw(n: U32): Unit
+    self.drawn = self.drawn + n
+end
+local status = do(t: Ref Terminal, extra: U32): Unit
+    t.drawn = t.drawn + extra
+end
+
+-- receiver calls go to the home; (f)(..., x) passes it explicitly
+local session = do(...: Ref Terminal, lines: U32): U32
+    draw(lines)
+    (status)(..., 1)
+    return width - drawn
+end
+export session
+
+-- the home read as a value
+local scaled = do(...: Vec, k: F64): Vec = Vec { x = x * k, y = y * k }
+local norm2 = do(p: Vec): F64 = squared(scaled(p, 2.0))
+export norm2
+
+-- a slot looked up before the store grows is looked up again after: the
+-- storage may have moved
+local survives_growth = do(n: U32, flip: Bool): U32
+    local g: Graph = Graph { nodes = Store(Node) {} }
+    local id: Id Node = g.nodes:add(Node { value = 1, weight = 0 })
+    g.nodes[id].value = 5
+    if flip then
+        g.nodes[id].weight = 3
+    end
+    local k: U32 = 0
+    while k < n do
+        g.nodes:add(Node { value = k, weight = k })
+        k = k + 1
+    end
+    g.nodes[id].value = g.nodes[id].value + g.nodes[id].weight + 1
+    return g.nodes[id].value
+end
+export survives_growth

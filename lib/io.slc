@@ -1,0 +1,32 @@
+-- I/O by completion (§36.7).
+--
+-- Every operation is a wait: a task suspends, plain code blocks. Results are
+-- sums matched exhaustively: done, failed (the system's error code) and, for
+-- an operation given a deadline, timed_out.
+--
+--     local io = import "io"
+--     ...
+--         io.read(f, buf, n, { deadline = ms(100) }) {
+--             done = do(got) ... end, failed = do(e) ... end, timed_out = do ... end,
+--         }
+
+local io = __S.io_vocabulary()
+
+local fcntl = "<fcntl.h>"
+io.READ       = cconst("O_RDONLY", I32, fcntl)
+io.WRITE      = cconst("O_WRONLY", I32, fcntl)
+io.READ_WRITE = cconst("O_RDWR",   I32, fcntl)
+io.CREATE     = cconst("O_CREAT",  I32, fcntl)
+io.TRUNCATE   = cconst("O_TRUNC",  I32, fcntl)
+io.APPEND     = cconst("O_APPEND", I32, fcntl)
+
+local errno_h = "<errno.h>"
+io.ENOENT       = cconst("ENOENT",       I32, errno_h)
+io.EACCES       = cconst("EACCES",       I32, errno_h)
+io.ECONNREFUSED = cconst("ECONNREFUSED", I32, errno_h)
+io.EPIPE        = cconst("EPIPE",        I32, errno_h)
+
+io.LOOPBACK = U32(0x7f000001)
+io.ANY      = U32(0)
+
+return io

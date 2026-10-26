@@ -1,0 +1,150 @@
+-- The spec's examples, sections 4 to 14, as one program.
+
+-- §4.1 ordinary Lua builds native words
+local make_multiplier = do(k)
+    return do(x: U32): U32 =
+        x * k
+end
+
+local double = make_multiplier 2
+local triple = make_multiplier 3
+export double
+export triple
+
+-- §5 words, autocurrying, saturated specialization
+local affine = do(
+    a: U32,
+    b: U32,
+    x: U32
+): U32 = a * x + b
+
+local transform = affine(4, 3)
+local use = do(x: U32): U32 =
+    affine(4, 3, x)
+assert(host(affine(4, 3, 10)) == 43)
+export transform
+export use
+
+-- §7.1 native conditionals
+local choose = do(
+    enabled: Bool,
+    k: U32,
+    x: U32
+): U32
+
+    if enabled then
+        return x * k
+    end
+
+    return x + k
+end
+
+local times8 = choose(true, 8)
+assert(host(choose(true, 8, 7)) == 56)
+local choose_use = do(flag: Bool, x: U32): U32
+    return choose(flag, 8, x)
+end
+export times8
+export choose_use
+
+-- §7.2 branch-local state
+local f = do(flag: Bool, x: U32): U32
+    local y: U32 = x
+
+    if flag then
+        y = y * 2
+    else
+        y = y + 1
+    end
+
+    return y
+end
+export f
+
+-- §8.1 unannotated bindings are staged values
+local unannotated = do(x: U32): U32
+    local k = 4
+    local y = x * k
+
+    return y + 1
+end
+export unannotated
+
+-- §8.2 typed locals are places
+local typed_local = do(x: U32): U32
+    local y: U32 = x
+
+    y = y + 1
+
+    return y
+end
+export typed_local
+
+-- §9.1 generation-time loops
+local make_sum = do(n)
+    return do(x: U32): U32
+        local total: U32 = x
+
+        for i = 1, n do
+            total = total + i
+        end
+
+        return total
+    end
+end
+
+local add6 = make_sum 3
+export add6
+
+-- §9.2 native loops
+local triangular = do(n: U32): U32
+    local total: U32 = 0
+
+    for i: U32 = 1, n do
+        total = total + i
+    end
+
+    return total
+end
+
+local fifteen = triangular 5
+assert(host(fifteen) == 15)
+local runtime_sum = do(n: U32): U32 =
+    triangular n
+export runtime_sum
+
+-- §11 effects stay residual
+local foreign_print = extern("foreign_print", { U32 }, Unit)
+
+local print_scaled = do(k: U32, x: U32): Unit
+    foreign_print(x * k)
+end
+
+local print_twice = print_scaled 2
+export print_twice
+
+-- §14 methods
+local Counter = struct {
+    value: U32,
+}
+
+function Counter:add(n: U32): Unit
+    self.value = self.value + n
+end
+
+function Counter:get(): U32
+    return self.value
+end
+
+local count3 = do(a: U32, b: U32, c: U32): U32
+    local counter: Counter = Counter { value = 0 }
+    counter:add(a)
+    counter:add(b)
+    counter:add c
+    return counter:get()
+end
+assert(host(count3(1, 2, 3)) == 6)
+export count3
+
+-- a mutable method through a reference, materialized
+export Counter.add as "counter_add"

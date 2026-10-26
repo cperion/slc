@@ -1,0 +1,60 @@
+-- §24: a complete end-to-end example
+
+-- Generic compile-time type generator
+local Box = do(T)
+    local B = struct {
+        value: T,
+    }
+
+    function B:get(): T
+        return self.value
+    end
+
+    function B:set(value: T): Unit
+        self.value = value
+    end
+
+    return B
+end
+
+local NumberBox = Box U32
+
+-- Native word
+local affine = do(
+    a: U32,
+    b: U32,
+    x: U32
+): U32 = a * x + b
+
+-- Static partial application
+local transform = affine(4, 3)
+
+-- Specialized branch
+local process = do(
+    enabled: Bool,
+    x: U32
+): U32
+
+    local box: NumberBox = NumberBox {
+        value = transform x,
+    }
+
+    if enabled then
+        box:set(box:get() * 2)
+    end
+
+    return box:get()
+end
+
+-- Further specialization
+local enabled_process = process true
+
+-- Fully known invocation
+local answer = enabled_process 10
+assert(host(answer) == 86)
+
+-- Native entry
+local entry = do(x: U32): U32 =
+    enabled_process x
+
+export entry

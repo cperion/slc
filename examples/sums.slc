@@ -1,0 +1,110 @@
+-- Sums and matching (Let syntax §8.1) in slc.
+
+local Circle = struct { radius: U32 }
+local Rect = struct { width: U32, height: U32 }
+local Shape = oneof { circle: Circle, rect: Rect, dot: Unit }
+
+-- matching is keyed application: one handler per alternative
+local area = do(s: Shape): U32 = s {
+    circle = do(c) = c.radius * c.radius * 3,
+    rect = do(r)
+        local w = r.width
+        return w * r.height
+    end,
+    dot = do() = 0,
+}
+export area
+
+-- a known tag selects its handler at compile time
+assert(host(area(Shape.rect { width = 4, height = 5 })) == 20)
+local strip = do(k: U32): U32 = area(Shape.rect { width = k, height = 1 })
+export strip
+
+-- `name(params) = body` is `name = do(params) = body`; Unit alternatives take nothing
+local Opt = oneof { none: Unit, some: U32 }
+local unwrap_or = do(o: Opt, d: U32): U32 = o { some(v) = v, none() = d }
+local pick = do(flag: Bool, x: U32): U32
+    local o: Opt = Opt.none()
+    if flag then
+        o = Opt.some(x)
+    end
+    return unwrap_or(o, 7)
+end
+export pick
+
+-- an interpreter: commands as data
+local Direction = oneof { left: Unit, right: Unit }
+local Command = oneof { move: Direction, insert: U32, undo: Unit }
+local Editor = struct { cursor: U32, length: U32, undos: U32 }
+
+local apply = do(e: Ref Editor, c: Command): Unit
+    c {
+        move = do(d)
+            d {
+                left = do
+                    if e.cursor > 0 then e.cursor = e.cursor - 1 end
+                end,
+                right = do
+                    if e.cursor < e.length then e.cursor = e.cursor + 1 end
+                end,
+            }
+        end,
+        insert = do(n)
+            e.length = e.length + n
+            e.cursor = e.cursor + n
+        end,
+        undo = do
+            e.undos = e.undos + 1
+        end,
+    }
+end
+export apply
+
+-- over a known script, the interpreter dissolves into straight-line code
+local script = {
+    Command.insert(5),
+    Command.move(Direction.left()),
+    Command.move(Direction.left()),
+    Command.undo(),
+    Command.insert(2),
+}
+local run_script = do(e: Ref Editor): Unit
+    for i = 1, #script do
+        apply(e, script[i])
+    end
+end
+export run_script
+
+-- over a runtime program, the same interpreter is a switch in a loop: a VM
+local Program = Grow Command
+local run_program = do(e: Ref Editor, prog: Ref Program): Unit
+    local i: U32 = 0
+    while i < prog.length do
+        apply(e, prog[i])
+        i = i + 1
+    end
+end
+local demo = do(n: U32): U32
+    local prog: Program = Program {}
+    prog:push(Command.insert(n))
+    prog:push(Command.move(Direction.left()))
+    prog:push(Command.undo())
+    prog:push(Command.move(Direction.right()))
+    local e: Editor = Editor { cursor = 0, length = 0, undos = 0 }
+    run_program(Ref(e), Ref(prog))
+    return e.cursor * 100 + e.length * 10 + e.undos
+end
+export demo
+
+-- a sum as a struct field
+local Token = struct { kind: Opt, at: U32 }
+local token_value = do(t: Token): U32 = t.kind { some(v) = v + t.at, none() = t.at }
+export token_value
+
+-- result types do not depend on alternative order: a Lua number takes its type
+-- from another handler, and handlers that agree on a Lua number fold
+local Small = oneof { dot: Unit, num: U32 }
+local num_or_zero = do(s: Small): U32 = s { num(v) = v, dot() = 0 }
+local always_one = do(s: Small): U32 = s { num(v) = 1, dot() = 1 }
+export num_or_zero
+export always_one

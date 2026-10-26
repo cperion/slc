@@ -1,0 +1,56 @@
+-- POSIX and Linux as activities (lib/posix.slc).
+
+local px = import "posix"
+
+-- write a file; the outcome is a sum, matched right where the activity ends
+local make_file = do(path: CString): I32
+    local px...
+    return with_fd(path, bor(O_WRONLY, bor(O_CREAT, O_TRUNC))) do(writing...)
+        write_text "SLC1"
+        write_text "hello, kernel\n"
+    end { done() = 0, failed(e) = e }
+end
+export make_file
+
+-- map a file and parse its header: one range check, then constant offsets
+local magic = do(path: CString): U32
+    local px...
+    local found: U32 = 0
+    local outcome = with_fd(path, O_RDONLY) do(reading...)
+        if size() >= 4 then
+            mapped(4) do(bytes)
+                local h = bytes:sub(0, 4)
+                found = U32(h[0]) * 16777216 + U32(h[1]) * 65536 + U32(h[2]) * 256 + U32(h[3])
+            end
+        end
+    end
+    return outcome { done() = found, failed(e) = 0 }
+end
+export magic
+
+-- a missing file is an outcome, not a crash
+local missing = do(path: CString): Bool
+    local px...
+    return with_fd(path, O_RDONLY) do(probing...)
+    end { done() = false, failed(e) = e == ENOENT }
+end
+export missing
+
+-- talking right to the kernel: an eventfd watched by epoll
+local ping = do(n: U64): U64
+    local px...
+    local got: U64 = 0
+    with_eventfd do(counter...)
+        local value: U64 = n
+        write_bytes(bytes(value), size_of(U64))
+        with_epoll do(poll...)
+            watch(fd)
+            if next_ready(100) == fd then
+                local back: U64 = 0
+                read_bytes(bytes(back), size_of(U64))
+                got = back
+            end
+        endall
+    return got
+end
+export ping

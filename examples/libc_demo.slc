@@ -1,0 +1,56 @@
+-- libc as activities (lib/libc.slc).
+
+local c = import "libc"
+
+-- write a report; the file is closed whatever the body does
+local report = do(path: CString, n: U32, ratio: F64): Bool
+    local c...
+    return with_file(path, "w") do(file...)
+        write "report\n"
+        say("n = ", n, ", ratio = ", ratio, "\n")
+        if n > 10 then
+            return                -- leaves the body only: the file is still closed
+        end
+        say("small\n")
+    end
+end
+export report
+
+-- read it back byte by byte
+local checksum = do(path: CString): U32
+    local c...
+    local total: U32 = 0
+    local ok = each_byte(path) do(b)
+        total = total + U32(b)
+    end
+    if not ok then
+        return 0
+    end
+    return total
+end
+export checksum
+
+-- a heap buffer with a guaranteed free; Ptr for writes, Slice for checked reads
+local sum_filled = do(n: U32, byte: U8): U32
+    local c...
+    local total: U32 = 0
+    with_buffer(n) do(buffer...)
+        fill(byte)
+        data[0] = 1
+        local bytes = Slice(data, size)
+        local i: U32 = 0
+        while i < bytes.length do
+            total = total + U32(bytes[i])
+            i = i + 1
+        end
+    end
+    return total
+end
+export sum_filled
+
+-- formatting is decided while specializing: known values go into the format
+local greet = do(times: U32): Unit
+    local c...
+    say("hello ", 3, " times, then ", times, " (", true, ")\n")
+end
+export greet

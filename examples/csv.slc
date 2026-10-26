@@ -1,0 +1,93 @@
+-- A CSV decoder made for its file: the header line and the first row are read
+-- in Lua, and what they say (which field, how many decimals) is folded into the
+-- decoder before it is compiled.
+--
+--     luajit slc.lua run examples/csv.slc examples/data/sales.csv price
+--
+-- The same word compiles ahead of time too: price_stats below is the decoder
+-- for a layout known in the source, and tests/csv_main.c checks it.
+
+local Stats = struct { rows: U32, sum: I64, min: I64, max: I64 }
+
+-- the statistics of one numeric field, in units of 10^-decimals; `rows` are the
+-- lines after the header
+local field_stats = do(layout, rows: Slice U8): Stats
+    local s: Stats = Stats { rows = 0, sum = 0, min = 0, max = 0 }
+    local i: U32 = 0
+    while i < rows.length do
+        -- the fields before ours: the count is known, so this unrolls
+        for _ = 1, layout.index - 1 do
+            while i < rows.length and rows[i] ~= 44 do
+                i = i + 1
+            end
+            i = i + 1
+        end
+        local negative: Bool = false
+        if i < rows.length and rows[i] == 45 then
+            negative = true
+            i = i + 1
+        end
+        local v: I64 = 0
+        while i < rows.length and rows[i] >= 48 and rows[i] <= 57 do
+            v = v * 10 + I64(rows[i]) - 48
+            i = i + 1
+        end
+        -- the decimals the first row had: a known count, unrolled
+        if layout.decimals > 0 then
+            i = i + 1
+            for _ = 1, layout.decimals do
+                v = v * 10 + I64(rows[i]) - 48
+                i = i + 1
+            end
+        end
+        if negative then
+            v = 0 - v
+        end
+        -- the rest of the line
+        while i < rows.length and rows[i] ~= 10 do
+            i = i + 1
+        end
+        i = i + 1
+        if s.rows == 0 or v < s.min then
+            s.min = v
+        end
+        if s.rows == 0 or v > s.max then
+            s.max = v
+        end
+        s.sum = s.sum + v
+        s.rows = s.rows + 1
+    end
+    return s
+end
+
+-- ahead of time: the third field, two decimals
+local price_stats = field_stats { index = 3, decimals = 2 }
+export price_stats
+
+-- now: the layout comes from the file named on the command line
+local path, wanted = arg and arg[1], arg and arg[2]
+if path and wanted and native then
+    local f = assert(io.open(path, 'rb'))
+    local text = f:read '*a'
+    f:close()
+    local header, first = text:match('^([^\n]*)\n([^\n]*)')
+    local index
+    local k = 0
+    for name in (header .. ','):gmatch('([^,]*),') do
+        k = k + 1
+        if name == wanted then index = k end
+    end
+    if not index then error(('no column %q in %s'):format(wanted, header), 0) end
+    local field = {}
+    for x in (first .. ','):gmatch('([^,]*),') do field[#field + 1] = x end
+    local decimals = #(field[index]:match('%.(%d+)$') or '')
+
+    local decode = native(field_stats { index = index, decimals = decimals })
+
+    local ffi = require 'ffi'
+    local body = text:sub(#header + 2)
+    local s = decode({ ptr = ffi.cast('uint8_t *', body), len = #body })
+    local unit = 10 ^ decimals
+    print(('%s (column %d of %s, %d decimals): %d rows, sum %s, min %s, max %s'):format(wanted, index, path, decimals,
+        s.rows, tonumber(s.sum) / unit, tonumber(s.min) / unit, tonumber(s.max) / unit))
+end

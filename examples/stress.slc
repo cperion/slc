@@ -1,0 +1,260 @@
+-- Harder cases for the evaluator. Each export has a C reference in the harness.
+
+-- a lazily bound value whose place is overwritten later: the snapshot appears
+local snapshot = do(x: U32): U32
+    local y: U32 = x * 3
+    if x > 10 then
+        y = y + 1
+    end
+    local a = y
+    y = y * 2
+    return a + y
+end
+export snapshot
+
+-- an inlined word that returns from inside a native loop, used mid-expression
+local find_first = do(limit: U32, target: U32): U32
+    local i: U32 = 0
+    while i < limit do
+        if i * i >= target then
+            return i
+        end
+        i = i + 1
+    end
+    return limit
+end
+local isqrt_plus = do(t: U32): U32 = find_first(1000, t) + 1
+export isqrt_plus
+
+-- mutual recursion: both keys re-enter, one function each
+local function is_even(n: U32): Bool
+    if n == 0 then
+        return true
+    end
+    return is_odd(n - 1)
+end
+function is_odd(n: U32): Bool
+    if n == 0 then
+        return false
+    end
+    return is_even(n - 1)
+end
+local parity = do(n: U32): U32
+    if is_even(n) then
+        return 0
+    end
+    return 1
+end
+export parity
+
+-- small integer types compute in 32 bits and wrap
+local mix8 = do(a: U8, b: U8): U8 = a * b + a - b
+export mix8
+assert(host(mix8(200, 3)) == (200 * 3 + 200 - 3) % 256)
+local neg16 = do(a: I16): I16 = - a
+assert(host(neg16(-32768)) == -32768)
+export neg16
+
+-- 64-bit and float folding
+local big = do(x: U64): U64 = x * 6364136223846793005ULL + 1442695040888963407ULL
+local seeded = big(1)
+export big
+local f32 = do(x: F32): F32 = x / 3 + 0.1
+assert(host(f32(1)) == host(F32(F32(1) / 3 + 0.1)))
+export f32
+
+-- struct values across a materialized function boundary
+local Vec = struct { x: I32, y: I32 }
+local function len1(v: Vec, n: U32): I32
+    if n == 0 then
+        return v.x + v.y
+    end
+    return len1(Vec { x = v.y, y = v.x - 1 }, n - 1)
+end
+local walk_vec = do(a: I32, b: I32, n: U32): I32 = len1(Vec { x = a, y = b }, n)
+export walk_vec
+
+-- a known loop that becomes dynamic part way: rolled back and residualized
+local mixed_loop = do(x: U32): U32
+    local acc: U32 = 1
+    for i: U32 = 1, 4 do
+        if i == 3 then
+            acc = acc + x
+        else
+            acc = acc * 2
+        end
+    end
+    return acc
+end
+export mixed_loop
+
+-- the same loop with everything known runs at compile time
+assert(host(mixed_loop(5)) == ((1 * 2 * 2) + 5) * 2)
+
+-- and/or with known and dynamic operands
+local logic = do(a: Bool, x: U32): Bool
+    local k = true
+    return (k and a) or (x > 5 and not a)
+end
+export logic
+
+-- a method called on a value, not a place
+function Vec:sum(): I32
+    return self.x + self.y
+end
+local vsum = do(a: I32): I32 = (Vec { x = a, y = 2 }):sum()
+export vsum
+
+-- a word whose result is not in tail position, with returns in branches
+local clamp = do(x: I32, lo: I32, hi: I32): I32
+    if x < lo then
+        return lo
+    elseif x > hi then
+        return hi
+    end
+    return x
+end
+local clamp_sum = do(a: I32, b: I32): I32 = clamp(a, 0, 10) + clamp(b, -5, 5)
+export clamp_sum
+
+-- generation-time unrolling with a native accumulator
+local horner = do(coeffs)
+    return do(x: I64): I64
+        local acc: I64 = 0
+        for i = 1, #coeffs do
+            acc = acc * x + coeffs[i]
+        end
+        return acc
+    end
+end
+local poly = horner { 3, 0, -2, 7 }
+export poly
+
+-- a dynamic while loop in an inlined word, inside a dynamic branch
+local count_bits = do(x: U32): U32
+    local n: U32 = 0
+    local v: U32 = x
+    while v ~= 0 do
+        n = n + band(v, 1)
+        v = shr(v, 1)
+    end
+    return n
+end
+local bits_if = do(flag: Bool, x: U32): U32
+    if flag then
+        return count_bits(x) * 10
+    end
+    return count_bits(x + 1)
+end
+export bits_if
+
+-- dynamic(): make a known argument a runtime parameter so recursion terminates
+local function steps(k: U32, x: U32): U32
+    if x == 0 then
+        return k
+    end
+    return steps(k + 1, x - 1)
+end
+local walk = do(x: U32): U32 = steps(dynamic(U32(0)), x)
+export walk
+
+-- writing through references: `=` on a name holding a reference writes its target
+local bump = do(r: Ref U32, k: U32): Unit
+    r = r + k
+end
+local identity = do(r: Ref U32): Ref U32 =
+    r
+local bumped = do(x: U32): U32
+    local v: U32 = x
+    bump(identity(Ref(v)), 5)
+    local alias = Ref(v)
+    alias = alias + 6
+    return v
+end
+export bumped
+export bump as "bump_ref"
+
+-- tail recursion: loops without loop syntax
+local function gcd(a: U32, b: U32): U32
+    if b == 0 then return a end
+    return gcd(b, a % b)
+end
+export gcd
+
+local function swap_count(a: U32, b: U32, n: U32): U32
+    if n == 0 then return a end
+    return swap_count(b, a, n - 1)
+end
+local swapper = do(a: U32, b: U32, n: U32): U32 = swap_count(a, b, n) * 10 + 1
+export swapper
+
+-- no dynamic(...) needed: the test is dynamic, so k is generalized
+local function count_down(k: U32, x: U32): U32
+    if x == 0 then return k end
+    return count_down(k + 1, x - 1)
+end
+local walk_auto = do(x: U32): U32 = count_down(0, x)
+export walk_auto
+
+-- known control unfolds: pow with a known exponent
+local function pow(x: U32, n: U32): U32
+    if n == 0 then return 1 end
+    return x * pow(x, n - 1)
+end
+local cube = do(x: U32): U32 = pow(x, 3)
+export cube
+
+-- break and continue in native loops
+local first_multiple = do(m: U32, limit: U32): U32
+    local found: U32 = 0
+    for i: U32 = 1, limit do
+        if i % 2 == 0 then
+            continue
+        end
+        if i % m == 0 then
+            found = i
+            break
+        end
+    end
+    return found
+end
+export first_multiple
+
+local sum_until = do(x: U32): U32
+    local total: U32 = 0
+    local i: U32 = 0
+    while true do
+        i = i + 1
+        if i > x then break end
+        if i == 3 then continue end
+        total = total + i
+    end
+    return total
+end
+export sum_until
+
+-- a loop that writes an outer place behind its back (through a reference
+-- taken before the loop): the place becomes memory, the loop is redone
+local add_to = do(r: Ref U32, k: U32): Unit
+    r = r + k
+end
+local hidden = do(n: U32): U32
+    local total: U32 = 0
+    local r = Ref(total)
+    for i: U32 = 1, n do
+        add_to(r, i)
+    end
+    return total
+end
+export hidden
+
+-- state the loop mentions is carried explicitly, structs included
+local Pair = struct { a: U32, b: U32 }
+local fib_pair = do(n: U32): U32
+    local p: Pair = Pair { a = 0, b = 1 }
+    for i: U32 = 1, n do
+        p = Pair { a = p.b, b = p.a + p.b }
+    end
+    return p.a * 1000 + p.b
+end
+export fib_pair

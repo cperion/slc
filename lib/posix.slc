@@ -1,0 +1,169 @@
+-- POSIX and Linux as activities.
+--
+-- In Unix everything is a file descriptor with a lifetime, which is an
+-- activity: open, run the body, close. Mappings are views that cannot outlive
+-- their munmap, failures are sums, kernel constants and struct layouts come
+-- from the system headers, and everything is evaluated in place.
+--
+--     local px = import "posix"
+--     ...
+--         local px...
+--         with_fd(path, O_RDONLY) do(fd...) ... end { done() = ..., failed(e) = ... }
+
+local fcntl = "<fcntl.h>"
+local unistd = "<unistd.h>"
+local mman = "<sys/mman.h>"
+local epoll_h = "<sys/epoll.h>"
+
+-- constants: their values come from the headers
+local O_RDONLY = cconst("O_RDONLY", I32, fcntl)
+local O_WRONLY = cconst("O_WRONLY", I32, fcntl)
+local O_RDWR   = cconst("O_RDWR",   I32, fcntl)
+local O_CREAT  = cconst("O_CREAT",  I32, fcntl)
+local O_TRUNC  = cconst("O_TRUNC",  I32, fcntl)
+local ENOENT   = cconst("ENOENT",   I32, "<errno.h>")
+local PROT_READ   = cconst("PROT_READ",   I32, mman)
+local MAP_PRIVATE = cconst("MAP_PRIVATE", I32, mman)
+local MAP_FAILED  = cconst("MAP_FAILED",  Ptr U8, mman)
+local EPOLLIN       = cconst("EPOLLIN",       U32, epoll_h)
+local EPOLL_CTL_ADD = cconst("EPOLL_CTL_ADD", I32, epoll_h)
+
+local errno = cread("errno", I32, "<errno.h>")
+
+-- structs: their layouts come from the headers; we name the fields we use
+local Stat = cstruct("struct stat", "<sys/stat.h>", { { "size", I64, "st_size" } })
+local Event = cstruct("struct epoll_event", epoll_h, {
+    { "events", U32 },
+    { "fd", I32, "data.fd" },
+})
+
+-- the calls
+local c_open   = extern("open",  { CString, I32 }, I32, { header = fcntl, variadic = true })
+local c_close  = extern("close", { I32 }, I32, { header = unistd })
+local c_read   = extern("read",  { I32, Ptr U8, U64 }, I64, { header = unistd })
+local c_write  = extern("write", { I32, Ptr U8, U64 }, I64, { header = unistd })
+local c_write_text = extern("write", { I32, CString, U64 }, I64, { header = unistd })
+local c_fstat  = extern("fstat", { I32, Ptr Stat }, I32, { header = "<sys/stat.h>" })
+local c_mmap   = extern("mmap",  { Ptr U8, U64, I32, I32, I32, I64 }, Ptr U8, { header = mman })
+local c_munmap = extern("munmap", { Ptr U8, U64 }, I32, { header = mman })
+local c_eventfd = extern("eventfd", { U32, I32 }, I32, { header = "<sys/eventfd.h>" })
+local c_epoll_create1 = extern("epoll_create1", { I32 }, I32, { header = epoll_h })
+local c_epoll_ctl  = extern("epoll_ctl",  { I32, I32, I32, Ptr Event }, I32, { header = epoll_h })
+local c_epoll_wait = extern("epoll_wait", { I32, Ptr Event, I32, I32 }, I32, { header = epoll_h })
+
+-- an activity's outcome: done, or the errno it failed with
+local Outcome = oneof { done: Unit, failed: I32 }
+
+-- file descriptors -------------------------------------------------------------------------------
+
+-- the vocabulary inside with_fd; `error` holds the first failure, which the
+-- activity reports as its outcome
+local Fd = struct { fd: I32, error: I32 }
+
+-- record a failed call's errno
+function Fd:checked(n: I64): I64
+    if n < 0 and self.error == 0 then
+        self.error = errno()
+    end
+    return n
+end
+
+-- text known while specializing: its length is too
+function Fd:write_text(s): Unit
+    self:checked(c_write_text(self.fd, s, U64(#s)))
+end
+
+function Fd:write_bytes(p: Ptr U8, n: U64): I64
+    return self:checked(c_write(self.fd, p, n))
+end
+
+function Fd:read_bytes(p: Ptr U8, n: U64): I64
+    return self:checked(c_read(self.fd, p, n))
+end
+
+-- the size of the open file
+function Fd:size(): I64
+    local st: Stat = Stat { size = I64(0) }
+    if c_fstat(self.fd, Ptr(st)) ~= 0 then
+        return I64(-1)
+    end
+    return st.size
+end
+
+-- a mapping of the file's first n bytes, as a read-only view that ends with the
+-- activity; false if it could not be mapped
+function Fd:mapped(n: U32, body): Bool
+    local p: Ptr U8 = c_mmap(null(U8), U64(n), PROT_READ, MAP_PRIVATE, self.fd, I64(0))
+    if p == MAP_FAILED then
+        return false
+    end
+    view_of(p, n, body)
+    c_munmap(p, U64(n))
+    return true
+end
+
+-- open, run the body, close
+local with_fd = do(path: CString, flags: I32, body): Outcome
+    local fd: I32 = c_open(path, flags, U32(420))      -- 0644 for created files
+    if fd < 0 then
+        return Outcome.failed(errno())
+    end
+    local file: Fd = Fd { fd = fd, error = 0 }
+    body(Ref(file))
+    c_close(fd)
+    if file.error ~= 0 then
+        return Outcome.failed(file.error)
+    end
+    return Outcome.done()
+end
+
+-- events -----------------------------------------------------------------------------------------
+
+-- an eventfd: a kernel counter that is a file descriptor
+local with_eventfd = do(body): Outcome
+    local fd: I32 = c_eventfd(U32(0), 0)
+    if fd < 0 then
+        return Outcome.failed(errno())
+    end
+    local file: Fd = Fd { fd = fd, error = 0 }
+    body(Ref(file))
+    c_close(fd)
+    if file.error ~= 0 then
+        return Outcome.failed(file.error)
+    end
+    return Outcome.done()
+end
+
+-- the vocabulary inside with_epoll
+local Poll = struct { epfd: I32 }
+
+function Poll:watch(fd: I32): I32
+    local ev: Event = Event { events = EPOLLIN, fd = fd }
+    return c_epoll_ctl(self.epfd, EPOLL_CTL_ADD, fd, Ptr(ev))
+end
+
+-- the descriptor that became ready, or -1 when the timeout passed
+function Poll:next_ready(timeout_ms: I32): I32
+    local ev: Event = Event { events = U32(0), fd = -1 }
+    if c_epoll_wait(self.epfd, Ptr(ev), 1, timeout_ms) <= 0 then
+        return -1
+    end
+    return ev.fd
+end
+
+local with_epoll = do(body): Outcome
+    local epfd: I32 = c_epoll_create1(0)
+    if epfd < 0 then
+        return Outcome.failed(errno())
+    end
+    local poll: Poll = Poll { epfd = epfd }
+    body(Ref(poll))
+    c_close(epfd)
+    return Outcome.done()
+end
+
+return {
+    O_RDONLY = O_RDONLY, O_WRONLY = O_WRONLY, O_RDWR = O_RDWR, O_CREAT = O_CREAT, O_TRUNC = O_TRUNC,
+    ENOENT = ENOENT, Outcome = Outcome, Fd = Fd, Poll = Poll, Stat = Stat, Event = Event,
+    with_fd = with_fd, with_eventfd = with_eventfd, with_epoll = with_epoll,
+}

@@ -1,0 +1,87 @@
+local function fact(n: U32): U32
+    if n <= 1 then return 1 end
+    return n * fact(n - 1)
+end
+assert(host(fact(10)) == 3628800)
+export fact
+
+local abs = extern("abs", { I32 }, I32, { header = "<stdlib.h>" })
+local dist = do(a: I32, b: I32): I32 = abs(a - b)
+export dist
+
+local mixed_loop = do(x: U32): U32
+    local acc: U32 = 1
+    for i: U32 = 1, 4 do
+        if i == 3 then acc = acc + x else acc = acc * 2 end
+    end
+    return acc
+end
+export mixed_loop
+
+local pick = do(a: U32): U32 = a  -- rule 3: f 21 {1} is f(21)({1})
+local chain = do(x: U32): U32
+    local t = { 5 }
+    local f = do(k) return do(tb) return k + tb[1] end end
+    return pick(f 21 {1} + x)
+end
+export chain
+
+-- §8 programs as written in the spec
+local snapshot = do(x: U32): U32
+    local y: U32 = x * 3
+    if x > 10 then
+        y = y + 1
+    end
+    local a = y
+    y = y * 2
+    return a + y
+end
+export snapshot
+
+local function steps(k: U32, x: U32): U32
+    if x == 0 then return k end
+    return steps(k + 1, x - 1)
+end
+local walk = do(x: U32): U32 = steps(dynamic(U32(0)), x)
+export walk
+
+local Counter = struct {
+    value: U32,
+}
+function Counter:add(n: U32): Unit
+    self.value = self.value + n
+end
+export Counter.add as "counter_add"
+
+local use = do(flag: Bool, x: U32): U32
+    local choose = do(enabled: Bool, k: U32, y: U32): U32
+        if enabled then
+            return y * k
+        end
+        return y + k
+    end
+    return choose(flag, 8, x)
+end
+export use
+
+-- §7.5 / §9.2: rebinding in known branches and host loops is fine
+local gen = do(mode)
+    return do(x: U32): U32
+        local scale = 1
+        if mode == "double" then
+            scale = 2
+        end
+        local enabled: Bool = true
+        local extra = 0
+        if enabled then
+            extra = 10
+        end
+        local n = 0
+        while n < 3 do
+            n = n + 1
+        end
+        return x * scale + extra + n
+    end
+end
+local d = gen "double"
+export d
