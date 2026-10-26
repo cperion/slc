@@ -14,18 +14,10 @@ LuaJIT) constructs and specializes native code; `export name` materializes a
 word as a C function. Only what the exports reach is emitted.
 ]==]
 
-local here = arg and arg[0] and arg[0]:match('^(.*)[/\\][^/\\]*$') or '.'
+-- Resolve the project tree from this module, not the embedding application's arg.
+local source = debug.getinfo(1, 'S').source
+local here = source:match('^@(.*)[/\\][^/\\]*$') or '.'
 package.path = here .. '/?.lua;' .. package.path
-
--- LuaMacro's modules are bundled in luam.lua, ahead of its command line
-do
-    local f = assert(io.open(here .. '/luam.lua'))
-    local src = f:read '*a'
-    f:close()
-    local cut = src:find('\n%-%- BEGIN luam')
-    src = src:sub(1, cut):gsub('^#![^\n]*', '')
-    assert(loadstring(src, '@luam.lua'))()
-end
 
 local macro = require 'macro'
 require 'macro.builtin'

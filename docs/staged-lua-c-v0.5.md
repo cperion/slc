@@ -3300,6 +3300,8 @@ luajit tests/run.lua                  compile, check and run every example, on b
 
 | Part | File |
 |---|---|
+| LuaMacro engine and source modules | `macro.lua`, `macro/`, `macro/lib/` |
+| Standalone macro CLI | `luam` |
 | Native types | `slc/types.lua` |
 | C-exact folding | `slc/fold.lua` |
 | Values, places, lazy stores, branches, loops, words, materialization | `slc/stage.lua` |

@@ -1,13 +1,13 @@
 # slc — staged Lua → C
 
-A prototype of the language in `docs/staged-lua-c-v0.5.md`: Lua at compile time,
-typed native words specialized by online partial evaluation, Goose-style memory,
-C out.
+Lua for program construction; typed native words, online partial evaluation and
+Goose-style memory for the work that remains. Emit readable C or compile the same
+prepared residual program in process with libgccjit.
 
 ```lua
 local affine = do(a: U32, b: U32, x: U32): U32 = a * x + b
-local transform = affine(4, 3)          -- a word with a = 4, b = 3 bound
-assert(host(affine(4, 3, 10)) == 43)    -- fully known: computed at compile time
+local transform = affine(4, 3)
+assert(host(affine(4, 3, 10)) == 43)
 local entry = do(x: U32): U32 = transform x * 2
 export entry
 ```
@@ -18,42 +18,79 @@ uint32_t entry(uint32_t x) {
 }
 ```
 
-## Use
+Start with [Designing and writing SLC](docs/designing-and-writing-slc.md).
+[The specification](docs/staged-lua-c-v0.5.md) owns the language and ABI rules.
 
-Requires LuaJIT, LPeg (`lua-lpeg`) and a C99 compiler; the gccjit backend also needs libgccjit (13 or later).
+## Requirements
+
+- LuaJIT and LPeg built for **Lua 5.1**, not another Lua ABI.
+- A C99 compiler and POSIX threads for the native runtime/harnesses.
+- libgccjit **13+**, on a 64-bit target, for JIT/native loading (optional for C output).
+- GNU make and `timeout` for the convenience/check targets. Some packaged checks
+  additionally use Clang/ThreadSanitizer or optional platform I/O facilities.
+
+If LPeg is not installed for LuaJIT:
 
 ```sh
-luajit slc.lua program.slc            # print C
-luajit slc.lua -o out.c program.slc   # write C (-H out.h for a header)
-luajit slc.lua -d program.slc         # print the Lua the program becomes
-luajit slc.lua --cc program.slc       # also check the C with -Wall -Wextra -Werror
-luajit slc.lua --gccjit -o out.o p.slc  # compile with libgccjit instead of printing C
-luajit slc.lua run program.slc args   # run it now: compiled into this process by libgccjit
-luajit tests/run.lua                  # every example: compile, strict C, run harness; bad programs
+luarocks --lua-version=5.1 install lpeg
 ```
 
-Programs that use `Store`, `Grow` or `Id` include `runtime/slc_rt.h`; link
-`runtime/slc_rt.c`.
+`make` discovers LuaRocks' Lua 5.1 C path. For direct LuaJIT commands, use
+`luarocks --lua-version=5.1 path` or set `LUA_CPATH` yourself, retaining `;;` for
+LuaJIT's defaults. An LPeg module built for Lua 5.4 is not interchangeable.
 
-## Layout
+```sh
+make doctor
+make test
+make test-native                 # requires libgccjit; not an optional skip
+make run PROGRAM=examples/csv.slc ARGS='examples/data/sales.csv price'
+```
 
-| | |
+The development targets default to two task workers; override with `SLC_WORKERS=N`.
+Generated files, logs and caches go under ignored `build/`. A local libgccjit copy
+may be placed at `.local/lib/libgccjit.so.0`; Make selects it if `SLC_GCCJIT` is unset.
+Otherwise install the platform's libgccjit package or set `SLC_GCCJIT` explicitly.
+No compiler binary or machine-specific dependency is committed.
+
+## Compiler and library
+
+```sh
+luajit slc.lua program.slc                      # print C
+luajit slc.lua -o build/out.c program.slc        # write C (-H build/out.h for declarations)
+luajit slc.lua -d program.slc                   # print staged Lua
+luajit slc.lua -o build/out.c --cc program.slc   # also check strict C
+luajit slc.lua --gccjit -o build/out.o program.slc
+luajit slc.lua run program.slc args             # execute now, with an optional main export
+```
+
+From Lua, `require 'slc'` and call `slc.load(path)` to obtain exports, raw pointers
+and FFI record types. A program can call `native(word)` to specialize on values
+available at startup. See specification §38 for error recovery, code lifetime and
+foreign-library requirements. Direct invocations must have their dependencies on
+the loader paths; Make's environment is not a system-wide installation.
+
+Programs needing data stacks link `runtime/slc_rt.c`. Tasks also need
+`runtime/slc_tasks.c`, `runtime/slc_io_posix.c`, one I/O backend and `-pthread`.
+See the specification for io_uring/kqueue support and validation limits.
+
+## Source layout
+
+| Part | Source |
 |---|---|
-| `slc.lua` | driver |
-| `slc/types.lua` | native types |
-| `slc/fold.lua` | compile-time evaluation with exact C semantics |
-| `slc/stage.lua` | values, places and lazy stores, branches, loops, words, materialization |
-| `slc/memory.lua` | stores, IDs, Grow arrays, data-stack indices |
-| `slc/syntax.lua` | typed-body parser and translation to staged Lua |
-| `slc/cgen.lua` | residual IR to C |
-| `slc/jitgen.lua` | residual IR to libgccjit, mirroring cgen |
-| `slc/cjit.lua` | C's rules over libgccjit, and a reader for the C the compiler contains |
-| `slc/probe.lua` | header constants, foreign layouts and variables for the gccjit backend |
-| `slc/native.lua` | run it now: runtime library, `native(word)`, `slc.load` |
-| `macro/let.lua` | macro.let, extended: name application, typed-lambda hand-off |
-| `macro/slc.lua` | `struct`, `export`, typed `function` |
-| `luam.lua` | LuaMacro 2.5 (bundled, unchanged) |
-| `runtime/` | data stacks, traps, store tokens, slice checks |
-| `lib/` | libraries for `import`: `libc.slc` wraps libc, `posix.slc` the Linux descriptor interface, as activities |
-| `examples/` | every program from the spec, plus stress cases; `activities.slc` for §30, `sums.slc` for §31, `memory_views.slc` for §32, `libc_demo.slc` for §33, `posix_demo.slc` for §34, `atomics.slc` for §35 |
-| `tests/` | C harnesses, rejected programs, the runner |
+| Driver / embedding entry | `slc.lua` |
+| LuaMacro engine | `macro.lua`, `macro/`, `macro/lib/` |
+| SLC application and typed-body hand-off | `macro/let.lua`, `macro/slc.lua` |
+| Standalone source macro CLI | `luam` (`luajit luam -lmacro.let program.lua`) |
+| Native types and exact folding | `slc/types.lua`, `slc/fold.lua` |
+| Specialization, state, words and control | `slc/stage.lua`, `slc/syntax.lua` |
+| Goose storage | `slc/memory.lua` |
+| C / libgccjit backends | `slc/cgen.lua`, `slc/jitgen.lua` |
+| Shared C rules / compiler-owned C reader | `slc/cjit.lua`, `slc/gccjit_h.lua` |
+| Header probes / in-process execution | `slc/probe.lua`, `slc/native.lua` |
+| Runtime / imported libraries | `runtime/`, `lib/` |
+| Examples, fixtures and checks | `examples/`, `tests/` |
+
+The macro layer is project source, **not a runtime bundle**. See
+[its integration notes](docs/luamacro/INTEGRATION.md) and
+[third-party attribution](THIRD_PARTY.md). No new project-wide license is assigned
+by this repository bootstrap.
