@@ -16,4 +16,9 @@ int slc_io_try(slc_op *op);
 int slc_io_offload_file(slc_op *op);
 /* an operation given up on (its deadline passed) releases what it holds */
 void slc_io_abandon(slc_op *op);
+/* Native callback ABI adapters; worker bodies are ordinary SLC. */
+void slc_posix_open_close(slc_op *op);
+void slc_posix_file_io(slc_op *op);
+void slc_posix_submit_open_close(slc_op *op);
+void slc_posix_submit_file(slc_op *op);
 #endif

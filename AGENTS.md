@@ -23,7 +23,41 @@ The local integration bookmark is `master`. Do not create remotes or push withou
 explicit authorization. Keep both tool identities consistent; do not rewrite others'
 authorship or published history.
 
+## SLC source style
+
+- Use inferred local types where the initializer makes the type clear; keep type
+  annotations where the native contract or numeric width needs them.
+- Aggressively prefer same-line, parenthesis-free calls where the grammar permits
+  them: `Ref h`, `U64 value`, `round h`, `hash.init k0 k1`. This applies beyond
+  unary calls. Keep parentheses only for required grouping or disambiguation;
+  do not mechanically write Lua/C-style call parentheses in SLC code.
+
 ## Architecture
+
+- **SLC-first, consistently across all features.** Implement every expressible
+  feature and library algorithm in ordinary SLC words, so it specializes and
+  residualizes with the calling program. This applies to existing features as
+  well as new ones; compiler-side Lua and generated C are not the default place
+  for library behavior. "Runtime" describes when an operation executes, not
+  which language implements it: SLC runtime algorithms must be able to fold,
+  specialize and residualize together with the program. Thin SLC wrappers around
+  opaque C algorithms do not meet this requirement.
+- Lua supplies type construction, host metaprogramming and the minimal compiler
+  primitives. Keep C limited to genuinely necessary runtime/platform mechanisms.
+  Do not hide an expressible algorithm in C or Lua merely because that is easier
+  to implement. Backend inlining is not a substitute for SLC specialization.
+- When a feature cannot yet be expressed in SLC, identify the precise missing
+  primitive and add the smallest general capability needed; do not grow a
+  feature-specific compiler subsystem. Review older features against this rule
+  as they are touched. Correct architectural drift before extending it.
+- Prioritize language design and implementation. Use focused checks while
+  developing; do not repeatedly run broad validation campaigns instead of making
+  feature progress. Run the relevant acceptance checks at coherent milestones.
+- Work in substantial, end-to-end feature milestones, not one-helper migrations.
+  Keep small implementation steps internal; do not stop for a report, checkpoint,
+  or repeated C/JIT campaign after each helper. Complete a coherent subsystem
+  before milestone validation/reporting, unless a concrete blocker or a material
+  user-owned decision requires interruption.
 
 - Lua supplies host values, closures and generators. Native types determine native
   semantics; knownness determines binding time.

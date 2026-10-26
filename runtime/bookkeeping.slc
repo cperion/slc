@@ -1,0 +1,109 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Scheduler lists, timer completion and worker configuration. Callers retain
+-- the enclosing scheduler/job mutex transaction and native thread boundaries.
+return function(t)
+    local Task, Op, Heap = t.Task, t.Op, t.Heap
+    local h = '"slc_scheduler.h"'
+    local Cond = cstruct("pthread_cond_t", "<pthread.h>", {})
+    local Idler = cstruct("struct idler", h, function(Self)
+        return { { "cv", Cond }, { "next", Ptr Self }, { "listed", I32 } }
+    end)
+    local Job = cstruct("struct bjob", h, function(Self) return { { "next", Ptr Self } } end)
+    local signal = extern("pthread_cond_signal", { Ptr Cond }, I32, { header = "<pthread.h>" })
+    local wake = extern("slc_wake_locked", { Ptr Task }, Unit, { header = h })
+    local slc_idler_signal = do(head: Ptr(Ptr Idler)): Unit
+        local thread = head[0]
+        if thread == null Idler then return end
+        head[0] = thread.next
+        thread.listed = 0
+        signal(Ptr thread.cv)
+    end
+    local slc_idler_enqueue = do(head: Ptr(Ptr Idler), thread: Ptr Idler): Unit
+        if thread.listed ~= 0 then return end
+        thread.next = head[0]
+        head[0] = thread
+        thread.listed = 1
+    end
+    local slc_idler_remove = do(head: Ptr(Ptr Idler), thread: Ptr Idler): Unit
+        if thread.listed == 0 then return end
+        local p = head
+        while p[0] ~= null Idler and p[0] ~= thread do p = Ptr p[0].next end
+        if p[0] ~= null Idler then p[0] = thread.next end
+        thread.listed = 0
+    end
+    local slc_task_attach = do(head: Ptr(Ptr Task), task: Ptr Task): Unit
+        task.scope.live = task.scope.live + 1
+        task.all_next = head[0]
+        if head[0] ~= null Task then head[0].all_prev = task end
+        head[0] = task
+    end
+    local slc_task_detach = do(head: Ptr(Ptr Task), task: Ptr Task): Ptr Task
+        if task.all_prev ~= null Task then task.all_prev.all_next = task.all_next else head[0] = task.all_next end
+        if task.all_next ~= null Task then task.all_next.all_prev = task.all_prev end
+        local scope = task.scope
+        scope.live = scope.live - 1
+        if scope.live == 0 and scope.waiter ~= null Task and t.claim(scope.waiter) then return scope.waiter end
+        return null Task
+    end
+    local slc_blocked_remove = do(head: Ptr(Ptr Task), task: Ptr Task): Unit
+        local p = head
+        while p[0] ~= null Task and p[0] ~= task do p = Ptr p[0].next end
+        if p[0] ~= null Task then p[0] = task.next end
+    end
+    local slc_job_enqueue = do(head: Ptr(Ptr Job), tail: Ptr(Ptr Job), job: Ptr Job): Unit
+        job.next = null Job
+        if tail[0] ~= null Job then tail[0].next = job else head[0] = job end
+        tail[0] = job
+    end
+    local slc_job_dequeue = do(head: Ptr(Ptr Job), tail: Ptr(Ptr Job)): Ptr Job
+        local job = head[0]
+        head[0] = job.next
+        if head[0] == null Job then tail[0] = null Job end
+        return job
+    end
+    local slc_timer_fire = do(heap: Ptr Heap, time: U64): Bool
+        local fired = Bool false
+        while heap.len ~= 0 and heap.data[0].deadline <= time do
+            local op = heap.data[0]
+            t.remove heap op
+            fired = true
+            if t.claim(op.task) then
+                op.task.result = t.result op 0
+                wake op.task
+            end
+        end
+        return fired
+    end
+    local Char = opaque "char"
+    local CP, BP = Ptr Char, Ptr U8
+    local getenv = extern("getenv", { CString }, CP, { header = "<stdlib.h>" })
+    local strtol = extern("strtol", { CP, Ptr CP, I32 }, I64, { header = "<stdlib.h>" })
+    local strtoull = extern("strtoull", { CP, Ptr CP, I32 }, U64, { header = "<stdlib.h>" })
+    local sysconf = extern("sysconf", { I32 }, I64, { header = "<unistd.h>" })
+    local processors = cconst("_SC_NPROCESSORS_ONLN", I32, "<unistd.h>")
+    local start_worker = extern("slc_worker_start", {}, Unit, { header = h })
+    local slc_workers_init = do(mode: Ptr I32, rng: Ptr U64): Unit
+        local seed = getenv "SLC_SCHED_SEED"
+        local workers = getenv "SLC_WORKERS"
+        if seed ~= null Char and (BP seed)[0] ~= 0 then
+            mode[0] = 1
+            rng[0] = strtoull(seed, null CP, 10) * 2654435761 + 1
+            return
+        end
+        local n = I64 0
+        if workers ~= null Char then n = strtol(workers, null CP, 10) else n = sysconf processors end
+        if n < 1 then n = 1 end
+        local i = I64 0
+        while i < n do start_worker(); i = i + 1 end
+    end
+    export slc_idler_signal
+    export slc_idler_enqueue
+    export slc_idler_remove
+    export slc_task_attach
+    export slc_task_detach
+    export slc_blocked_remove
+    export slc_job_enqueue
+    export slc_job_dequeue
+    export slc_timer_fire
+    export slc_workers_init
+end

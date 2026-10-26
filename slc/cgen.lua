@@ -51,11 +51,22 @@ local CHILD_BLOCKS = { 'a', 'b', 'body' }
 local function walk_expr(e, f)
     if type(e) ~= 'table' then return end
     f(e)
-    for _, k in ipairs { 'a', 'b', 'e', 'ptr' } do
+    for _, k in ipairs { 'a', 'b', 'e', 'ptr', 'i', 'n', 'idx', 'slot' } do
         local c = e[k]
         if type(c) == 'table' and c.op then walk_expr(c, f) end
     end
     if e.args then for _, a in ipairs(e.args) do walk_expr(a, f) end end
+    if e.items then
+        for _, item in ipairs(e.items) do
+            for _, k in ipairs { 'kind', 'chan', 'buf', 'ns' } do
+                if type(item[k]) == 'table' then walk_expr(item[k], f) end
+            end
+        end
+    end
+    -- an operation that takes the address of a place uses it, exactly like addr
+    if e.expected_place then
+        walk_expr({ op = 'addr', place = e.expected_place, T = e.T }, f)
+    end
     if e.fields then for _, a in pairs(e.fields) do walk_expr(a, f) end end
     if e.place then
         -- a place can hide a pointer expression (deref of a parameter)
@@ -71,7 +82,7 @@ local function walk_expr(e, f)
     end
 end
 
-local STMT_EXPRS = { 'e', 'c', 'lo', 'hi' }
+local STMT_EXPRS = { 'e', 'c', 'lo', 'hi', 'i', 'n', 'a', 'b', 'slot' }
 
 local function walk_block(blk, fs, fe)
     for _, s in ipairs(blk) do
@@ -306,6 +317,7 @@ local function dead_stores(body)
                     and not readers[root(s.place)] then
                     local effectful = false
                     walk_expr(s.e, function(x)
+                        if x.op == 'atomic' or x.op == 'slot_at' then effectful = true end
                         if (x.op == 'call' and not (x.ext and x.ext.variable)) or (x.op == 'rt' and not x.pure) then
                             effectful = true
                         end
@@ -331,13 +343,16 @@ end
 local function inline_temps(body)
     local uses = {}
     walk_block(body, nil, function(e)
-        if e.op == 'read' and e.place.pk == 'temp' then uses[e.place] = (uses[e.place] or 0) + 1 end
+        -- a place whose address is taken is used there too: it cannot move
+        if (e.op == 'read' or e.op == 'addr') and e.place.pk == 'temp' then
+            uses[e.place] = (uses[e.place] or 0) + 1
+        end
     end)
     local function stable(e)
         -- every other leaf must keep its value across the call
         local ok = true
         walk_expr(e, function(x)
-            if x.op == 'call' then ok = false
+            if x.op == 'call' or x.op == 'atomic' or x.op == 'slot_at' then ok = false
             elseif x.op == 'read' or x.op == 'addr' then
                 local r = root(x.place)
                 if memory(r) or rawp(r, 'escaped') then ok = false end
@@ -555,6 +570,11 @@ local PREC = {
     lor = 4, land = 5, bor = 6, bxor = 7, band = 8, eq = 9, rel = 10, shift = 11,
     add = 12, mul = 13, unary = 14, postfix = 15, atom = 16,
 }
+-- The C type a varargs argument is promoted to (C's default argument promotions).
+-- The jitgen backend converts to the matching gccjit type from the same names.
+G.VACONV = { int = 'int', uint = 'unsigned', llong = 'long long', ullong = 'unsigned long long',
+             double = 'double' }
+local VACONV = G.VACONV
 local BIN = {
     add = { '+', 'add' }, sub = { '-', 'add' }, mul = { '*', 'mul' }, div = { '/', 'mul' },
     mod = { '%', 'mul' }, band = { '&', 'band' }, bor = { '|', 'bor' }, bxor = { '^', 'bxor' },
@@ -696,6 +716,11 @@ function Fn:expr(e, need)
         local inner = self:expr(e.a, PREC.unary)
         if sym == '-' and inner:sub(1, 1) == '-' then inner = '(' .. inner .. ')' end
         return paren(sym .. inner, PREC.unary, need)
+    elseif op == 'cconst' then
+        -- a header constant: the C name itself, its value supplied by the header
+        return e.cconst
+    elseif op == 'stack_index' then
+        return e.offset == 0 and 'gs_sp' or paren('gs_sp + ' .. e.offset, PREC.add, need)
     elseif op == 'conv' then
         return paren('(' .. ctype(e.T) .. ')' .. self:expr(e.a, PREC.unary), PREC.unary, need)
     elseif op == 'field' then
@@ -712,7 +737,7 @@ function Fn:expr(e, need)
         return paren('(' .. ctype(e.T) .. '){ .e = { ' .. table.concat(parts, ', ') .. ' } }', PREC.postfix, need)
     elseif op == 'agg' then
         local parts = {}
-        for _, f in ipairs(e.T.fields) do
+        for _, f in ipairs((e.T.native_layout and e.T.native_layout() or e.T).fields) do
             parts[#parts + 1] = '.' .. G.cfield(e.T, f.name) .. ' = ' .. self:expr(e.fields[f.name], 2)
         end
         return paren('(' .. ctype(e.T) .. '){ ' .. table.concat(parts, ', ') .. ' }', PREC.postfix, need)
@@ -735,14 +760,61 @@ function Fn:expr(e, need)
             table.insert(args, 1, off == 0 and 'gs_sp' or ('gs_sp + ' .. off))
         end
         return name .. '(' .. table.concat(args, ', ') .. ')'
-    elseif op == 'rt' then
-        -- a runtime-library expression: text with operand slots
+    elseif op == 'atomic' then
+        local ptr = self:expr(e.ptr, 2)
+        local local_args, args = e.args or {}, {}
+        for i, a in ipairs(local_args) do args[i] = self:expr(a, 2) end
+        local builtin
+        if e.o == 'load' then
+            builtin = '__atomic_load_n(' .. ptr .. ', ' .. e.order .. ')'
+        elseif e.o == 'store' then
+            builtin = '__atomic_store_n(' .. ptr .. ', ' .. args[1] .. ', ' .. e.order .. ')'
+        elseif e.o == 'exchange' then
+            builtin = '__atomic_exchange_n(' .. ptr .. ', ' .. args[1] .. ', ' .. e.order .. ')'
+        elseif e.o == 'cas' then
+            builtin = '__atomic_compare_exchange_n(' .. ptr .. ', &' .. self:place_text(e.expected_place, PREC.unary)
+                .. ', ' .. args[1] .. ', false, ' .. e.order .. ', ' .. e.fail_order .. ')'
+        elseif e.o == 'fetch_add' then
+            builtin = '__atomic_fetch_add(' .. ptr .. ', ' .. args[1] .. ', ' .. e.order .. ')'
+        elseif e.o == 'fetch_sub' then
+            builtin = '__atomic_fetch_sub(' .. ptr .. ', ' .. args[1] .. ', ' .. e.order .. ')'
+        else
+            error('cgen: unknown atomic operation ' .. tostring(e.o))
+        end
+        return paren(builtin, PREC.postfix, need)
+    elseif op == 'vaconv' then
+        return paren('(' .. VACONV[e.abi] .. ')' .. self:expr(e.a, PREC.unary), PREC.unary, need)
+    elseif op == 'sizeof' then
+        return paren('(uint64_t)sizeof(' .. ctype(e.sizeof) .. ')', PREC.unary, need)
+    elseif op == 'array_index' then
+        return paren(self:expr(e.a, PREC.postfix) .. '.e[' .. self:expr(e.idx, 2) .. ']', PREC.postfix, need)
+    elseif op == 'slot_at' then
+        local task = self.task_mode and '&f->task' or 'slc_tk'
+        return paren('(' .. ctype(e.T) .. ')slc_slot_at(' .. task .. ', ' .. self:expr(e.slot, 2) .. ')',
+            PREC.unary, need)
+    elseif op == 'case_array' then
+        -- the first_of case list: one compound literal, decayed to a pointer
+        local parts = {}
+        for i, c in ipairs(e.items) do
+            local function v(x) return x and self:expr(x, 2) or nil end
+            local kind = self:expr(c.kind, 2)
+            local chan = v(c.chan) or '{ 0, 0 }'
+            local buf = v(c.buf) or 'NULL'
+            local ns = v(c.ns) or '0ull'
+            parts[i] = ('{ %s, %s, %s, %s }'):format(kind, chan, buf, ns)
+        end
+        return paren('(slc_case[]){ ' .. table.concat(parts, ', ') .. ' }', PREC.postfix, need)
+    elseif op == 'rtcall' then
+        -- a runtime call: the name and its arguments, printed as C
         local args = {}
-        for i, a in ipairs(e.args or {}) do args[i] = self:expr(a, e.slot_prec or 2) end
-        local s = e.text:gsub('%$(%d+)', function(i) return args[tonumber(i)] end)
-        s = s:gsub('%$P', function() return self:place_text(e.place, PREC.postfix) end)
-        s = s:gsub('%$T', self.task_mode and '&f->task' or 'slc_tk')
-        return paren(s, e.prec or PREC.postfix, need)
+        for i, a in ipairs(e.args or {}) do args[i] = self:expr(a, 2) end
+        return e.cname .. '(' .. table.concat(args, ', ') .. ')'
+    elseif op == 'task' then
+        -- the waiting party: the running task's record, or the plain thread
+        return self.task_mode and paren('&f->task', PREC.unary, need) or 'slc_tk'
+    elseif op == 'ops' then
+        -- its operation records, one per outstanding wait
+        return self.task_mode and 'f->ops' or 'slc_ops'
     end
     error('cgen: unknown expression ' .. tostring(op))
 end
@@ -984,6 +1056,8 @@ function Fn:stmt(s)
         self:line((self.task_mode and 'f->' or '') .. s.name .. ' = ' .. self:expr(s.e, 2) .. ';')
     elseif op == 'wait' then
         self:wait(s)
+    elseif op == 'spawn' then
+        self:spawn(s)
     elseif op == 'label' then
         if self.real_labels[s.label] and not self.loop_tops[s.label] then
             self.indent = self.indent - 1
@@ -992,28 +1066,31 @@ function Fn:stmt(s)
         end
     elseif op == 'nop' then
         return
-    elseif op == 'rt' then
-        -- a runtime-library statement
-        local args = {}
-        for i, a in ipairs(s.args or {}) do args[i] = self:expr(a, 2) end
-        if s.task then
-            -- a spawn: a zeroed frame, the copies, then the task may run
-            local t = s.task.alias or s.task
-            local parts = { ('{ %s *slc_t = (%s *)slc_spawn(%s, sizeof(%s), %s);'):format(
-                t.task_frame, t.task_frame, args[1], t.task_frame, t.task_step) }
-            for i, p in ipairs(s.task.params) do parts[#parts + 1] = ('slc_t->%s = %s;'):format(p.name, args[i + 1]) end
-            parts[#parts + 1] = 'slc_start(&slc_t->task); }'
-            self:line(table.concat(parts, ' '))
-            return
-        end
-        local text = s.text:gsub('%$(%d+)', function(i) return args[tonumber(i)] end)
-        text = text:gsub('%$P', function() return self:place_text(s.place, PREC.postfix) end)
-        text = text:gsub('%$T', self.task_mode and '&f->task' or 'slc_tk')
-        if self.task_mode then text = text:gsub('gs_top(%d+)', 'f->gs_top%1') end
-        self:line(text)
+    elseif op == 'fence' then
+        self:line('__atomic_thread_fence(' .. s.order .. ');')
+    elseif op == 'trap' then
+        self:line('slc_trap(' .. self:expr(s.msg, 2) .. ');')
+    elseif op == 'gs_reset' then
+        local at = s.k == 0 and 'gs_sp' or ('gs_sp + ' .. s.k)
+        local top = self.task_mode and ('f->gs_top' .. s.k) or ('gs_top' .. s.k)
+        self:line('slc_gs_reset(' .. at .. ', ' .. top .. ');')
+    elseif op == 'spawn' then
+        self:spawn(s)
     else
         error('cgen: unknown statement ' .. tostring(op))
     end
+end
+
+-- a spawn: a zeroed frame, the copies, then the task may run
+function Fn:spawn(s)
+    local args = {}
+    for i, a in ipairs(s.args or {}) do args[i] = self:expr(a, 2) end
+    local t = s.task.alias or s.task
+    local parts = { ('{ %s *slc_t = (%s *)slc_spawn(%s, sizeof(%s), %s);'):format(
+        t.task_frame, t.task_frame, args[1], t.task_frame, t.task_step) }
+    for i, p in ipairs(t.params) do parts[#parts + 1] = ('slc_t->%s = %s;'):format(p.name, args[i + 1]) end
+    parts[#parts + 1] = 'slc_start(&slc_t->task); }'
+    self:line(table.concat(parts, ' '))
 end
 
 -- a wait: in a task, suspend and resume here; in plain code, block
@@ -1030,12 +1107,9 @@ function Fn:wait(s)
         self.indent = self.indent + 1
         return
     end
-    local args = {}
-    for i, a in ipairs(s.args) do args[i] = self:expr(a, 2) end
-    local T, O = 'slc_tk', 'slc_ops'
-    if self.task_mode then T, O = '&f->task', 'f->ops' end
+    -- a blocking block first: its statements become a function over the frame,
+    -- and the call names it
     if s.body then
-        -- a blocking block: its statements become a function over the frame
         self.blocking_n = (self.blocking_n or 0) + 1
         local name = self.step_name .. '_blocking' .. self.blocking_n
         local out, indent = self.out, self.indent
@@ -1044,8 +1118,17 @@ function Fn:wait(s)
         self.blocking_fns[#self.blocking_fns + 1] = { name = name, lines = self.out }
         self.out, self.indent = out, indent
     end
-    local fmt = s.body and s.fmt:gsub('%$F', self.step_name .. '_blocking' .. self.blocking_n) or s.fmt
-    local call = fmt:gsub('%$T', T):gsub('%$O', O):gsub('%$(%d+)', function(i) return args[tonumber(i)] end)
+    local args = {}
+    for i, a in ipairs(s.args) do
+        if a.op == 'block_fn' then
+            args[i] = self.step_name .. '_blocking' .. self.blocking_n
+        elseif a.op == 'block_env' then
+            args[i] = 'f'
+        else
+            args[i] = self:expr(a, 2)
+        end
+    end
+    local call = s.callee.cname .. '(' .. table.concat(args, ', ') .. ')'
     local used = self.reads[s.result]
     if self.task_mode then
         local k = #self.resumes + 1
@@ -1182,8 +1265,7 @@ local function stack_exits(fn)
     local function restores()
         local out = {}
         for k = 0, n - 1 do
-            out[#out + 1] = { op = 'rt', text = ('slc_gs_reset(%s, gs_top%d);'):format(
-                k == 0 and 'gs_sp' or ('gs_sp + ' .. k), k) }
+            out[#out + 1] = { op = 'gs_reset', k = k }
         end
         return out
     end
@@ -1386,10 +1468,13 @@ local function collect_structs(fns)
     local function visit(t)
         if not t or seen[t] then return end
         if t.kind == 'ref' or t.kind == 'ptr' or t.kind == 'id' or t.kind == 'store'
-            or t.kind == 'grow' then
+            or t.kind == 'grow' or t.kind == 'map' or t.kind == 'strmap' then
             if t.kind ~= 'ref' and t.kind ~= 'ptr' then
                 seen[t] = true
+                local native = t.native_layout and t.native_layout() or t.representation
+                if native then visit(native) end
                 if t.elem then visit(t.elem) end
+                if t.kind == 'map' or t.kind == 'strmap' then visit(t.key); visit(t.lookup); visit(t.entry) end
                 if t.kind == 'store' then visit(require('slc.memory').Id(t.elem)) end
                 order[#order + 1] = t
                 return
@@ -1418,6 +1503,7 @@ local function collect_structs(fns)
         for _, p in ipairs(fn.params) do visit(p.T) end
         walk_block(fn.body, nil, function(e)
             if e.T then visit(e.T) end
+            if e.sizeof then visit(e.sizeof) end
             if e.place then visit(root(e.place).T); visit(e.place.T) end
         end)
     end
@@ -1486,8 +1572,26 @@ function G.emit(mod, opts)
         end
     end
     if need_math then out[#out + 1] = '#include <math.h>' end
-    local headers = {}
+    -- Headers of every foreign call the residual program makes, including calls
+    -- in words inlined from a library module: their declarations belong here too.
+    local headers, externs = {}, {}
+    for _, x in ipairs(mod.externs) do externs[#externs + 1] = x end
+    for _, fn in ipairs(fns) do
+        walk_block(fn.body, nil, function(e)
+            if e.op == 'call' and e.ext and e.ext.header and not externs[e.ext] then
+                externs[e.ext] = true
+                externs[#externs + 1] = e.ext
+            end
+        end)
+    end
     for _, x in ipairs(mod.externs) do
+        if x.header and not headers[x.header] then
+            headers[x.header] = true
+            out[#out + 1] = '#include ' .. x.header
+        end
+    end
+    for i = #mod.externs + 1, #externs do
+        local x = externs[i]
         if x.header and not headers[x.header] then
             headers[x.header] = true
             out[#out + 1] = '#include ' .. x.header

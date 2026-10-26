@@ -1,0 +1,25 @@
+-- Construction is a value algorithm: the same capacity check and copy loop
+-- specialize for known bytes or residualize for runtime text.
+local chars = {}
+local constructors = {}
+local trap = extern("slc_trap", { CString }, Unit)
+
+function chars.from(T)
+    if constructors[T] then return constructors[T] end
+    local capacity = T.chars_cap
+    local from = do(text: Str): T
+        if text.length > capacity then trap("text longer than its Chars(n)") end
+        local out: T = T()
+        out.len = text.length
+        local i: U32 = 0
+        while i < text.length do
+            out.bytes[i] = text[i]
+            i = i + 1
+        end
+        return out
+    end
+    constructors[T] = from
+    return from
+end
+
+return chars

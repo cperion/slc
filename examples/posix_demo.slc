@@ -1,6 +1,6 @@
 -- POSIX and Linux as activities (lib/posix.slc).
 
-local px = import "posix"
+local px = require "slc.posix"
 
 -- write a file; the outcome is a sum, matched right where the activity ends
 local make_file = do(path: CString): I32

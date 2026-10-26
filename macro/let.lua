@@ -112,7 +112,8 @@ function lexer.scan_lua_tokenlist (input)
     -- LuaJIT's 64-bit integer literals (42ULL, 7LL) are one number token
     for i = #tokens - 1, 1, -1 do
         local a, b = tokens[i], tokens[i + 1]
-        if a[1] == 'number' and b[1] == 'iden' and INT64_SUFFIX[b[2]] and a[2]:match '^%d+$' then
+        if a[1] == 'number' and b[1] == 'iden' and INT64_SUFFIX[b[2]]
+            and (a[2]:match '^%d+$' or a[2]:match '^0[xX]%x+$') then
             a[2] = a[2] .. b[2]
             table.remove(tokens, i + 1)
         end

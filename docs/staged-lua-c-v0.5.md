@@ -29,10 +29,10 @@ The resolutions, in the order they matter:
 14. **Activities, opening and spread (§30)**, after Let's design guide and `spread.md`: untyped lambdas in typed bodies are callbacks evaluated in place; untyped parameters of native words are compile-time parameters; saturating chains; `do(ctx...)`, `local ctx...` and live field places; keyed spread, rest packs and ordered spread; `endall`.
 15. **Sums and matching (§31)**, after Let's `syntax.md` §8.1: `oneof`, constructors, matching as keyed application with exhaustive handlers; a known tag selects its handler while specializing, a runtime tag becomes a test per alternative printed as a `switch`.
 16. **Raw pointers and slices (§32)**, after Let's §8.4–8.5: `p[i]`, `p.field`, `Ptr(place)`, `null(T)`, `==` and nothing else; read-only checked slices whose known indices are checked at compile time; `Grow:view` as an activity.
-17. **libc as activities (§33)**: opaque C types, `CString`, variadic externs, formats built while specializing, `import`; `lib/libc.slc` wraps files and heap buffers as activities.
+17. **libc as activities (§33)**: opaque C types, `CString`, variadic externs, formats built while specializing, Lua's `require`; `lib/libc.slc` wraps files and heap buffers as activities.
 18. **POSIX and Linux as activities (§34)**: structs and constants from system headers, errno reads, `bytes`/`size_of`; `lib/posix.slc` wraps descriptors, mmap views, eventfd and epoll, with outcomes as sums.
 19. **Atomics (§35)**: `Atomic T` accessed only by atomic operations, memory orders checked while compiling, fences, `atomic_ptr` for shared memory; a spinlock activity and an io_uring-shaped ring, checked with threads under ThreadSanitizer.
-20. **Tasks, channels and I/O (§36)**: Go's model rather than a race checker. Tasks share no memory: `spawn do` copies what it mentions, channels carry copies, and pool slots move. Tasks compile to resumable state machines, so no function coloring is needed. Every wait is an operation, `first_of` chooses among those the runtime can withdraw, and I/O is by completion through `import "io"`, with backends for `poll`, io_uring and kqueue. Scopes own tasks, channels and pools; deadlocks are detected exactly.
+20. **Tasks, channels and I/O (§36)**: Go's model rather than a race checker. Tasks share no memory: `spawn do` copies what it mentions, channels carry copies, and pool slots move. Tasks compile to resumable state machines, so no function coloring is needed. Every wait is an operation, `first_of` chooses among those the runtime can withdraw, and I/O is by completion through `require "slc.io"`, with backends for `poll`, io_uring and kqueue. Scopes own tasks, channels and pools; deadlocks are detected exactly.
 21. **Slots are addressed with `[]` (§18, §30.6, §36.6)**: `s[id]`, `g[i]` and `pool[slot]` are places whose address is recomputed and checked at every use, replacing `get`, `set` and the `with` activities. A store may grow while its slots are in use, since nothing holds an address across the change.
 22. **Fixed-length arrays (§37)**: `Array(T, n)`, a value checked like a slice, viewed as one, and the buffer type of pools and I/O.
 23. **§25 curried the wrong parameter**: `populate(g, scale, n)` partially applied to `2` bound `g`. The parameter order is now `(scale, g, n)`.
@@ -136,7 +136,35 @@ It uses:
 - Tables for Lua data and native construction syntax.
 - Juxtaposition for application.
 
-No source-level `emit`, `set`, `var`, `comptime`, `template` or `specialize` keywords are required. The language adds two words, `struct` and `export`, and a handful of prelude functions (`extern`, `dynamic`, `host`, `Ref`, `Ptr`, `Slice`, `null`, `opaque`, `cformat`, `import`, `cstruct`, `cconst`, `cread`, `bytes`, `size_of`, `view_of`, `Atomic`, `fence`, `atomic_ptr`, and the bitwise operations `band bor bxor shl shr bnot`, which Lua 5.1 has no operators for).
+No source-level `emit`, `set`, `var`, `comptime`, `template` or `specialize` keywords are required. The language adds two words, `struct` and `export`, and a handful of prelude functions (`extern`, `dynamic`, `host`, `Ref`, `Ptr`, `Slice`, `null`, `opaque`, `cformat`, `cstruct`, `cconst`, `cread`, `bytes`, `size_of`, `view_of`, `Atomic`, `fence`, `atomic_ptr`, and the bitwise operations `band bor bxor shl shr bnot`, which Lua 5.1 has no operators for).
+
+## 3.0 Modules are Lua values
+
+Modules use Lua's actual `require`, not a separate import API. `require "slc.hash"`
+loads a bundled SLC vocabulary; `require "model"` loads a project module;
+`require "io"`, `require "ffi"` and other Lua modules retain their Lua meaning.
+An SLC loader translates `.slc` source and evaluates it in the SLC prelude,
+returning ordinary Lua values through the standard module machinery.
+
+During compilation, the program's directory is prepended to the Lua source path
+as `?.lua` and `?/init.lua`. The existing preload, Lua, C and custom searchers
+keep their order and precedence. An appended SLC searcher checks bundled
+`slc.*` names in `lib/`, then follows the current Lua source-path templates with
+`.slc` in place of `.lua`. Dots in module names denote directories. A found
+module's syntax or evaluation error is an error, not permission to try another
+candidate. Lua owns cache hits, no-value results, explicit `package.loaded`
+publication, false results, and cycle/previous-load-error diagnostics.
+
+Each compilation uses a fresh `package.loaded` table, also installed as the Lua
+registry's loaded table, seeded with existing host modules. Newly loaded Lua,
+SLC and C modules remain in that compilation's cache; this includes Lua wrappers
+which retain SLC words. Compiler implementation modules have host lifetime.
+Host loader/cache tables and source/native paths are restored on success and
+failure. This is not a sandbox or a deep copy of host module values: explicit
+host-global effects and mutations of existing host modules are shared. The
+compiler's staging state is single-context; nested compilation is rejected.
+
+See [modules.md](modules.md) for the design, examples and acceptance checks.
 
 ## 3.1 Types are compile-time values
 
@@ -564,7 +592,7 @@ The initial `y = x` never reaches storage: it was pending, and both branches ove
 Typed bodies must be deterministic and stage-safe: the evaluator may run a closure more than once (both branches of a dynamic condition, a round that is rolled back and redone in general form, an application undone to make a recursive key a function). Therefore:
 
 - A typed body can assign only bindings it declares. Assigning a variable declared outside it (a host upvalue or global) is rejected when the body is translated.
-- Rebinding an untyped binding declared outside the current branch is an error when that branch's condition is dynamic, or inside the body of a residual loop (§8.6).
+- Rebinding a host binding declared outside the current branch is an error when that branch's condition is dynamic, or inside the body of a residual loop (§8.6).
 - Mutating a host table from inside a dynamic branch or a residual loop is an error.
 - Arbitrary Lua I/O and opaque FFI effects belong in host code, outside typed bodies.
 
@@ -576,7 +604,7 @@ These are precise rules, checked where the problem can occur, not a blanket ban:
 
 The evaluator distinguishes **values** from **addressable places**.
 
-## 8.1 Untyped bindings name values
+## 8.1 Local types can be inferred
 
 ```lua
 local f = do(x: U32): U32
@@ -587,7 +615,7 @@ local f = do(x: U32): U32
 end
 ```
 
-`k` is a host number. `y` is a Lua binding to a staged value, not a C variable:
+`k` is a host number. `y` infers `U32` from its initializer and is a mutable native place, just as with `local y: U32 = x * k`. Inference depends on the initializer's native type, not whether its value is known. Lazy stores still eliminate unnecessary C variables:
 
 ```c
 uint32_t unannotated(uint32_t x) {
@@ -595,7 +623,11 @@ uint32_t unannotated(uint32_t x) {
 }
 ```
 
-Binding a typed place to an untyped name takes the place's value at that point (§8.5); the name does not alias the place. Resizable storage, which has no value, is the exception: the name refers to the storage.
+Inside staged bodies, `local name = expression` infers native storage whenever the initializer can inhabit a native local. Constructors need no repeated annotation: `local p = Point { x = 1, y = 2 }`, `local count = U32 0`, and `local out = Text {}`. Assignments keep the inferred type, including inside runtime branches and loops. Multiple locals can infer independently; explicit and inferred annotations can be mixed.
+
+Plain Lua values remain host bindings: `local k = 4` does not invent a native integer type. An annotation is still needed to select a different type or declare uninitialized native storage. A later assignment does not retroactively infer a host binding's type. Outside staged evaluation, ordinary Lua bindings are unchanged.
+
+Initializing from a native place takes its value at that point (§8.5), not an alias. References retain write-through behavior. Borrowed views and existing resizable storage retain their existing alias and lifetime rules: inference does not copy them into new storage. Fresh resizable constructors initialize their inferred storage in place.
 
 ## 8.2 Typed locals are places
 
@@ -644,7 +676,7 @@ A typed local of struct type is a set of field places, each tracked on its own. 
 
 A struct is materialized as a whole only when C needs the whole: passing it by value to a materialized function, for instance, reads as the place itself when all its fields are in storage, and as a compound literal otherwise.
 
-## 8.5 Lazy snapshots
+## 8.5 Snapshots
 
 ```lua
 local snapshot = do(x: U32): U32
@@ -658,7 +690,7 @@ local snapshot = do(x: U32): U32
 end
 ```
 
-`local a = y` names `y`'s value. `y` is in storage at that point (it differs between the branches), so the value is a read of `y`. Instead of copying it eagerly, the binding leaves a placeholder. If `y` is written while `a` is still alive, the snapshot is written at the placeholder, and the reads in `a` are redirected to it:
+`local a = y` infers a separate `U32` place initialized with `y`'s value. `y` is in storage at that point (it differs between the branches), so initialization snapshots that read. Later writes to `y` do not change `a`:
 
 ```c
 uint32_t snapshot(uint32_t x) {
@@ -668,19 +700,19 @@ uint32_t snapshot(uint32_t x) {
     } else {
         y = x * 3u;
     }
-    uint32_t t = y;
+    uint32_t a = y;
     y = y * 2u;
-    return t + y;
+    return a + y;
 }
 ```
 
-If `y` had not been written again, there would be no `t`. The same mechanism binds the arguments of inlined applications, so `counter:add(i)` reads `i` directly unless the callee writes `i` first.
+If `y` is still a pending value, the inferred local can also remain pending without a C variable. Arguments of inlined applications use lazy snapshots: `counter:add(i)` reads `i` directly unless the callee writes `i` first.
 
 Reads through pointers (untracked storage) are snapshotted at once. As a safety net, every read of a tracked place carries the place's version; a residual statement that would use a read older than the place's current contents is rejected rather than emitted.
 
 ## 8.6 Host rebinding
 
-Untyped bindings may be rebound in generation-time code. Inside a body:
+Host bindings may be rebound in generation-time code. Inferred native locals are places, not host bindings. Inside a body:
 
 - rebinding a binding declared **outside a dynamic branch** from inside it is an error: both branches are evaluated, so the Lua variable would end up holding the second branch's value;
 - rebinding a binding declared **outside a loop** from its body is an error once the loop is residual: the round may be rolled back and redone, and a Lua variable cannot carry runtime state. Rounds that run at compile time may rebind freely.
@@ -1371,15 +1403,16 @@ local insert_double = insert(true, 2)
 export insert_double
 ```
 
-The partial application binds `enabled = true` and `k = 2`. The false branch disappears, the multiplier is substituted, and the store insertion remains because it changes runtime storage:
+The partial application binds `enabled = true` and `k = 2`. The false branch disappears, the multiplier is substituted, and the store insertion remains because it changes runtime storage. Store operations are ordinary SLC words, so the insertion inlines into the caller; the call it lowers to is:
 
 ```c
+/* sketch */
 NodeId insert_double(Graph *graph, uint32_t value) {
     return NodeStore_add(&graph->nodes, (Node){ .value = value * 2u });
 }
 ```
 
-`NodeStore`, `NodeId` and the typed helpers `NodeStore_add`, `NodeStore_get`, ... are generated per element type over a small runtime (`slc_rt.h`).
+`NodeStore` and `NodeId` are typedefs of the fixed runtime records (`slc_store`, `slc_id`) in `slc_rt.h`; `add`, `get` and the other operations are SLC words that read and write those records.
 
 **The original Boolean condition and static parameter `k` never reach C emission.**
 
@@ -1582,9 +1615,10 @@ export run
 
 *v0.4 declared `populate(g, scale, n)` and applied it to `2`, which would bind `g`. Static requirements come first.*
 
-The static `scale` disappears from the residual code. The loop count is dynamic, so the loop survives. `g` is owned by `run`'s scope; its store takes data stack 0 and gives it back before `run` returns:
+The static `scale` disappears from the residual code. The loop count is dynamic, so the loop survives. `g` is owned by `run`'s scope; its store takes data stack 0 and gives it back before `run` returns. The store's own operations are SLC and inline, so the shape is:
 
 ```c
+/* sketch */
 uint32_t run(uint32_t n) {
     size_t gs_sp = 0;
     size_t gs_top0 = slc_gs_top(gs_sp);
@@ -1938,6 +1972,7 @@ end
 ```
 
 ```c
+/* sketch */
 void double_node(Graph *g, NodeId id) {
     Node *at = NodeStore_borrow(&g->nodes, id);
     at->value = at->value * 2u;
@@ -2190,6 +2225,7 @@ end
 ```
 
 ```c
+/* sketch */
     for (;;) {
         if (i >= prog.len) break;
         at = CommandGrow_elem(&prog, i);
@@ -2237,9 +2273,12 @@ Pointers follow Let's `syntax.md` §8.5 and slices its §8.4. **`Ptr` is the edg
 | `p.field` | a field of a record target, readable and assignable |
 | `Ptr(place)` | the address of a place: the **only** place a lifetime is dropped |
 | `null(T)` | the null `Ptr T` |
+| `Ptr(T)(p)` | an explicit unchecked conversion from one raw pointer type to another |
 | `p == q`, `p ~= q` | address comparison |
 
 There is no other arithmetic, no ordering and no conversion to or from integers; `p[i]` is the only arithmetic, so one thing has one spelling. `Ref(p)` is rejected: an unchecked address must not become a checked borrow. Pointers may be stored in structs, returned and passed freely.
+
+`Ptr(T)(p)` accepts only an existing `Ptr U`. It preserves the address and does not copy or reinterpret a value, check alignment or bounds, transfer ownership, extend a lifetime, or create a borrow. The programmer must satisfy the foreign ABI, alignment and aliasing rules before dereferencing the result. Converting back to the original pointer type preserves its address; null stays null. Pointer conversions are never implicit. For example, a POSIX `Ptr sockaddr_in` can explicitly become a `Ptr sockaddr` for `connect`, and a raw operation buffer can explicitly recover its declared slot-pointer type. Both backends lower this through the ordinary prepared-IR conversion operation.
 
 ```lua
 local brighten = do(px: Ptr Pixel, n: U32, k: U8): Unit
@@ -2292,7 +2331,7 @@ A pointer into a store slot or a `Grow` dangles after the storage grows. That is
 
 A view is read-only: `s[i] = v` is rejected (`not-a-place`); writes go through the storage or a `Ptr`. Slices cannot be compared. Slices are borrows, like `Ref`, so they cannot be stored in structs (*Let admits slices in records; slc keeps its rule that aggregates hold no borrows*).
 
-**Checks and binding times.** Internally a slice is a two-field struct, so the evaluator tracks its length apart from its pointer. A **known index against a known length is checked at compile time** (`index-range`) and costs nothing at run time; anything else is one check when it runs (`SLC_BOUND`, a trap on failure). `s:sub(a, b)` with known bounds produces a slice whose **length is known**, after one range check. So the idiom for formats is to take the whole header once, then read at constant offsets with no further checks.
+**Checks and binding times.** Internally a slice is a two-field struct, so the evaluator tracks its length apart from its pointer. A **known index against a known length is checked at compile time** (`index-range`) and costs nothing at run time; anything else is one check when it runs (the `slice.index` word of [lib/slice.slc](../lib/slice.slc), a trap on failure). `s:sub(a, b)` with known bounds produces a slice whose **length is known**, after one range check. So the idiom for formats is to take the whole header once, then read at constant offsets with no further checks.
 
 ## 32.3 Describe, then run: a binary format
 
@@ -2324,7 +2363,9 @@ end
 
 ```c
 Packet parse(U8Slice buf) {
-    if (8u > buf.len) slc_trap("slice range out of bounds");
+    if (8ull > (uint64_t)buf.len) {
+        slc_trap("slice range out of bounds");
+    }
     uint32_t v = (uint32_t)buf.ptr[0u];
     uint32_t v2 = (uint32_t)buf.ptr[1u];
     uint32_t v3 = (uint32_t)buf.ptr[2u];
@@ -2368,7 +2409,7 @@ libc is C, and slc emits C, so wrapping it is a matter of externs. What the lang
 | `extern(name, params, result, { header = "<stdio.h>" })` | a C function from a header (no prototype is emitted) |
 | `{ variadic = true }` | a variadic C function; extra arguments must be native scalars, `CString`s or pointers |
 | `cformat(...)` | a format string and its arguments, built while specializing |
-| `import "libc"` | load `lib/libc.slc` once and return its vocabulary table |
+| `require "slc.libc"` | load `lib/libc.slc` once per compilation and return its vocabulary table (§3.0) |
 
 **Formats are decided by the compiler.** `cformat("n = ", n, ", ratio = ", ratio, "\n")` produces the format `"n = %u, ratio = %g\n"` and the arguments cast to the types those conversions expect, so a format can never disagree with its values. Lua strings and numbers, and known native values, go into the format itself:
 
@@ -2412,7 +2453,7 @@ It also provides `say` (formatted `printf`), `each_byte(path) do(b) ... end` (an
 ## 33.3 Using it
 
 ```lua
-local c = import "libc"
+local c = require "slc.libc"
 
 local report = do(path: CString, n: U32, ratio: F64): Bool
     local c...
@@ -2474,6 +2515,7 @@ end
 uint32_t sum_filled(uint32_t n, uint8_t byte) {
     uint32_t total;
     uint8_t *p;
+    U8Slice bytes;
     uint8_t *t = malloc((uint64_t)n);
     if (t == NULL) {
         total = 0u;
@@ -2483,13 +2525,14 @@ uint32_t sum_filled(uint32_t n, uint8_t byte) {
     memset(t, (int32_t)byte, (uint64_t)n);
     t[0u] = 1u;
     total = 0u;
+    bytes = (U8Slice){ .ptr = t, .len = n };
     uint32_t i = 0u;
     for (;;) {
-        if (i >= n) {
+        if (i >= bytes.len) {
             p = t;
             break;
         }
-        total = total + (uint32_t)t[i];
+        total = total + (uint32_t)bytes.ptr[i];
         i = i + 1u;
     }
     free(p);
@@ -2521,6 +2564,20 @@ In Unix everything is a file, and in Linux nearly everything is a file descripto
 
 Declaring kernel structs by hand risks ABI mismatches (`struct epoll_event` is packed on x86-64; `struct stat` differs between architectures). A `cstruct` emits no definition of its own: the C compiler supplies the real layout, and a field like `{ "fd", I32, "data.fd" }` reaches into nested unions.
 
+For a recursive foreign layout, the fields argument may be a host function. It
+receives the type being declared and returns the same field list:
+
+```lua
+local Node = cstruct("struct node", '"node.h"', function(Self)
+    return { { "next", Ptr Self }, { "value", U32 } }
+end)
+```
+
+The callback runs once during type construction, not at runtime. The incomplete
+type may occur behind a pointer, not as a by-value field (including an array
+element). This describes an existing C layout; it does not introduce shared
+references between tasks or change the ownership rules.
+
 ## 34.2 The library
 
 - `with_fd(path, flags) do(writing...) ... end` returns an **`Outcome`**, `oneof { done: Unit, failed: I32 }` carrying the errno. Inside, the body has `write_text`, `write_bytes`, `read_bytes`, `size` and `mapped`.
@@ -2533,7 +2590,7 @@ Declaring kernel structs by hand risks ABI mismatches (`struct epoll_event` is p
 ## 34.3 Using it
 
 ```lua
-local px = import "posix"
+local px = require "slc.posix"
 
 local make_file = do(path: CString): I32
     local px...
@@ -2824,8 +2881,10 @@ typedef struct square_frame {
     slc_op ops[1];
     slc_chan inp;
     slc_chan out;
+    bool open;
     uint32_t got;
     int32_t r;
+    ReceivedU32 r2;
     uint64_t msg;
 } square_frame;
 ```
@@ -2839,25 +2898,36 @@ static slc_step square_step(slc_task *slc_task_) {
     case 3: goto resume3;
     default: break;
     }
+    f->open = true;
     for (;;) {
         if (slc_budget(&f->task)) {
             f->task.state = 1;
             return SLC_YIELD;
         }
     resume1:;
+        if (!f->open) break;
         if (slc_recv(&f->task, f->ops, f->inp, &f->got, "channels.slc:8: recv") == SLC_PENDING) {
             f->task.state = 2;
             return SLC_WAIT;
         }
     resume2:;
         f->r = f->task.result;
-        if (f->r != 1) break;
-        f->msg = (uint64_t)f->got * (uint64_t)f->got;
-        if (slc_send(&f->task, f->ops, f->out, &f->msg, "channels.slc:9: send") == SLC_PENDING) {
-            f->task.state = 3;
-            return SLC_WAIT;
+        if (f->r == 1) {
+            f->r2 = (ReceivedU32){ .tag = ReceivedU32_value, .as.value = f->got };
+            goto L1;
         }
-    resume3:;
+        f->r2 = (ReceivedU32){ .tag = ReceivedU32_closed };
+    L1:;
+        if (f->r2.tag == ReceivedU32_closed) {
+            f->open = false;
+        } else {
+            f->msg = (uint64_t)f->r2.as.value * (uint64_t)f->r2.as.value;
+            if (slc_send(&f->task, f->ops, f->out, &f->msg, "channels.slc:9: send") == SLC_PENDING) {
+                f->task.state = 3;
+                return SLC_WAIT;
+            }
+        resume3:;
+        }
     }
     slc_chan_close(f->out);
     return SLC_DONE;
@@ -2882,17 +2952,29 @@ uint64_t sum_squares(uint32_t n) {
     slc_op slc_ops[1];
     uint64_t got;
     int32_t r;
+    ReceivedU64 r2;
     slc_scope *scope = slc_scope_new(slc_tk);
-    slc_chan ch = slc_chan_new(scope, sizeof(uint32_t), 8u);
-    slc_chan ch2 = slc_chan_new(scope, sizeof(uint64_t), 8u);
-    { task_frame *slc_t = (task_frame *)slc_spawn(scope, sizeof(task_frame), task_step); slc_t->n = n; slc_t->ch = ch; slc_start(&slc_t->task); }
+    slc_chan ch = slc_chan_new(scope, (uint64_t)sizeof(uint32_t), 8u);
+    slc_chan ch2 = slc_chan_new(scope, (uint64_t)sizeof(uint64_t), 8u);
+    { task_frame *slc_t = (task_frame *)slc_spawn(scope, sizeof(task_frame), task_step); slc_t->nums = ch; slc_t->n = n; slc_start(&slc_t->task); }
     { square_frame *slc_t = (square_frame *)slc_spawn(scope, sizeof(square_frame), square_step); slc_t->inp = ch; slc_t->out = ch2; slc_start(&slc_t->task); }
     uint64_t total = 0ull;
+    bool open = true;
     for (;;) {
+        if (!open) break;
         if (slc_recv(slc_tk, slc_ops, ch2, &got, "channels.slc:28: recv") == SLC_PENDING) slc_block(slc_tk);
         r = slc_tk->result;
-        if (r != 1) break;
-        total = total + got;
+        if (r == 1) {
+            r2 = (ReceivedU64){ .tag = ReceivedU64_value, .as.value = got };
+            goto L1;
+        }
+        r2 = (ReceivedU64){ .tag = ReceivedU64_closed };
+    L1:;
+        if (r2.tag == ReceivedU64_closed) {
+            open = false;
+        } else {
+            total = total + r2.as.value;
+        }
     }
     if (slc_scope_end(slc_tk, slc_ops, scope, "channels.slc:16: the end of a tasks scope") == SLC_PENDING) slc_block(slc_tk);
     return total;
@@ -3010,30 +3092,44 @@ uint64_t pooled(uint32_t count) {
     slc_op slc_ops[1];
     slc_slot got;
     int32_t r;
+    ReceivedSlotBlock r2;
     uint32_t s;
     uint32_t i;
     Block *at;
     slc_scope *scope = slc_scope_new(slc_tk);
-    slc_pool pool = slc_pool_new(scope, sizeof(Block), 4u);
-    slc_chan ch = slc_chan_new(scope, sizeof(slc_slot), 4u);
-    { task_11_frame *slc_t = (task_11_frame *)slc_spawn(scope, sizeof(task_11_frame), task_11_step); slc_t->count = count; slc_t->pool = pool; slc_t->ch = ch; slc_start(&slc_t->task); }
+    slc_pool pool = slc_pool_new(scope, (uint64_t)sizeof(Block), 4u);
+    slc_chan ch = slc_chan_new(scope, (uint64_t)sizeof(slc_slot), 4u);
+    { task_11_frame *slc_t = (task_11_frame *)slc_spawn(scope, sizeof(task_11_frame), task_11_step); slc_t->buffers = pool; slc_t->full = ch; slc_t->count = count; slc_start(&slc_t->task); }
     uint64_t total = 0ull;
+    bool open = true;
     for (;;) {
+        if (!open) break;
         if (slc_recv(slc_tk, slc_ops, ch, &got, "channels.slc:346: recv") == SLC_PENDING) slc_block(slc_tk);
         r = slc_tk->result;
-        if (r != 1) break;
-        slc_slot_adopt(slc_tk, got);
-        i = 0u;
-        s = 0u;
-        for (;;) {
-            at = (Block *)slc_slot_at(slc_tk, got);
-            if (i >= at->n) break;
-            SLC_BOUND(i, 64u);
-            s = s + (uint32_t)at->data.e[i];
-            i = i + 1u;
+        if (r == 1) {
+            slc_slot_adopt(slc_tk, got);
+            r2 = (ReceivedSlotBlock){ .tag = ReceivedSlotBlock_value, .as.value = got };
+            goto L1;
         }
-        total = total + (uint64_t)s;
-        slc_slot_release(slc_tk, got);
+        r2 = (ReceivedSlotBlock){ .tag = ReceivedSlotBlock_closed };
+    L1:;
+        if (r2.tag == ReceivedSlotBlock_closed) {
+            open = false;
+        } else {
+            i = 0u;
+            s = 0u;
+            for (;;) {
+                at = (Block *)slc_slot_at(slc_tk, r2.as.value);
+                if (i >= at->n) break;
+                if ((uint64_t)i >= 64ull) {
+                    slc_trap("slice index out of range");
+                }
+                s = s + (uint32_t)at->data.e[i];
+                i = i + 1u;
+            }
+            total = total + (uint64_t)s;
+            slc_slot_release(slc_tk, r2.as.value);
+        }
     }
     if (slc_scope_end(slc_tk, slc_ops, scope, "channels.slc:333: the end of a tasks scope") == SLC_PENDING) slc_block(slc_tk);
     return total;
@@ -3046,7 +3142,7 @@ uint64_t pooled(uint32_t count) {
 
 I/O operations are described by their completion, never by readiness, because completion can be provided everywhere and readiness cannot. **io_uring** is completion-based: you submit an operation, and the kernel says when it is done. **kqueue** (macOS, the BSDs) and **`poll`** (any POSIX system) report readiness; their backends make it a completion by performing the system call once the descriptor is ready. A wait is the same shape on every system, and so is a program. (Windows is out of scope.)
 
-The operations live in a library, `local io = import "io"`, like the libc and POSIX vocabularies (§33–§34):
+The operations live in a library, `local io = require "slc.io"`, like the libc and POSIX vocabularies (§33–§34):
 
 | Operation | Done with | Notes |
 |---|---|---|
@@ -3074,35 +3170,83 @@ uint32_t timeout_then_data(void) {
     int32_t reader;
     int32_t writer;
     int64_t io;
+    IoPipe r;
     U8x8 buf;
     int64_t io2;
-    int32_t r;
-    int64_t io3;
-    int64_t io4;
     int32_t r2;
+    IoCountOrTimeout r3;
+    int64_t io3;
+    int32_t r4;
+    int64_t io4;
+    int32_t r5;
+    IoCountOrTimeout r6;
     int64_t io5;
+    int32_t r7;
     int64_t io6;
+    int32_t r8;
     if (slc_io_pipe(&reader, &writer, &io) == 0) {
+        r = (IoPipe){ .tag = IoPipe_done, .as.done = (Pipe){ .reader = (File){ .fd = reader }, .writer = (File){ .fd = writer } } };
+        outcome = 0u;
+        goto L1;
+    }
+    r = (IoPipe){ .tag = IoPipe_failed, .as.failed = (int32_t)io };
+    outcome = 0u;
+L1:;
+    if (r.tag == IoPipe_done) {
         buf = (U8x8){ .e = { 0 } };
-        if (slc_io_read(slc_tk, slc_ops, reader, &buf.e[0u], 8u, -1ll, 20000000ull, &io2, "io.slc:72: read") == SLC_PENDING) slc_block(slc_tk);
-        r = slc_tk->result;
-        if (r == 0) {
-            outcome = 100u;
-        } else if (r == 2) {
-            outcome = 1u;
-        } else {
-            outcome = 200u;
-        }
-        if (slc_io_write(slc_tk, slc_ops, writer, "abc", 3u, -1ll, 0ull, &io3, "io.slc:77: write") == SLC_PENDING) slc_block(slc_tk);
-        if (slc_io_read(slc_tk, slc_ops, reader, &buf.e[0u], 8u, -1ll, 1000000000ull, &io4, "io.slc:78: read") == SLC_PENDING) slc_block(slc_tk);
+        if (slc_io_read(slc_tk, slc_ops, r.as.done.reader.fd, &buf.e[0u], 8u, -1ll, 20000000ull, &io2, "io.slc:72: read") == SLC_PENDING) slc_block(slc_tk);
         r2 = slc_tk->result;
         if (r2 == 0) {
-            outcome = outcome + 10u * (uint32_t)io4;
+            r3 = (IoCountOrTimeout){ .tag = IoCountOrTimeout_done, .as.done = (uint32_t)io2 };
+            goto L2;
         }
-        if (slc_io_close(slc_tk, slc_ops, reader, &io5, "io.slc:83: close") == SLC_PENDING) slc_block(slc_tk);
-        if (slc_io_close(slc_tk, slc_ops, writer, &io6, "io.slc:84: close") == SLC_PENDING) slc_block(slc_tk);
-    } else {
-        outcome = 0u;
+        if (r2 == 2) {
+            r3 = (IoCountOrTimeout){ .tag = IoCountOrTimeout_timed_out };
+            goto L2;
+        }
+        r3 = (IoCountOrTimeout){ .tag = IoCountOrTimeout_failed, .as.failed = (int32_t)io2 };
+    L2:;
+        switch (r3.tag) {
+        case IoCountOrTimeout_done: {
+            outcome = 100u;
+            break;
+        }
+        case IoCountOrTimeout_failed: {
+            outcome = 200u;
+            break;
+        }
+        default: /* IoCountOrTimeout_timed_out */ {
+            outcome = 1u;
+            break;
+        }
+        }
+        if (slc_io_write(slc_tk, slc_ops, r.as.done.writer.fd, "abc", 3u, -1ll, 0ull, &io3, "io.slc:77: write") == SLC_PENDING) slc_block(slc_tk);
+        r4 = slc_tk->result;
+        if (r4 != 0) {
+        }
+        if (slc_io_read(slc_tk, slc_ops, r.as.done.reader.fd, &buf.e[0u], 8u, -1ll, 1000000000ull, &io4, "io.slc:78: read") == SLC_PENDING) slc_block(slc_tk);
+        r5 = slc_tk->result;
+        if (r5 == 0) {
+            r6 = (IoCountOrTimeout){ .tag = IoCountOrTimeout_done, .as.done = (uint32_t)io4 };
+            goto L3;
+        }
+        if (r5 == 2) {
+            r6 = (IoCountOrTimeout){ .tag = IoCountOrTimeout_timed_out };
+            goto L3;
+        }
+        r6 = (IoCountOrTimeout){ .tag = IoCountOrTimeout_failed, .as.failed = (int32_t)io4 };
+    L3:;
+        if (r6.tag == IoCountOrTimeout_done) {
+            outcome = outcome + 10u * r6.as.done;
+        }
+        if (slc_io_close(slc_tk, slc_ops, r.as.done.reader.fd, &io5, "io.slc:83: close") == SLC_PENDING) slc_block(slc_tk);
+        r7 = slc_tk->result;
+        if (r7 != 0) {
+        }
+        if (slc_io_close(slc_tk, slc_ops, r.as.done.writer.fd, &io6, "io.slc:84: close") == SLC_PENDING) slc_block(slc_tk);
+        r8 = slc_tk->result;
+        if (r8 != 0) {
+        }
     }
     return outcome;
 }
@@ -3166,7 +3310,7 @@ Not checked: memory that C code shares behind an extern's back (§22), and a blo
 | pass a message | `channel(T, n)`, `send`, `recv`, `each`, `close` |
 | pass a buffer | `pool(T, n)`, `take`, `pool[slot]`, `release`; send the `Slot` |
 | wait for one of several | `first_of { ... }` over channels, pools and timers |
-| talk to the system | `import "io"`: operations by completion, optional deadlines |
+| talk to the system | `require "slc.io"`: operations by completion, optional deadlines |
 | bound lifetimes | the `tasks` scope: joins its tasks, retires its channels and pools |
 | share memory with the kernel | atomics (§35), inside libraries |
 
@@ -3240,9 +3384,9 @@ C's rules live in one place, `slc.cjit`: C type descriptors, the usual arithmeti
 
 ## 38.2 The C inside the compiler
 
-Some of the compiler's output is C it carries as text: the runtime header `slc_rt.h` (its structs, constants, prototypes, thread-local stacks and inline helpers such as `slc_slot_at`), the per-type `Store`/`Grow` helpers (`NodeStore_add`, `U8Grow_push`, §16), and the runtime-call templates in the IR (`slc_chan_new($1, sizeof(Done), $2)`, `SLC_BOUND($1, $2);`, the `slc_first_of` case tables).
+The compiler's own output is ordinary C for ordinary IR operations; it carries no call templates. What it does read is the runtime header `slc_rt.h`: its record layouts, constants, prototypes, thread-local stacks and inline helpers such as `slc_slot_at`. The prepared IR holds no text, so there is no template mode.
 
-The gccjit backend does not keep a second copy of any of them. `slc.cjit` contains a reader for exactly the C subset the compiler writes (declarations, typedefs, structs and unions, function pointers, prototypes, globals with `__thread`, static inline functions, object-like and function-like macros, compound literals with designators, holes such as `$1`, `$P`, `$T`) and lowers it through the same core. The C backend prints each text; the gccjit backend reads the same text. A runtime struct's layout, a macro's value, a helper's logic each exist once.
+The gccjit backend does not keep a second copy of any of them. `slc.cjit` contains a reader for exactly the C subset the runtime header uses (declarations, typedefs, structs and unions, function pointers, prototypes, globals with `__thread`, static inline functions, object-like and function-like macros, compound literals with designators) and lowers it through the same core. A runtime struct's layout, a macro's value, a helper's logic each exist once.
 
 ## 38.3 What only a header knows
 
@@ -3338,21 +3482,27 @@ There are no bounds checks: when an arm of an `if` cannot fall through, what fol
 * `out:str() do(s) ... end` lends the text as a `Str`, while it cannot grow (like `Grow:view`).
 * `out:clear()`, `out:push(byte)`, `out.length`, `out[i]`.
 
+Integer digit generation and Boolean formatting are ordinary SLC words in
+[format.slc](../lib/format.slc), not opaque runtime conversions. `Text:write` uses
+these same words for known and dynamic operands. Known formatting can disappear
+entirely; dynamic formatting residualizes its loops with the caller. For example,
+[formatting.slc](../examples/formatting.slc) specializes the length of a formatted
+known `U64` to:
+
 ```c
-    slc_grow_write_bytes(&out, (uint8_t *)"n = ", 4u);
-    slc_grow_write_u64(&out, n);
-    slc_grow_write_bytes(&out, (uint8_t *)", ok = ", 7u);
-    slc_grow_write_bool(&out, ok);
-    slc_grow_write_bytes(&out, (uint8_t *)", unit = 1.5", 12u);
+uint32_t format_known_length(void) {
+    return 20u;
+}
 ```
 
-(from `out:write("n = ", n, ", ok = ", ok, ", unit = ", 1.5)` in `examples/strings.slc`.)
+The remaining floating-formatting helper is still a runtime boundary; migrating
+that algorithm is separate work, not a property claimed for the current prototype.
 
 ## 39.3 Chars(n)
 
 `Chars(n)` holds up to `n` bytes inline, with a length: a value like any struct, so it can be a field, a message, a pool slot and (later) a map key. `Chars(16)(s)` fills one from text: longer known text is rejected while compiling (`Chars(2) holds 2 bytes; this text has 3`), longer runtime text traps. `c:str()` views it and `c.length` is its length.
 
-Known construction is a value operation: `Chars(n)("abc")` and `Chars(n)()` need no runtime frame, and unused capacity is zero-filled. A typed local initialized from known text can be inspected through `:str()`, compared or parsed while compiling, just like the text operations on literal `Str`. If input bytes are dynamic, the constructor copies and checks capacity at run time. The C layout and copy ABI are the same at both binding times.
+Known construction is a value operation: `Chars(n)("abc")` and `Chars(n)()` need no runtime frame, and unused capacity is zero-filled. A typed local initialized from known text can be inspected through `:str()`, compared or parsed while compiling, just like the text operations on literal `Str`. The capacity branch and byte-copy loop live in [chars.slc](../lib/chars.slc): they fold for known text and residualize for dynamic text. Lua supplies the type and compile-time capacity diagnostic, not a separate copy algorithm. The C layout and copy ABI are the same at both binding times.
 
 A `c:str()` view records an owner, offset and the length at creation. It reads the owner's current bytes: reassigning `c` changes what the view sees, but does not change that captured length. A copied `Chars(n)` is independent. The evaluator therefore must not replace a view with a cached string snapshot; taking an address materializes its actual owner, not an unrelated static literal. This does not extend the owner's lifetime or introduce stronger raw-pointer lifetime guarantees than §32.
 
@@ -3362,9 +3512,107 @@ A struct field cannot be a `Str` (`field 's' is a Str, a view of someone else's 
 
 ## 39.4 What the prototype implements
 
-Everything above, on both backends (`examples/strings.slc`, `tests/strings_main.c`). Not yet: UTF-8 words (`s:runes()`, `utf8.valid`), `s:cstring()` for runtime text, `Map` and `StrMap` (designed in `docs/alpha-design.md`, §2.3), and `find` faster than the obvious algorithm.
+Everything above, on both backends (`examples/strings.slc`, `tests/strings_main.c`), including the UTF-8 words (`s:runes()`, `utf8.valid`, [utf8.slc](../lib/utf8.slc)): an ill-formed sequence decodes as U+FFFD and `valid` applies RFC 3629. `s:cstring()` lends a NUL-terminated copy built with the Text words for text known only when it runs. `s:parse(F64)` checks the decimal grammar in SLC and converts through libc `strtod`; known text folds while compiling. Not yet: `find` faster than the obvious algorithm. Maps are described in §40.
 
 ---
+
+# 40. Maps and known lookup descriptions
+
+## 40.1 Owned mutable storage
+
+`Map(K, V)` owns fixed-size entries on one Goose data stack. `StrMap(V)` owns
+entries and copied arbitrary byte keys on two stacks. Create either in place with
+`{}` and pass it by `Ref`; it cannot be copied, returned by value, or captured by
+another task. A task may own its own map. A map can be the last and sole resizable
+field of a struct. Scope exit and trap recovery release its owned stacks.
+
+Keys of `Map` are integers (including Duration), Bool, Id, Chars, or recursive
+structs and sums of these. General arrays, floating keys, pointers and borrowed
+views are not keys. Values are fixed owned data: numeric scalars, Bool, Id, Chars,
+arrays, and recursive structs/sums. Standalone Unit, views, pointers, channels,
+atomics and resizable values are not map values. Unit remains valid as a sum
+alternative. `StrMap` accepts Str and ordinary text-to-Str coercions, including
+empty keys and embedded NUL bytes.
+
+```lua
+local Counts = Map(U32, U64)
+local count = do(n: U32): U64
+    local m = Counts {}
+    for i: U32 = 1, n do
+        local k = i % 17
+        m:ensure(k, 0)
+        m[k] = m[k] + 1
+    end
+    local total = U64 0
+    m:each do(k, v) total = total + v end
+    return total
+end
+export count
+```
+
+- `m[k]` is a checked existing value place. Missing keys trap with `map-key`;
+  assignment does not insert. Aggregate fields of the value are places too.
+- `find(k)` returns `oneof { found: V, missing: Unit }`, with a found value snapshot.
+- `has(k)` returns Bool. `put(k, v)` inserts or replaces and returns Unit.
+- `ensure(k, initial)` inserts only if absent. Both arguments evaluate eagerly,
+  including when an existing value makes `initial` unnecessary.
+- `remove(k)` returns whether an entry was removed. `length` is the U32 live count.
+- `each(activity)` visits an unspecified order. Fixed keys and values are snapshots;
+  a StrMap key is a read-only view valid only during that callback.
+
+During iteration, existing-value replacement and no-op ensure/remove are allowed.
+Actual insertion/removal traps before changing storage, including through aliases
+or calls. Nested traversal is allowed. Guard ownership survives task suspension
+and is balanced by scope cleanup and trap recovery.
+
+## 40.2 Semantic keys and checked references
+
+Equality/hash observe typed values, not object bytes: Id's token/slot/generation,
+Chars length and used bytes, declared struct fields, and sum tag/active payload.
+Padding, unused Chars capacity and inactive payload do not affect identity.
+
+A checked place captures a fixed key by value and resolves again after mutation,
+calls and control-flow boundaries. Remove/reinsert of an equal key addresses the
+new entry; it is not Store's generational identity. A StrMap place instead captures
+a borrowed byte view and its length. Its owner must remain alive; each resolution
+observes the view's current bytes. It does not silently allocate an owning key.
+
+## 40.3 Immutable known descriptions
+
+```lua
+local numbers = Map.known(U32, U32, { { 1, 10 }, { 2, 20 } })
+local keywords = StrMap.known(U32, { { "if", 1 }, { "while", 2 } })
+local classify = do(s: Str): U32
+    return keywords:find(s) { found(v) = v, missing() = U32 0 }
+end
+export classify
+```
+
+These are immutable host descriptions, not native map storage. Explicit types
+also describe an empty entry list. All keys/values must be known; construction
+snapshots inputs and rejects duplicate semantic keys. The API is `find`, `has`,
+`length`, checked **value** indexing, and `each` in entry-list order while
+specializing. There are no mutable places or mutators and no native/task ABI.
+
+Known queries fold. Known missing checked indexing fails during specialization;
+dynamic checked indexing traps with `map-key`. Dynamic queries residualize
+ordinary SLC comparisons/branches. Bracket keys do not shadow API members, even
+for keys such as `"length"`.
+
+## 40.4 Implementation boundary
+
+[Map algorithms](../lib/map.slc), [semantic key operations](../lib/key.slc), and
+[SipHash-2-4](../lib/hash.slc) are ordinary SLC words shared by both backends.
+Mutable tables use Robin Hood probing, backward-shift deletion, growth at 7/8
+load, and offset-based string arenas with bounded dead-byte compaction. Pending
+keys are copied before table movement, and arena aliases are rebased after
+allocation. Hashing incorporates a per-process random seed; entropy failure traps.
+
+Compiler hooks provide type/layout projection, scoped storage/guard ownership and
+borrow lifetime checks. Native runtime primitives provide allocation, checked
+byte spans/copies, relocation offsets, entropy and trapping—not map algorithms.
+Mutable maps remain runtime storage even when their arguments are known. Known
+descriptions have no mutable compile-time heap.
 
 # Appendix A. The prototype
 
@@ -3401,7 +3649,7 @@ luajit tests/run.lua                  compile, check and run every example, on b
 | Runtime: data stacks, traps, tokens, slice checks | `runtime/slc_rt.h`, `runtime/slc_rt.c` |
 | Runtime: scheduler, tasks, channels, pools, timers | `runtime/slc_tasks.c` |
 | Runtime: I/O backends (link one) | `runtime/slc_io_poll.c`, `runtime/slc_io_uring.c`, `runtime/slc_io_kqueue.c`, over `runtime/slc_io_posix.c` |
-| Libraries for `import` | `lib/` (`libc.slc`, `posix.slc`, `io.slc`) |
+| Bundled `require "slc.*"` libraries | `lib/` (`libc.slc`, `posix.slc`, `io.slc`) |
 | Driver | `slc.lua` |
 
 Generated C includes `slc_rt.h` when it needs the runtime; link `runtime/slc_rt.c`, and for tasks `runtime/slc_tasks.c`, `runtime/slc_io_posix.c` and one backend with `-pthread` (kqueue on Linux: `-I/usr/include/kqueue -lkqueue`). The examples in `examples/` contain every program in this document; their harnesses in `tests/` link the generated C and check results (including against reference implementations, and under UBSan and ASan). `tests/errors.lua` holds programs that must be rejected, each with its expected diagnostic and line.

@@ -1,0 +1,112 @@
+-- Movable data-stack policy. TLS selection, allocation, byte relocation and
+-- trap transfer are foreign mechanisms; growth and lifetime bookkeeping are SLC.
+local h = '"slc_rt.h"'
+local Stack = cstruct("slc_stack", h, {
+    { "data", Ptr U8 }, { "top", U64 }, { "cap", U64 }, { "map_counter", Ptr U32 },
+    { "map_guard_base", U64 }, { "map_guard_token", U64 },
+})
+local Set = cstruct("slc_stackset", h, { { "stacks", Ptr Stack }, { "n", U64 } })
+local current = extern("slc_stacks_current", {}, Ptr Set, { header = h })
+local resize_stacks = extern("realloc", { Ptr Stack, U64 }, Ptr Stack, { header = "<stdlib.h>" })
+local resize_bytes = extern("realloc", { Ptr U8, U64 }, Ptr U8, { header = "<stdlib.h>" })
+local free_stacks = extern("free", { Ptr Stack }, Unit, { header = "<stdlib.h>" })
+local free_bytes = extern("free", { Ptr U8 }, Unit, { header = "<stdlib.h>" })
+local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.h>" })
+local move = extern("memmove", { Ptr U8, Ptr U8, U64 }, Ptr U8, { header = "<string.h>" })
+local trap = extern("slc_trap", { CString }, Unit, { header = h })
+local maximum = U64 0xffffffffffffffffULL
+local stacks = { Stack = Stack, Set = Set }
+stacks.get = do(index: U64): Ptr Stack
+    local context = current()
+    if index >= context.n then
+        local n = context.n
+        if n == 0 then n = 4 end
+        while n <= index do n = n * 2 end
+        local data = resize_stacks(context.stacks, n * size_of Stack)
+        if data == null Stack then trap "out of memory for data stacks" end
+        zero(bytes(data[context.n]), 0, (n - context.n) * size_of Stack)
+        context.stacks = data
+        context.n = n
+    end
+    return Ptr context.stacks[index]
+end
+local reserve = do(s: Ptr Stack, need: U64): Unit
+    if need <= s.cap then return end
+    local cap = s.cap
+    if cap == 0 then cap = 256 end
+    while cap < need do
+        if cap > maximum / 2 then trap "data stack too large" end
+        cap = cap * 2
+    end
+    local data = resize_bytes(s.data, cap)
+    if data == null U8 then trap "out of memory for a data stack" end
+    s.data = data
+    s.cap = cap
+end
+stacks.top = do(index: U64): U64 = stacks.get(index).top
+stacks.begin = do(index: U64): U64
+    local s = stacks.get index
+    local top = band(s.top + 15, bnot(U64 15))
+    reserve s top
+    s.top = top
+    return top
+end
+stacks.push = do(index: U64, n: U64): U64
+    local s = stacks.get index
+    local at = s.top
+    if n > maximum - at then trap "data stack too large" end
+    reserve(s, at + n)
+    s.top = at + n
+    return at
+end
+local release_guard = do(s: Ptr Stack): Unit
+    if s.map_counter ~= null U32 then
+        s.map_counter[0] = s.map_counter[0] - 1
+        s.map_counter = null U32
+        s.map_guard_token = 0
+    end
+end
+stacks.reset = do(index: U64, top: U64): Unit
+    local s = stacks.get index
+    if top > s.top then trap "data stack reset above its top" end
+    if s.map_counter ~= null U32 and top <= s.map_guard_base then release_guard s end
+    s.top = top
+end
+stacks.bytes = do(index: U64, at: U64, n: U64): Ptr U8
+    local s = stacks.get index
+    if at > s.top or n > s.top - at then trap "data stack view out of range" end
+    if n == 0 then return null U8 end
+    return Ptr s.data[at]
+end
+stacks.copy = do(index: U64, dst: U64, src: U64, n: U64): Unit
+    if n ~= 0 then move(stacks.bytes(index, dst, n), stacks.bytes(index, src, n), n) end
+end
+stacks.write = do(index: U64, dst: U64, src: Ptr U8, n: U64): Unit
+    if n ~= 0 then move(stacks.bytes(index, dst, n), src, n) end
+end
+stacks.zero = do(index: U64, at: U64, n: U64): Unit
+    if n ~= 0 then zero(stacks.bytes(index, at, n), 0, n) end
+end
+stacks.free = do(set: Ptr Set): Unit
+    local i = U64 0
+    while i < set.n do free_bytes set.stacks[i].data; i = i + 1 end
+    free_stacks set.stacks
+    set.stacks = null Stack
+    set.n = 0
+end
+stacks.unwind = do(set: Ptr Set, mark: U64): Unit
+    local i = U64 0
+    while i < set.n do
+        local s = Ptr set.stacks[i]
+        if s.map_counter ~= null U32 and s.map_guard_token > mark then
+            s.top = s.map_guard_base
+            release_guard s
+        end
+        i = i + 1
+    end
+end
+stacks.clear = do(set: Ptr Set): Unit
+    local i = U64 0
+    while i < set.n do set.stacks[i].top = 0; i = i + 1 end
+end
+return stacks

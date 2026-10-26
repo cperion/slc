@@ -13,7 +13,14 @@ local JG = require 'slc.jitgen'
 
 local N = {}
 
-local here = debug.getinfo(1, 'S').source:match('^@(.*)/slc/[^/]*$') or '.'
+-- the command-line record the runtime header declares (Args in slc). It is a
+-- foreign C type here, not a type of any one compiled unit.
+ffi.cdef [[
+typedef struct slc_args { uint32_t count; const char **argv; } slc_args;
+]]
+
+local dist_root = rawget(_G, 'slc_root')
+local here = dist_root or (debug.getinfo(1, 'S').source:match('^@(.*)/slc/[^/]*$') or '.')
 local RT = here .. '/runtime'
 
 local function sh(cmd)
@@ -55,10 +62,21 @@ end
 local rt
 function N.runtime()
     if rt then return rt end
+    ffi.cdef [[
+        int slc_try(void (*body)(void *), void *env);
+        const char *slc_trap_message(void);
+        const char *slc_io_backend(void);
+    ]]
+    -- the single binary links the runtime and exports it: gccjit'd code binds to
+    -- these symbols in the process, so there is no library to build or load
+    if os.getenv('SLC_RUNTIME_IN_PROCESS') == '1' then
+        rt = ffi.C
+        return rt
+    end
     local backend = os.getenv('SLC_IO') or 'poll'
     local files = { 'slc_rt.c', 'slc_tasks.c', 'slc_io_posix.c', 'slc_io_' .. backend .. '.c' }
     local text = {}
-    for _, f in ipairs { 'slc_rt.h', 'slc_io.h', 'slc_io_posix.h' } do text[#text + 1] = read(RT .. '/' .. f) or '' end
+    for _, f in ipairs { 'slc_rt.h', 'slc_io.h', 'slc_io_posix.h', 'slc_scheduler.h', 'slc_io_poll.h', 'slc_io_kqueue.h', 'slc_io_uring.h' } do text[#text + 1] = read(RT .. '/' .. f) or '' end
     local srcs = {}
     for _, f in ipairs(files) do
         local s = read(RT .. '/' .. f)
@@ -66,6 +84,9 @@ function N.runtime()
         text[#text + 1] = s
         srcs[#srcs + 1] = RT .. '/' .. f
     end
+    local policy = require('slc.runtime_build').source(backend)
+    text[#text + 1] = assert(read(policy))
+    srcs[#srcs + 1] = policy
     local extra = backend == 'kqueue' and ' -I/usr/include/kqueue -lkqueue' or ''
     local path = ('%s/libslc_rt-%s-%s.so'):format(cache_dir(), backend, fnv(table.concat(text)))
     if not read(path) then
@@ -74,11 +95,6 @@ function N.runtime()
             cc, RT, path, table.concat(srcs, ' '), extra, path, path))
         if not ok then C.fail('building the runtime library failed:\n' .. out) end
     end
-    ffi.cdef [[
-        int slc_try(void (*body)(void *), void *env);
-        const char *slc_trap_message(void);
-        const char *slc_io_backend(void);
-    ]]
     rt = ffi.load(path, true)
     return rt
 end
@@ -129,6 +145,17 @@ function N.compile(mod, opts)
         local copy
         if ret.k == 'struct' or ret.k == 'union' then copy = ffi.typeof(ret.k .. ' ' .. prefix .. ret.name) end
         local name = fn.cname
+        -- a struct parameter or result (Args for main) is declared with the
+        -- unit's prefix; the host builds values of it through out.types
+        for _, pt in ipairs(d.t.params) do
+            if (pt.k == 'struct' or pt.k == 'union') and pt.name then
+                local ok, ft = pcall(ffi.typeof, pt.k .. ' ' .. prefix .. pt.name)
+                if ok then out.types[pt.name] = ft end
+            end
+        end
+        out.arity = out.arity or {}
+        out.arity[name] = n
+        if fn.export_name then out.arity[fn.export_name] = n end
         out.raw[name] = ffi.cast(sigs[name], C.code(result, name))
         local call = function(...)
             local e = envt()

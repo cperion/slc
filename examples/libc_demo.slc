@@ -1,6 +1,6 @@
 -- libc as activities (lib/libc.slc).
 
-local c = import "libc"
+local c = require "slc.libc"
 
 -- write a report; the file is closed whatever the body does
 local report = do(path: CString, n: U32, ratio: F64): Bool

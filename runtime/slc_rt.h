@@ -34,6 +34,11 @@ typedef struct slc_stack {
     unsigned char *data;
     size_t top;
     size_t cap;
+    /* An iteration guard owns its own data stack. Resetting that stack
+     * releases the borrow, including returns and residual loop exits. */
+    uint32_t *map_counter;
+    size_t map_guard_base;
+    uint64_t map_guard_token;
 } slc_stack;
 
 /* a failed runtime check: invalid ID, misuse of a growing value */
@@ -55,18 +60,14 @@ extern __thread slc_stackset *slc_cur_stacks;
 /* the stack with index i, made on first use (out of line) */
 slc_stack *slc_gs_slow(size_t i);
 
-/* the stack with index i: inline, a few loads when it exists */
-static inline slc_stack *slc_gs(size_t i) {
-    slc_stackset *set = slc_cur_stacks ? slc_cur_stacks : &slc_own_stacks;
-    if (i < set->n) return &set->stacks[i];
-    return slc_gs_slow(i);
-}
-static inline size_t slc_gs_top(size_t i) { return slc_gs(i)->top; }
-static inline void slc_gs_reset(size_t i, size_t top) {
-    slc_stack *s = slc_gs(i);
-    if (top > s->top) slc_trap("data stack reset above its top");
-    s->top = top;
-}
+/* TLS selection is native; stack growth/access policy is ordinary SLC. */
+slc_stackset *slc_stacks_current(void);
+slc_stack *slc_gs(size_t i);
+size_t slc_gs_top(size_t i);
+void slc_stacks_unwind(slc_stackset *set, uint64_t mark);
+void slc_stacks_clear(slc_stackset *set);
+void slc_gs_write_bytes(size_t stack, size_t dst, uint8_t *src, size_t bytes);
+void slc_gs_reset(size_t i, size_t top);
 /* align the top of stack i for a new resizable value; returns the new top */
 size_t slc_gs_begin(size_t i);
 /* grow stack i by n bytes at the top; returns the offset of the new bytes */
@@ -96,6 +97,13 @@ typedef struct slc_id {
 #define SLC_OCCUPIED (UINT32_MAX - 1)
 #define SLC_RETIRED (UINT32_MAX - 2)
 
+/* General movable-stack byte access and relocation primitives. */
+uint8_t *slc_gs_bytes(size_t stack, size_t at, size_t bytes);
+size_t slc_gs_pin(size_t stack, const uint8_t *p, size_t bytes);
+void slc_gs_copy(size_t stack, size_t dst, size_t src, size_t bytes);
+void slc_gs_write(size_t stack, size_t dst, const uint8_t *src, size_t bytes);
+void slc_gs_zero(size_t stack, size_t at, size_t bytes);
+
 /* a Grow array: elements live on its data stack */
 typedef struct slc_grow {
     size_t stack;
@@ -103,50 +111,43 @@ typedef struct slc_grow {
     uint32_t len;
 } slc_grow;
 
-static inline slc_store slc_store_new(size_t stack) {
-    slc_store s;
-    s.stack = stack;
-    s.base = slc_gs_begin(stack);
-    s.len = 0;
-    s.live = 0;
-    s.free_head = SLC_NONE;
-    s.token = slc_next_token();
-    return s;
-}
-
-static inline slc_grow slc_grow_new(size_t stack) {
-    slc_grow g;
-    g.stack = stack;
-    g.base = slc_gs_begin(stack);
-    g.len = 0;
-    return g;
-}
+slc_store slc_store_new(size_t stack);
+slc_grow slc_grow_new(size_t stack);
 
 /* give a resizable value's space back: its stack top returns to its base */
-static inline void slc_release(size_t stack, size_t base) {
-    slc_gs_reset(stack, base);
-}
+void slc_release(size_t stack, size_t base);
 
-/* checked slice access */
-#define SLC_BOUND(i, n) do { if ((size_t)(i) >= (size_t)(n)) slc_trap("slice index out of range"); } while (0)
-#define SLC_RANGE(a, b, n) do { if ((size_t)(a) > (size_t)(b) || (size_t)(b) > (size_t)(n)) slc_trap("slice range out of bounds"); } while (0)
+/* The command line a program's main sees: a count and the NUL-terminated
+ * argument strings, exactly as the process received them. */
+typedef struct slc_args {
+    uint32_t count;
+    const char **argv;
+} slc_args;
 
-/* text (slc.strings): Text is a Grow of bytes; these append to one, and
- * Chars(n) is filled from a view. Each traps on misuse as Grow's push does. */
-void slc_grow_write_bytes(slc_grow *g, const uint8_t *p, uint32_t n);
-void slc_grow_write_u64(slc_grow *g, uint64_t v);
-void slc_grow_write_i64(slc_grow *g, int64_t v);
-void slc_grow_write_bool(slc_grow *g, bool v);
-void slc_grow_write_f64(slc_grow *g, double v);
-void slc_grow_clear(slc_grow *g);
-uint32_t slc_chars_fill(uint8_t *dst, uint32_t cap, const uint8_t *p, uint32_t n);
-uint32_t slc_strlen(const char *s);
-/* the shortest text that reads back as v: buf holds 32 bytes; returns the length */
-uint32_t slc_format_f64(char *buf, double v);
+/* Checked slice access is a library word (lib/slice.slc), not a C macro. */
 
-static inline bool slc_id_eq(slc_id a, slc_id b) {
-    return a.token == b.token && a.slot == b.slot && a.gen == b.gen;
-}
+/* Native storage metadata. Encoding, equality, probing, growth and mutation
+ * are ordinary SLC words. Bucket zero hashes denote empty slots. */
+typedef struct slc_map {
+    size_t stack, base, width;
+    uint32_t len, cap, iterating;
+} slc_map;
+slc_map slc_map_new(size_t stack, size_t width);
+void *slc_map_at(const slc_map *m, uint32_t slot);
+/* Internal scope-owned guard, represented by an ordinary stack/base header. */
+slc_grow slc_map_iter_new(size_t stack, slc_map *m);
+
+/* Platform boundary used by SLC hashing; no hashing algorithm in this accessor. */
+uint64_t slc_hash_seed_word(uint32_t index);
+
+/* StrMap entries begin with this complete key header, followed by a typed
+ * value. Offsets survive arena movement; there are no retained byte pointers. */
+typedef struct slc_strkey { uint64_t hash; size_t offset; uint32_t len; } slc_strkey;
+typedef struct slc_strmap {
+    slc_map entries;
+    size_t arena_stack, arena_base, arena_len, dead;
+} slc_strmap;
+slc_strmap slc_strmap_new(size_t table_stack, size_t arena_stack, size_t width);
 
 /* tasks, channels, timers (slc_tasks.c) ---------------------------------------------------
  * A task is a frame whose first member is an slc_task, and a step function the

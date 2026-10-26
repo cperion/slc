@@ -6,7 +6,7 @@
 -- always closed and a buffer from with_buffer always freed, short of a trap.
 -- Everything is evaluated in place: the wrappers leave no calls of their own.
 --
---     local c = import "libc"
+--     local c = require "slc.libc"
 --     ...
 --         local c...
 --         with_file(path, "w") do(file...)

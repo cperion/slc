@@ -126,13 +126,27 @@ end
 
 function T.struct(name, fields)
     local t = new { kind = 'struct', name = name, display = name, fields = {},
-                    index = {}, methods = {} }
+                    index = {}, methods = {}, incomplete = true }
+    if type(fields) == 'function' then fields = fields(t) end
+    local function incomplete_value(ft)
+        if rawget(ft, 'incomplete') then return true end
+        if ft.kind == 'array' then return incomplete_value(ft.elem) end
+        if ft.kind == 'sum' then
+            for _, alt in ipairs(ft.alts) do
+                if incomplete_value(alt.type) then return true end
+            end
+        end
+        return false
+    end
     local resizable
     for i, f in ipairs(fields) do
         local fname, ftype = f[1], f[2]
         if not T.is_type(ftype) then
             error(("field '%s' of struct %s: expected a type, got %s"):format(
                 fname, name, tostring(ftype)), 2)
+        end
+        if incomplete_value(ftype) then
+            error(("field '%s' of struct %s: an incomplete type must be held through Ptr"):format(fname, name), 2)
         end
         if t.index[fname] then error(("struct %s: duplicate field '%s'"):format(name, fname), 2) end
         if ftype.kind == 'unit' then error(("struct %s: field '%s' cannot be Unit"):format(name, fname), 2) end
@@ -159,6 +173,7 @@ function T.struct(name, fields)
         t.index[fname] = t.fields[i]
     end
     t.resizable = resizable and true or nil
+    t.incomplete = nil
     return t
 end
 
@@ -380,14 +395,76 @@ function T.sum(name, alts)
     local key = {}
     for i, a in ipairs(list) do key[i] = a.name .. '=' .. tostring(a.type) end
     key = table.concat(key, ';')
-    if sums[key] then return sums[key] end
+    -- Display names are not type identities: two loaded modules may each
+    -- declare a Payload struct. Never intern their lookup sums together.
+    local candidates = sums[key] or {}
+    for _, candidate in ipairs(candidates) do
+        local same = #candidate.alts == #list
+        for i, a in ipairs(list) do
+            local other = candidate.alts[i]
+            if not other or other.name ~= a.name or other.type ~= a.type then same = false; break end
+        end
+        if same then return candidate end
+    end
     local t = new { kind = 'sum', name = name, display = name, alts = list, index = {} }
     for i, a in ipairs(list) do
         a.tag = i - 1
         t.index[a.name] = a
     end
-    sums[key] = t
+    candidates[#candidates + 1] = t
+    sums[key] = candidates
     return t
+end
+
+-- Maps: recursively admit data, never merely an outer fixed-size layout.
+local function map_data(t, key, unit, visiting)
+    if not T.is_type(t) or t.resizable or rawget(t, 'slice_elem') then return false end
+    local k = t.kind
+    if k == 'int' or k == 'bool' or k == 'id' or rawget(t, 'chars_cap') then return true end
+    if k == 'unit' then return unit end
+    if k == 'float' then return not key end
+    if visiting[t] then return false end
+    visiting[t] = true
+    local ok = false
+    if k == 'struct' then
+        ok = true
+        for _, f in ipairs(t.fields) do
+            if not map_data(f.type, key, false, visiting) then ok = false; break end
+        end
+    elseif k == 'sum' then
+        ok = true
+        for _, a in ipairs(t.alts) do
+            if not map_data(a.type, key, true, visiting) then ok = false; break end
+        end
+    elseif k == 'array' and not key then
+        ok = map_data(t.elem, false, false, visiting)
+    end
+    visiting[t] = nil
+    return ok
+end
+function T.map_key(t) return map_data(t, true, false, {}) end
+function T.map_value(t) return map_data(t, false, false, {}) end
+
+local maps, strmaps = {}, {}
+function T.map(key, value)
+    check_type(key, 'Map key'); check_type(value, 'Map value')
+    if not T.map_key(key) then error('Map key must have fixed semantic equality, not ' .. key.display, 2) end
+    if not T.map_value(value) then error('Map value must be fixed-size owned data, not ' .. value.display, 2) end
+    maps[key] = maps[key] or {}
+    if not maps[key][value] then
+        maps[key][value] = new { kind = 'map', key = key, elem = value, resizable = true,
+            display = ('Map(%s, %s)'):format(key.display, value.display) }
+    end
+    return maps[key][value]
+end
+function T.strmap(value)
+    check_type(value, 'StrMap value')
+    if not T.map_value(value) then error('StrMap value must be fixed-size owned data, not ' .. value.display, 2) end
+    if not strmaps[value] then
+        strmaps[value] = new { kind = 'strmap', key = T.Str, elem = value, resizable = true,
+            display = ('StrMap(%s)'):format(value.display) }
+    end
+    return strmaps[value]
 end
 
 -- C sizes for the default target (LP64). Used only for diagnostics; layout is

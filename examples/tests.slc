@@ -1,0 +1,22 @@
+-- test/check: declarations the test runner calls, each under trap recovery.
+-- A test body is plain code; comparisons live in words (a typed body), which is
+-- where `==` is staged. `check(true)`-style host conditions work too.
+local libc = require "slc.libc"
+
+local adds = do(a: U32, b: U32, want: U32): Bool = a + b == want
+
+-- a word whose result is dynamic: check traps where it runs
+local positive = do(n: U32): Bool = n > 0
+
+test "adds small numbers" do
+    check(adds(2, 2, 4))
+end
+
+test "adds across a word boundary" do
+    check(adds(40, 2, 42))
+end
+
+test "a runtime check passes" do
+    libc.say("test body ran\n")
+    check(positive(1))
+end

@@ -1,0 +1,107 @@
+-- The production SLC algorithms, checked against an independent flat model.
+local Values = Array(U32, 128)
+local Buffer = Chars 96
+function model(T, string_keys)
+    local extent
+    if string_keys then extent = extern("map_model_extent", { Ref T }, U64) end
+    local function key_for(k, bytes)
+        if string_keys then return bytes:str() end
+        return k
+    end
+    return do(rounds: U32, width: U32, limit: U32): Bool
+        local m = T {}
+        local expected = Values {}
+        local bytes = Buffer(string.rep("x", 96))
+        bytes.len = width
+        local random = U32 12345
+        local count = U32 0
+        for round: U32 = 1, rounds do
+            local bits = shl random 13
+            random = bxor random bits
+            bits = shr random 17
+            random = bxor random bits
+            bits = shl random 5
+            random = bxor random bits
+            local k = random % limit
+            bytes.bytes[0] = U8 k
+            local key = key_for(k, bytes)
+            bits = shr random 8
+            local insert = band bits 1
+            if insert ~= 0 then
+                if expected[k] == 0 then count = count + 1 end
+                m:put(key, random)
+                expected[k] = random
+            else
+                local had = expected[k] ~= 0
+                local removed = m:remove key
+                if removed ~= had then return false end
+                if had then count = count - 1 end
+                expected[k] = 0
+            end
+            if m.length ~= count then return false end
+            if round % 97 == 0 then
+                for j: U32 = 0, limit - 1 do
+                    bytes.bytes[0] = U8 j
+                    local probe = key_for(j, bytes)
+                    local actual = m:find(probe) { found(v) = v, missing() = U32 0 }
+                    if actual ~= expected[j] then return false end
+                end
+            end
+        end
+        if string_keys then
+            local used = extent (Ref m)
+            if used > 32768 then return false end
+        end
+        return true
+    end
+end
+local map_model = model(Map(U32, U32), false)
+local strmap_model = model(StrMap(U32), true)
+export map_model
+export strmap_model
+
+local Texts = StrMap(Buffer)
+local map_table_alias = do(count: U32): U32
+    local m = Texts {}
+    m:put("source", Buffer "new-key")
+    local key = Chars(8)("k0")
+    for i: U32 = 1, count do
+        key.bytes[1] = U8 i
+        m:put(key:str(), Buffer "v")
+    end
+    local source = m["source"]:str()
+    m:put(source, Buffer "ok") -- eighth entry grows the table after copying source
+    return m.length + m["new-key"].len
+end
+export map_table_alias
+
+local bump = extern("map_model_bump", {}, U32)
+local map_eager_ensure = do(): U32
+    local m = Map(U32, U32) {}
+    m:ensure(1, bump())
+    m:ensure(1, bump())
+    return m[1]
+end
+export map_eager_ensure
+
+local Counts = StrMap U32
+local arena_alias = extern("map_model_arena_alias", { Ref Counts }, Str)
+local map_arena_alias = do(count: U32, width: U32): U32
+    local m = Counts {}
+    local key = Buffer(string.rep("x", 96))
+    key.len = width
+    for i: U32 = 0, count - 1 do
+        key.bytes[0] = U8 i
+        m:put(key:str(), i)
+    end
+    for i: U32 = 0, count / 2 - 1 do
+        key.bytes[0] = U8(i * 2)
+        m:remove(key:str())
+    end
+    local source = arena_alias (Ref m)
+    m:put(source, 999) -- compact while the pending key aliases the old arena
+    local copied = Buffer(string.rep("x", 96))
+    copied.len = width - 1
+    return m[copied:str()] + m.length
+end
+export map_arena_alias

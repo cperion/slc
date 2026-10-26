@@ -1,0 +1,9 @@
+-- The smallest executable: export main is the entry point, its result the exit
+-- status. `slc build` links it with the runtime and the host C library.
+local libc = require "slc.libc"
+
+local main = do(): I32
+    libc.say("hello from slc\n")
+    return 0
+end
+export main

@@ -1,0 +1,80 @@
+-- Formatting algorithms are ordinary SLC words. Known inputs fold to Chars
+-- values; dynamic inputs residualize these same loops with their caller.
+local format = {}
+local Digits = Chars(20)
+
+format.u64 = do(value: U64): Digits
+    local reversed: Array(U8, 20)
+    local n: U64 = value
+    local count: U32 = 0
+    while true do
+        reversed[count] = U8(n % 10) + 48
+        count = count + 1
+        n = n / 10
+        if n == 0 then break end
+    end
+    local out: Digits = Digits()
+    out.len = count
+    local i: U32 = 0
+    while i < count do
+        out.bytes[i] = reversed[count - i - 1]
+        i = i + 1
+    end
+    return out
+end
+
+format.i64 = do(value: I64): Digits
+    local magnitude: U64 = U64(value)
+    if value < 0 then magnitude = U64(0) - magnitude end
+    local digits = format.u64(magnitude)
+    local out: Digits = Digits()
+    local start: U32 = 0
+    if value < 0 then
+        out.bytes[0] = 45
+        start = 1
+    end
+    out.len = digits.len + start
+    local i: U32 = 0
+    while i < digits.len do
+        out.bytes[i + start] = digits.bytes[i]
+        i = i + 1
+    end
+    return out
+end
+
+format.boolean = do(value: Bool): Str
+    if value then return "true" else return "false" end
+end
+
+-- Decimal conversion: one libc trial, composed here in SLC. The compiler only
+-- folds a value that is known while compiling (see strings.lua's float_known).
+local Char = opaque "char"
+local CP = Ptr Char
+local snprintf = extern("snprintf", { CP, U64, CString }, I32, { header = "<stdio.h>", variadic = true })
+local strtod = extern("strtod", { CP, Ptr CP }, F64, { header = "<stdlib.h>" })
+local FloatDigits = Chars 32
+local float_is_known = __S.float_is_known
+local float_text = __S.float_text
+local Trial = struct { text: FloatDigits, parsed: F64 }
+local function trial(value: F64, precision: I32): Trial
+    local text: FloatDigits = FloatDigits {}
+    local p = CP(Ptr(text.bytes))
+    local n = snprintf(p, U64 32, "%.*g", precision, value)
+    text.len = U32 n
+    return Trial { text = text, parsed = strtod(p, null CP) }
+end
+format.f64 = do(value: F64): FloatDigits
+    if value ~= value then return FloatDigits "nan" end
+    if value == math.huge then return FloatDigits "inf" end
+    if value == -math.huge then return FloatDigits "-inf" end
+    if float_is_known value then return FloatDigits (float_text value) end
+    local precision: I32 = 1
+    while precision <= 17 do
+        local converted = trial value precision
+        if converted.parsed == value or precision == 17 then return converted.text end
+        precision = precision + 1
+    end
+    return FloatDigits {}
+end
+
+return format

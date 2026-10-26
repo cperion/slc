@@ -20,5 +20,11 @@ void slc_backend_submit(slc_op *op);
 void slc_io_complete(slc_op *op, int32_t status, int64_t value);
 uint64_t slc_now_ns(void);
 
+/* Submission/completion accounting is synchronized by the scheduler. */
+void slc_io_publish(slc_op *op);
+void slc_io_notify(slc_task *task);
+/* Internal mutable-pointer entries behind the public const-pointer ABI. */
+int32_t slc_io_write_bytes(slc_task *, slc_op *, int32_t, void *, uint32_t, int64_t, uint64_t, int64_t *, const char *);
+int32_t slc_io_open_path(slc_task *, slc_op *, void *, int32_t, uint32_t, int64_t *, const char *);
 /* deadline of an operation: absolute monotonic nanoseconds, or 0 */
 #endif

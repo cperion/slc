@@ -1,0 +1,12 @@
+-- Types are stated once; comments stay attached.
+local Box = struct { value: U32 }
+local choose = do(flag: Bool, x: U32): U32
+    local b = Box { value = x }
+    if flag then
+        b.value = b.value + 1  -- keep me
+    else
+        b.value = U32 2
+    end
+    return b.value
+end
+export choose

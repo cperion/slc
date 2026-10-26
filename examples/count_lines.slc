@@ -1,0 +1,45 @@
+-- count_lines FILE: the newlines in a file. Opens with io.READ (a C header
+-- fact, covered by the probe tables a dist build embeds), reads in blocks and
+-- reports through main(args).
+local libc = require "slc.libc"
+local io = require "slc.io"
+
+local count_file = do(path: CString): U32
+    local lines: U32 = 0
+    local buf: Array(U8, 4096)
+    io.open(path, io.READ) {
+        done = do(file)
+            local more: Bool = true
+            while more do
+                io.read(file, buf) {
+                    done = do(n)
+                        local i: U32 = 0
+                        while i < n do
+                            if buf[i] == 10 then lines = lines + 1 end
+                            i = i + 1
+                        end
+                        if n == 0 then more = false end
+                    end,
+                    failed = do(e) more = false end,
+                }
+            end
+            io.close(file) { done = do() end, failed = do(e) end }
+        end,
+        failed = do(e) end,
+    }
+    return lines
+end
+
+local main = do(args: Args): I32
+    if args.length < 2 then
+        libc.say("usage: count_lines FILE\n")
+        return 2
+    end
+    local n: U32 = 0
+    args[1]:cstring() do(c)
+        n = count_file(c)
+    end
+    libc.say("lines = ", n, "\n")
+    return I32(n)
+end
+export main

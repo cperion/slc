@@ -1,0 +1,29 @@
+local hash = require "slc.hash"
+local keys = require "slc.key"
+local Choice = oneof { empty: Unit, number: U32 }
+local Key = struct { n: I64, flag: Bool, text: Chars(4), choice: Choice }
+local feed = keys.encoder Key
+local digest = do(key: Key): U64
+    local h = hash.init (U64 0) (U64 1)
+    local state = Ref h
+    feed state key
+    return hash.finish state
+end
+
+local check_known = do(): Bool
+    local text = Chars(4)("a\0b")
+    text.bytes[3] = 255 -- unused capacity is not part of the key
+    local key = Key { n = -1, flag = true, text = text, choice = Choice.empty() }
+    local actual = digest key
+    local encoded = string.rep("\255", 8) .. "\1" .. string.rep("\0", 7)
+        .. "\3" .. string.rep("\0", 7) .. "a\0b" .. string.rep("\0", 8)
+    return actual == hash.sip24(encoded, U64 0, U64 1)
+end
+assert (host (check_known()))
+
+local semantic_key_hash = do(n: I64, flag: Bool, text: Str, number: Bool): U64
+    local choice = Choice.empty()
+    if number then choice = Choice.number(U32 7) end
+    return digest (Key { n = n, flag = flag, text = Chars(4)(text), choice = choice })
+end
+export semantic_key_hash

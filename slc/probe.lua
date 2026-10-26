@@ -37,6 +37,51 @@ local function exists(path)
     return false
 end
 
+local function read_text(path)
+    local f = io.open(path, 'rb')
+    if not f then return nil end
+    local t = f:read '*a'
+    f:close()
+    return t
+end
+
+-- The C library the answers describe. Dist time records it; a run that sees a
+-- different one probes instead of trusting the embedded tables.
+local function libc_identity()
+    local ok, ffi = pcall(require, 'ffi')
+    if not ok then return 'unknown' end
+    pcall(ffi.cdef, 'const char *gnu_get_libc_version(void);')
+    local fine, v = pcall(function() return ffi.C.gnu_get_libc_version() end)
+    if fine and v then return 'glibc ' .. ffi.string(v) end
+    return 'unknown'
+end
+P.libc_identity = libc_identity
+
+-- Tables computed at dist time ([tools/tables.lua](../tools/tables.lua)) and
+-- embedded: a request they cover never starts the compiler.
+local tables_loaded, tables
+local function embedded_tables()
+    if tables_loaded then return tables end
+    tables_loaded = true
+    local provider = rawget(_G, '__slc_embedded_source')
+    local text = provider and provider('runtime/header_tables.lua')
+    if not text then return nil end
+    local chunk = loadstring(text, '@runtime/header_tables.lua')
+    if not chunk then return nil end
+    tables = chunk()
+    return tables
+end
+
+-- recording: the answers a dist-time run saw, keyed like the probe cache
+local function record(key, text)
+    local path = os.getenv('SLC_PROBE_RECORD')
+    if not path or not text then return end
+    local f = io.open(path, 'ab')
+    if not f then return end
+    f:write(key, '\0', text, '\0')
+    f:close()
+end
+
 local function run(cmd)
     local p = io.popen('(' .. cmd .. ') 2>&1; echo "__rc=$?"')
     local out = p:read '*a'
@@ -60,7 +105,7 @@ local function requests(mod, fns, structs)
     end
     for _, fn in ipairs(fns) do
         G.walk_block(fn.body, nil, function(e)
-            if e.op == 'rt' and e.cconst and not consts[e.cconst] then
+            if e.op == 'cconst' and not consts[e.cconst] then
                 consts[e.cconst] = e.T
                 cnames[#cnames + 1] = e.cconst
             elseif e.op == 'call' and e.ext and e.ext.variable and not vars[e.ext.cname] then
@@ -85,10 +130,14 @@ local function source(rq)
     local out = { '/* slc header probe: generated */', '#include <stdio.h>', '#include <stddef.h>',
                   '#include <stdint.h>', '#include <stdbool.h>' }
     for _, h in ipairs(rq.headers) do out[#out + 1] = '#include ' .. h end
+    -- Getters can reference application globals that do not exist in the
+    -- standalone layout probe. Resolve them only in the final object/shared unit.
+    out[#out + 1] = '#ifndef SLC_PROBE_MAIN'
     for _, n in ipairs(rq.vnames) do
         local x = rq.vars[n]
         out[#out + 1] = ('%s %s(void) { return (%s)(%s); }'):format(G.ctype(x.ret), getter_name(n), G.ctype(x.ret), n)
     end
+    out[#out + 1] = '#endif'
     out[#out + 1] = '#ifdef SLC_PROBE_MAIN'
     out[#out + 1] = 'int main(void) {'
     out[#out + 1] = '    printf("return { c = {\\n");'
@@ -124,30 +173,46 @@ local function source(rq)
 end
 
 -- run (or recall) the probe for a module: values, layouts, and getter objects
-function P.run(mod, fns, structs)
+function P.run(mod, fns, structs, includes)
     local rq = requests(mod, fns, structs)
     if #rq.cnames == 0 and #rq.vnames == 0 and #rq.layouts == 0 then
         return { c = {}, s = {}, getters = {}, types = {} }
     end
     local src = source(rq)
+    local flags = ''
+    for _, d in ipairs(includes or {}) do flags = flags .. ' -I' .. d end
+    local norm = flags:gsub('%-I[^ ]*runtime/?', '-I<runtime>')
     local dir = cache_dir()
-    local base = dir .. '/probe-' .. fnv(src)
+    local key = fnv(norm .. '\n' .. src)
+    local base = dir .. '/probe-' .. key
     local lua = base .. '.lua'
+    if #rq.vnames == 0 then
+        local tab = embedded_tables()
+        if tab and tab._identity == libc_identity() and tab[key] then
+            local chunk = loadstring(tab[key], '@probe-' .. key)
+            if chunk then
+                local r = chunk()
+                r.getters, r.types = {}, rq.consts
+                return r
+            end
+        end
+    end
     if not exists(lua) then
         local f = assert(io.open(base .. '.c', 'w'))
         f:write(src)
         f:close()
         local cc = os.getenv('CC') or 'cc'
-        local ok, out = run(('%s -DSLC_PROBE_MAIN -o %s.bin %s.c && %s.bin > %s.tmp && mv %s.tmp %s'):format(
-            cc, base, base, base, base, base, lua))
+        local ok, out = run(('%s%s -DSLC_PROBE_MAIN -o %s.bin %s.c && %s.bin > %s.tmp && mv %s.tmp %s'):format(
+            cc, flags, base, base, base, base, base, lua))
         if not ok then C.fail('the header probe failed:\n' .. out) end
         if #rq.vnames > 0 then
-            ok, out = run(('%s -O2 -fPIC -c -o %s.o %s.c && %s -shared -o %s.so %s.o'):format(cc, base, base, cc,
+            ok, out = run(('%s%s -O2 -fPIC -c -o %s.o %s.c && %s -shared -o %s.so %s.o'):format(cc, flags, base, base, cc,
                 base, base))
             if not ok then C.fail('the header probe getters failed:\n' .. out) end
         end
     end
     local r = dofile(lua)
+    if #rq.vnames == 0 then record(key, read_text(lua)) end
     r.types = rq.consts
     r.getters = {}
     if #rq.vnames > 0 then

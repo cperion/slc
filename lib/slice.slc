@@ -1,0 +1,25 @@
+-- Checked slice access: an index or range outside the slice stops the program.
+--
+-- The compiler folds a check it can decide while compiling and calls these
+-- words otherwise, so the bounds and the trap text are library policy and both
+-- backends emit the same ordinary code for them.
+local slice = {}
+
+slice.index = do(i: U64, n: U64): Unit
+    if i >= n then trap("slice index out of range") end
+end
+
+slice.high = do(b: U64, n: U64): Unit
+    if b > n then trap("slice range out of bounds") end
+end
+
+slice.nonempty = do(a: U64): Unit
+    if a > 0 then trap("slice range out of bounds") end
+end
+
+slice.range = do(a: U64, b: U64, n: U64): Unit
+    if a > b then trap("slice range out of bounds") end
+    slice.high b n
+end
+
+return slice

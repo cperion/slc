@@ -1,0 +1,127 @@
+-- SipHash-2-4 as ordinary SLC, including streaming across arbitrary chunks.
+-- Explicit keys let the entire algorithm execute at compile time.
+local hash = {}
+local State = struct {
+    v0: U64, v1: U64, v2: U64, v3: U64,
+    tail: U64, length: U64, used: U32,
+}
+hash.State = State
+local c0 = U64 0x736f6d6570736575ULL
+local c1 = U64 0x646f72616e646f6dULL
+local c2 = U64 0x6c7967656e657261ULL
+local c3 = U64 0x7465646279746573ULL
+
+local rotate = do(x: U64, n): U64
+    local complement = 64 - n
+    local left = shl x n
+    local right = shr x complement
+    return bor left right
+end
+local round = do(h: Ref State): Unit
+    h.v0 = h.v0 + h.v1
+    h.v1 = rotate h.v1 13
+    h.v1 = bxor h.v1 h.v0
+    h.v0 = rotate h.v0 32
+    h.v2 = h.v2 + h.v3
+    h.v3 = rotate h.v3 16
+    h.v3 = bxor h.v3 h.v2
+    h.v0 = h.v0 + h.v3
+    h.v3 = rotate h.v3 21
+    h.v3 = bxor h.v3 h.v0
+    h.v2 = h.v2 + h.v1
+    h.v1 = rotate h.v1 17
+    h.v1 = bxor h.v1 h.v2
+    h.v2 = rotate h.v2 32
+end
+local block = do(h: Ref State, word: U64): Unit
+    h.v3 = bxor h.v3 word
+    round h
+    round h
+    h.v0 = bxor h.v0 word
+end
+
+hash.init = do(k0: U64, k1: U64): State
+    return State {
+        v0 = bxor k0 c0, v1 = bxor k1 c1,
+        v2 = bxor k0 c2, v3 = bxor k1 c3,
+        tail = 0, length = 0, used = 0,
+    }
+end
+
+local byte = do(h: Ref State, value: U8): Unit
+    local bits = U64 value
+    local shift = h.used * 8
+    bits = shl bits shift
+    h.tail = bor h.tail bits
+    h.used = h.used + 1
+    if h.used == 8 then
+        block h h.tail
+        h.tail = 0
+        h.used = 0
+    end
+end
+
+hash.bytes = do(h: Ref State, text: Str): Unit
+    h.length = h.length + U64 text.length
+    local i = U32 0
+    while i < text.length do
+        byte h text[i]
+        i = i + 1
+    end
+end
+
+hash.u64 = do(h: Ref State, value: U64): Unit
+    h.length = h.length + 8
+    if h.used == 0 then
+        block h value
+    else
+        for i = 0, 7 do
+            local shift = i * 8
+            local part = shr value shift
+            local octet = U8 part
+            byte h octet
+        end
+    end
+end
+
+hash.finish = do(h: Ref State): U64
+    local final = band h.length 255
+    final = shl final 56
+    final = bor h.tail final
+    block h final
+    h.v2 = bxor h.v2 255
+    round h
+    round h
+    round h
+    round h
+    local a = bxor h.v0 h.v1
+    local b = bxor h.v2 h.v3
+    return bxor a b
+end
+
+hash.sip24 = do(text: Str, k0: U64, k1: U64): U64
+    local h = hash.init k0 k1
+    local state = Ref h
+    hash.bytes state text
+    return hash.finish state
+end
+
+-- Seed acquisition is platform state; every mix and encoding stays visible to
+-- the specializer. The length prefix is StrMap's canonical key encoding.
+local seed_word = extern("slc_hash_seed_word", { U32 }, U64)
+hash.process = do(): State
+    local k0 = seed_word 0
+    local k1 = seed_word 1
+    return hash.init k0 k1
+end
+hash.text = do(text: Str): U64
+    local h = hash.process()
+    local state = Ref h
+    local length = U64 text.length
+    hash.u64 state length
+    hash.bytes state text
+    local result = hash.finish state
+    return bor result 1
+end
+
+return hash

@@ -1,0 +1,1 @@
+-- Lua require supplies true when a loader returns no value.

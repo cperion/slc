@@ -11,7 +11,6 @@
 
 local S = require 'slc.stage'
 local types = require 'slc.types'
-local fold = require 'slc.fold'
 local Mem = require 'slc.memory'
 
 local Str = {}
@@ -24,15 +23,14 @@ local function fail(msg, level) S.fail(msg, (level or 2) + 1) end
 -- literals ---------------------------------------------------------------------------------------
 
 function S.str_literal(s)
-    local e = { op = 'rt', text = '(uint8_t *)$1', args = { { op = 'const', T = types.CString, v = s } }, T = u8p,
-                pure = true, prec = 14, slot_prec = 14, str_lit = s }
+    local e = { op = 'conv', a = { op = 'const', T = types.CString, v = s }, T = u8p, str_lit = s }
     return S.make_slice(T, S.dyn(u8p, e), S.known(U32, #s))
 end
 
 -- the text of a Str known while compiling, or nil: a literal, or a part of one
 local function lit_of(e)
     if type(e) ~= 'table' then return nil end
-    if e.op == 'rt' and e.str_lit then return e.str_lit, 0 end
+    if e.str_lit then return e.str_lit, 0 end
     if e.op == 'addr' and e.place and e.place.pk == 'index' then
         local base, idx = rawget(e.place, 'base'), rawget(e.place, 'idx')
         local t, o = lit_of(base)
@@ -63,11 +61,10 @@ local function as_str(x, what)
 end
 Str.as_str = as_str
 
--- the text library, loaded on first use
-local lib
+-- require caches this vocabulary for the current compilation, not the host
+-- lifetime of slc.strings (which would retain staged words across resets).
 local function L()
-    if not lib then lib = S.import('str') end
-    return lib
+    return require 'slc.str'
 end
 
 -- Str's members ----------------------------------------------------------------------------------
@@ -113,8 +110,12 @@ end
 function methods.split(self, sep, body) return L().split(as_str(self, 'split'), separator(sep), body) end
 function methods.lines(self, body) return L().lines(as_str(self, 'lines'), body) end
 
+function methods.runes(self, body) return L().runes(as_str(self, 'runes'), body) end
+
 function methods.parse(self, t)
-    if not types.is_type(t) or t.kind ~= 'int' then fail('parse(T) reads an integer type: s:parse(U32)', 3) end
+    if not types.is_type(t) or (t.kind ~= 'int' and t ~= types.F64) then
+        fail('parse(T) reads an integer type or F64: s:parse(U32)', 3)
+    end
     return L()['parse_' .. t.name](as_str(self, 'parse'))
 end
 
@@ -126,11 +127,23 @@ function methods.cstring(self, body)
         if kt:find('\0', 1, true) then fail('cstring: the text holds a NUL byte', 3) end
         return body(S.known(types.CString, kt))
     end
-    fail('cstring: only text known while compiling for now (a runtime copy needs Text: build it, then t:cstring())', 3)
+    -- runtime text: copy it to a Text on the data stack, NUL-terminate, lend the
+    -- bytes to body. Appending and pushing are the storage words.
+    local TextType = Str.Text
+    local text = S.decl(TextType, TextType({}), 'cstring_text')
+    local p = S.resolve_checked(text)
+    local api = Mem.storage_library(TextType)
+    api.append(S.Ref(p), s)
+    api.push(S.Ref(p), S.known(U8, 0))
+    S.bump_checked()
+    return S.mcall(text, 'view', function(xs)
+        local ptr = S.slice_parts(xs)
+        return body(S.dyn(types.CString, { op = 'conv', a = S.ex(ptr), T = types.CString }))
+    end)
 end
 
 local arities = { equals = 2, starts_with = 2, ends_with = 2, find = 2, compare = 2, trim = 1, split = 3,
-                  lines = 2, parse = 2, cstring = 2 }
+                  lines = 2, runes = 2, parse = 2, cstring = 2 }
 for k, f in pairs(methods) do S.arity[f] = arities[k] end
 
 function S.member_str(x, key)
@@ -174,12 +187,9 @@ function Str.of(x)
         if v.k == 'known' then return S.str_literal(v.v) end
         local b = S.cur()
         if b.fn then b.fn.uses_rt = true end
-        local ptr = S.dyn(u8p, { op = 'rt', text = '(uint8_t *)$1', args = { S.ex(v) }, T = u8p, pure = true,
-                                  prec = 14, slot_prec = 14 })
-        local len = b:new_temp(U32)
-        b:emit { op = 'let', place = len, e = { op = 'rt', text = 'slc_strlen($1)', args = { S.ex(v) }, T = U32 },
-                 what = 'measuring a C string' }
-        return S.make_slice(T, b:bind(ptr), S.dyn(U32, S.read_expr(len)))
+        local ptr = S.dyn(u8p, { op = 'conv', a = S.ex(v), T = u8p })
+        local len = require('slc.str').c_length(ptr)
+        return S.make_slice(T, b:bind(ptr), len)
     end
     fail('Str.of takes a Slice U8, a CString or a string, got ' .. v.T.display, 2)
 end
@@ -202,20 +212,10 @@ function Str.Chars(n)
             if kt and #kt > n then
                 fail(('%s holds %d bytes; this text has %d'):format(t.display, n, #kt), 3)
             end
-            if kt then
-                return S.agg(t, { len = S.known(U32, #kt), bytes = S.array_from_bytes(types.array(U8, n), kt) })
+            if not kt and not S.cur().fn then
+                fail(t.display .. ' from unknown text needs runtime storage', 3)
             end
-            local b = S.cur()
-            if not b.fn then fail(t.display .. ' from unknown text needs runtime storage', 3) end
-            b.fn.uses_rt = true
-            local tmp = b:new_temp(t)
-            b:emit { op = 'let', place = tmp, e = { op = 'rt', text = '(' .. require('slc.cgen').ctype(t)
-                .. '){ 0, { { 0 } } }', T = t, pure = true }, what = 'an empty ' .. t.display }
-            local ptr, len = S.slice_parts(s)
-            b:emit { op = 'rt', place = tmp, args = { S.ex(ptr), S.ex(len) },
-                     text = '$P.len = slc_chars_fill($P.bytes.e, ' .. n .. 'u, $1, $2);', what = 'filling a ' .. t.display }
-            b:escape(tmp)
-            return b:read(tmp)
+            return require('slc.chars').from(t)(s)
         end)
     end
     return t
@@ -246,27 +246,76 @@ end
 local Text = Mem.Grow(U8)
 Str.Text = Text
 
--- format a known value as its text
-local function show(v)
-    local t = v.T
-    if t.kind == 'bool' then return v.v and 'true' or 'false' end
-    if t.kind == 'int' then return fold.show(t, v.v) end
-    if t.kind == 'float' then
-        local x = tonumber(v.v)
-        if x ~= x then return 'nan' end
-        if x == math.huge then return 'inf' end
-        if x == -math.huge then return '-inf' end
-        for p = 1, 17 do
-            local s = ('%.' .. p .. 'g'):format(x)
-            if tonumber(s) == x then return s end
-        end
-        return ('%.17g'):format(x)
+-- A float known while compiling folds to its shortest round-tripping text. The
+-- decimal conversion itself is the SLC word in lib/format.slc; only the fold is
+-- here, because it must happen while compiling.
+function S.float_is_known(value)
+    local v = S.value_of(value, nil, 'float')
+    return (v.T == types.F64 and S.is_known(v)) and true or false
+end
+S.arity[S.float_is_known] = 1
+
+function S.float_text(value)
+    local v = S.value_of(value, nil, 'float')
+    local x = tonumber(v.v)
+    for precision = 1, 17 do
+        local text = ('%.' .. precision .. 'g'):format(x)
+        if tonumber(text) == x or precision == 17 then return S.str_literal(text) end
     end
-    if t.kind == 'cstr' then return v.v end
-    return nil
+end
+S.arity[S.float_text] = 1
+
+local function show(v)
+    if v.T.kind == 'cstr' then return v.v end
 end
 
 local text_methods = rawget(Text, 'builtin_methods')
+local function append_text(p, text)
+    if not S.is_known(text) then
+        text = Mem.capture(text, 'capturing text metadata')
+    end
+    return Mem.storage_library(Text).append(S.Ref(p), text)
+end
+
+-- Decimal text known while compiling parses with Lua's number reader; the
+-- grammar is the library's (no hex, no inf/nan), and the runtime path is
+-- lib/str.slc's strtod call.
+local function valid_decimal(text)
+    local i, n = 1, #text
+    if i <= n and (text:sub(i, i) == '+' or text:sub(i, i) == '-') then i = i + 1 end
+    local digits = 0
+    while i <= n and text:sub(i, i):match('%d') do digits = digits + 1; i = i + 1 end
+    if i <= n and text:sub(i, i) == '.' then
+        i = i + 1
+        while i <= n and text:sub(i, i):match('%d') do digits = digits + 1; i = i + 1 end
+    end
+    if digits == 0 then return false end
+    if i <= n and (text:sub(i, i) == 'e' or text:sub(i, i) == 'E') then
+        i = i + 1
+        if i <= n and (text:sub(i, i) == '+' or text:sub(i, i) == '-') then i = i + 1 end
+        local exponent = 0
+        while i <= n and text:sub(i, i):match('%d') do exponent = exponent + 1; i = i + 1 end
+        if exponent == 0 then return false end
+    end
+    return i > n
+end
+
+function S.parse_float_known_p(v)
+    local vv = S.value_of(v, nil, 'parse')
+    return (vv.T == T and Str.known_text(vv) ~= nil) and true or false
+end
+S.arity[S.parse_float_known_p] = 1
+
+function S.parse_float_known(v)
+    local vv = S.value_of(v, nil, 'parse')
+    local text = Str.known_text(vv)
+    local P = require('slc.str').parsed(types.F64)
+    if text == nil or not valid_decimal(text) then return P.bad() end
+    local n = tonumber(text)
+    if n == nil then return P.bad() end
+    return P.value(types.F64(n))
+end
+S.arity[S.parse_float_known] = 1
 
 -- t:write(a, b, ...): each value as text, known pieces joined while compiling
 text_methods.write = function(self, ...)
@@ -281,24 +330,42 @@ text_methods.write = function(self, ...)
         local s = table.concat(pending)
         pending = {}
         local lit = S.str_literal(s)
-        local ptr = S.slice_parts(lit)
         S.bump_checked()
-        Mem.effect(types.Unit, 'slc_grow_write_bytes($1, $2, ' .. #s .. 'u)', { Mem.addr(p), S.ex(ptr) }, 'writing text')
+        append_text(p, lit)
     end
     local n = select('#', ...)
     for i = 1, n do
         local x = select(i, ...)
+        -- Host literals enter the same SLC formatting words as typed operands.
+        -- Preserve floating negative zero rather than coercing it to integer 0.
+        if type(x) == 'boolean' then x = S.known(types.Bool, x)
+        elseif type(x) == 'number' and x == math.floor(x) and math.abs(x) < 2 ^ 53
+            and not (x == 0 and 1 / x == -math.huge) then x = types.I64(x)
+        elseif type(x) == 'number' then x = types.F64(x) end
         if type(x) == 'string' then
             pending[#pending + 1] = x
         elseif type(x) == 'number' then
-            pending[#pending + 1] = (x == math.floor(x) and math.abs(x) < 2 ^ 53) and ('%.0f'):format(x) or show(S.known(types.F64, x))
-        elseif type(x) == 'boolean' then
-            pending[#pending + 1] = tostring(x)
+            pending[#pending + 1] = show(S.known(types.F64, x))
         else
             local v = S.value_of(x, nil, 'write')
+            if v.T.kind == 'int' or v.T.kind == 'bool' then
+                local format = require('slc.format')
+                if v.T.kind == 'bool' then v = format.boolean(v)
+                else
+                    local result = v.T.signed and format.i64(types.I64(v)) or format.u64(types.U64(v))
+                    local digits = S.decl(result.T, result, 'formatted')
+                    v = S.mcall(digits, 'str')
+                end
+            end
             local kt = v.T == T and Str.known_text(v)
             if kt then
                 pending[#pending + 1] = kt
+            elseif v.T.kind == 'float' then
+                flush()
+                local result = require('slc.format').f64(types.F64(v))
+                local digits = S.decl(result.T, result, 'formatted_float')
+                S.bump_checked()
+                append_text(p, S.mcall(digits, 'str'))
             elseif v.k == 'known' and show(v) then
                 pending[#pending + 1] = show(v)
             else
@@ -306,22 +373,11 @@ text_methods.write = function(self, ...)
                 S.bump_checked()
                 local tk = v.T.kind
                 if v.T == T then
-                    local ptr, len = S.slice_parts(v)
-                    Mem.effect(types.Unit, 'slc_grow_write_bytes($1, $2, $3)', { Mem.addr(p), S.ex(ptr), S.ex(len) },
-                        'writing text')
-                elseif tk == 'int' and v.T.signed then
-                    Mem.effect(types.Unit, 'slc_grow_write_i64($1, $2)', { Mem.addr(p), S.ex(v) }, 'writing a number')
-                elseif tk == 'int' then
-                    Mem.effect(types.Unit, 'slc_grow_write_u64($1, $2)', { Mem.addr(p), S.ex(v) }, 'writing a number')
-                elseif tk == 'bool' then
-                    Mem.effect(types.Unit, 'slc_grow_write_bool($1, $2)', { Mem.addr(p), S.ex(v) }, 'writing a Bool')
-                elseif tk == 'float' then
-                    Mem.effect(types.Unit, 'slc_grow_write_f64($1, $2)', { Mem.addr(p), S.ex(v) }, 'writing a number')
+                    append_text(p, v)
+
                 elseif tk == 'cstr' then
                     local s = Str.of(v)
-                    local ptr, len = S.slice_parts(s)
-                    Mem.effect(types.Unit, 'slc_grow_write_bytes($1, $2, $3)', { Mem.addr(p), S.ex(ptr), S.ex(len) },
-                        'writing text')
+                    append_text(p, s)
                 else
                     fail(('write: cannot write a %s as text (numbers, Bool, Str, CString)'):format(v.T.display), 2)
                 end
@@ -337,7 +393,7 @@ text_methods.clear = function(self)
     S.bump_checked()
     local b = S.cur()
     if b.fn then b.fn.uses_rt = true end
-    Mem.effect(types.Unit, 'slc_grow_clear($1)', { Mem.addr(p) }, 'clearing text')
+    Mem.storage_library(Text).clear(S.Ref(p))
 end
 
 -- t:str() do(s) ... end: the text as a Str, while it cannot change

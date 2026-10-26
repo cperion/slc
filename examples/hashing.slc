@@ -1,0 +1,42 @@
+local hash = require "slc.hash"
+local k0 = U64 0x0706050403020100ULL
+local k1 = U64 0x0f0e0d0c0b0a0908ULL
+local vectors = {
+    0x726fdb47dd0e0e31ULL, 0x74f839c593dc67fdULL,
+    0x0d6c8009d9a94f5aULL, 0x85676696d7fb7e2dULL,
+    0xcf2794e0277187b7ULL, 0x18765564cd99a68dULL,
+    0xcbc9466e58fee3ceULL, 0xab0200f58b01d137ULL,
+    0x93f5f5799a932462ULL, 0x9e0082df0ba9e4b0ULL,
+    0x7a5dbbc594ddb9f3ULL, 0xf4b32f46226bada7ULL,
+    0x751e8fbc860ee5fbULL, 0x14ea5627c0843d90ULL,
+    0xf723ca908e7af2eeULL, 0xa129ca6149be45e5ULL,
+}
+local bytes = ""
+for n = 0, 15 do
+    assert (host (hash.sip24 bytes k0 k1) == vectors[n + 1])
+    bytes = bytes .. string.char(n)
+end
+
+local hash_known = do(): U64 = hash.sip24("", k0, k1)
+export hash_known
+
+local hash_stream = do(a: Str, b: Str): U64
+    local h = hash.init k0 k1
+    local state = Ref h
+    hash.bytes state a
+    hash.bytes state b
+    return hash.finish state
+end
+export hash_stream
+
+local hash_word = do(prefix: Str, word: U64): U64
+    local h = hash.init k0 k1
+    local state = Ref h
+    hash.bytes state prefix
+    hash.u64 state word
+    return hash.finish state
+end
+export hash_word
+
+local hash_keys = do(text: Str, key0: U64, key1: U64): U64 = hash.sip24 text key0 key1
+export hash_keys

@@ -1,0 +1,20 @@
+-- Nested activities of the same element type are distinct specializations,
+-- not recursion with a changing compile-time callback argument.
+local channel_nested_each = do(): U32
+    local total = U32 0
+    tasks do(scope...)
+        local outer = channel(U32, 1)
+        local inner = channel(U32, 1)
+        outer:send 7
+        outer:close()
+        inner:send 11
+        inner:close()
+        outer:each do(a)
+            inner:each do(b)
+                total = total + a * b
+            end
+        end
+    end
+    return total
+end
+export channel_nested_each

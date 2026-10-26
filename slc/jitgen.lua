@@ -23,7 +23,8 @@ local function root(p)
 end
 local function memory(r) return r.pk == 'deref' or r.pk == 'index' end
 
-local here = debug.getinfo(1, 'S').source:match('^@(.*)/slc/[^/]*$') or '.'
+local dist_root = rawget(_G, 'slc_root')
+local here = dist_root or (debug.getinfo(1, 'S').source:match('^@(.*)/slc/[^/]*$') or '.')
 JG.runtime_dir = here .. '/runtime'
 
 -- a unit: one module in one gccjit context ---------------------------------------------------------
@@ -36,6 +37,13 @@ function U:ct(t)
     local d = self.cts[t]
     if d then return d end
     local k = t.kind
+    local native = t.native_layout and t.native_layout() or t.representation
+    if native then
+        d = self:ct(native)
+        self.cts[t] = d
+        self.scope.types[G.ctype(t)] = d
+        return d
+    end
     if k == 'int' then d = C.int(t.bits / 8, t.signed)
     elseif k == 'float' then d = C.float(t.bits / 8)
     elseif k == 'bool' then d = C.BOOL
@@ -89,16 +97,6 @@ function U:ct(t)
         d:set_fields { { 'e', C.array(self:ct(t.elem), t.length) } }
         self.scope.types[name] = d
         return d
-    elseif k == 'store' or k == 'grow' or k == 'id' then
-        local cname = t.ctype()
-        d = self.scope.types[cname]
-        if not d then
-            -- the helpers cgen prints for this type, read as C
-            if k == 'store' then self:ct(require('slc.memory').Id(t.elem)) end
-            self:ct(t.elem)
-            C.read(t.cdecl(), self.scope, cname)
-            d = self.scope.types[cname]
-        end
     end
     if not d then fail('no C type for ' .. tostring(t.display or k)) end
     self.cts[t] = d
@@ -107,6 +105,41 @@ end
 
 -- a struct whose layout a header gives: its declared fields at the header's offsets
 function U:foreign_struct(t)
+    -- A record the runtime header declares, whose named fields have exactly the
+    -- C types this SLC view gives them, is that definition: no second probed
+    -- copy. Anything else (a forward declaration, a partial or retyped view)
+    -- keeps its own probed record.
+    local cname = rawget(t, 'cname')
+    local declared = cname and self.scope:find('types', (cname:gsub('^const%s+', '')))
+    if declared and declared.fields then
+        local same = true
+        local paths = rawget(t, 'cpath') or {}
+        for _, f in ipairs(t.fields) do
+            local index = declared.byname[paths[f.name] or f.name]
+            local have = index and declared.fields[index][2]
+            -- A pointer is compared by its element's C name: building the
+            -- element's record here would recurse (a task points back at its op).
+            local ok
+            if not have then ok = false
+            elseif f.type.kind == 'ptr' then
+                local et = f.type.elem
+                local want = (et.kind == 'struct' or et.kind == 'opaque') and et.cname
+                    or (et.kind == 'struct' and ('slc_' .. G.ctype(et)))
+                ok = have.k == 'ptr' and (et.kind == 'struct' or et.kind == 'opaque')
+                    and have.to.fields ~= nil and have.to.name == want
+                if not ok and et.kind ~= 'struct' and et.kind ~= 'opaque' then
+                    ok = have.k == 'ptr' and self:ct(et) == have.to
+                end
+            else
+                ok = self:ct(f.type) == have
+            end
+            if not ok then same = false break end
+        end
+        if same then
+            self.cts[t] = declared
+            return declared
+        end
+    end
     local probe = require('slc.probe')
     local lay = probe.layout(self, t)
     local fs, off, pad = {}, 0, 0
@@ -279,6 +312,13 @@ function Fn:expr(e)
             return ctx:conv(r, u:ct(t))
         end
         return ctx:conv(ctx:unop(e.o == 'neg' and '-' or '~', self:expr(e.a)), u:ct(t))
+    elseif op == 'cconst' then
+        local v = require('slc.probe').constant(u, e.cconst)
+        if not v then fail('no value probed for ' .. e.cconst) end
+        return v
+    elseif op == 'stack_index' then
+        if e.offset == 0 then return self:gs_sp() end
+        return ctx:binop('+', self:gs_sp(), ctx:int_const(C.SIZE, e.offset))
     elseif op == 'conv' then
         return ctx:conv(self:expr(e.a), u:ct(e.T))
     elseif op == 'field' then
@@ -303,7 +343,7 @@ function Fn:expr(e)
             -- a foreign struct: field by field into a zeroed temporary
             local tmp = self.fb:var(t, 'agg')
             self.fb:assign(tmp, ctx:zero(t))
-            for _, f in ipairs(e.T.fields) do
+            for _, f in ipairs((e.T.native_layout and e.T.native_layout() or e.T).fields) do
                 self.fb:assign(member_path(ctx, tmp, f.name), self:expr(e.fields[f.name]))
             end
             return tmp
@@ -348,8 +388,64 @@ function Fn:expr(e)
         local target = e.fn and { fn = u.fns[e.fn] } or { fn = u:extern(e.ext) }
         if not target.fn then fail('no function for ' .. tostring(e.fn and e.fn.cname)) end
         return ctx:call(target, args)
-    elseif op == 'rt' then
-        return self:template(e.text, e.args, e.place, false)
+    elseif op == 'atomic' then
+        local ptr = self:expr(e.ptr)
+        if e.o == 'cas' then
+            -- gcc's compare_exchange takes the expected pointer, then the desired value
+            return ctx:atomic('compare_exchange', {
+                ptr, ctx:addr(self:place(e.expected_place)), self:expr(e.args[1]),
+                ctx:int_const(C.BOOL, 0),
+                ctx:int_const(C.INT, C.MEMORY_ORDERS[e.order]),
+                ctx:int_const(C.INT, C.MEMORY_ORDERS[e.fail_order]),
+            })
+        end
+        local args = { ptr }
+        for i, a in ipairs(e.args or {}) do args[#args + 1] = self:expr(a) end
+        args[#args + 1] = ctx:int_const(C.INT, C.MEMORY_ORDERS[e.order])
+        return ctx:atomic(e.o, args)
+    elseif op == 'vaconv' then
+        local VACONV = { int = C.INT, uint = C.UINT, llong = C.int(8, true), ullong = C.int(8, false),
+                         double = C.float(8) }
+        return ctx:conv(self:expr(e.a), VACONV[e.abi])
+    elseif op == 'sizeof' then
+        -- The prepared native descriptor, not a textual C name that may also
+        -- name an opaque runtime declaration (e.g. slc_scope).
+        return ctx:int_const(u:ct(e.T), C.sizeof(u:ct(e.sizeof)))
+    elseif op == 'array_index' then
+        local data = member_path(ctx, self:expr(e.a), 'e')
+        return ctx:index(data, self:expr(e.idx))
+    elseif op == 'slot_at' then
+        local raw = ctx:call(u:rt_fn('slc_slot_at'), { self:task_value(), self:expr(e.slot) })
+        return ctx:conv(raw, u:ct(e.T))
+    elseif op == 'case_array' then
+        -- the first_of case list: an array of slc_case, passed as its address
+        local case_t = u.scope:find('types', 'slc_case')
+        if not case_t then fail('no slc_case declared in the runtime header') end
+        local n = #e.items
+        local arr = self.fb:var(C.array(case_t, math.max(n, 1)), 'cases' .. n)
+        self.fb:assign(arr, ctx:zero(C.array(case_t, math.max(n, 1))))
+        for i, c in ipairs(e.items) do
+            local at = ctx:addr(ctx:index(arr, ctx:int_const(C.SIZE, i - 1)))
+            self.fb:assign(ctx:arrow(at, 'kind'), self:expr(c.kind))
+            if c.chan then self.fb:assign(ctx:arrow(at, 'chan'), self:expr(c.chan)) end
+            if c.buf then self.fb:assign(ctx:arrow(at, 'buf'), self:expr(c.buf)) end
+            if c.ns then self.fb:assign(ctx:arrow(at, 'ns'), self:expr(c.ns)) end
+        end
+        return ctx:addr(arr)
+    elseif op == 'rtcall' then
+        -- a runtime call: the header's declaration and converted arguments
+        local target = u:rt_fn(e.cname)
+        local vals = {}
+        for i, a in ipairs(e.args or {}) do
+            local v = self:expr(a)
+            local pt = target.t.params[i]
+            vals[i] = pt and ctx:conv(v, pt) or v
+        end
+        return ctx:call(target, vals)
+    elseif op == 'task' then
+        return self:task_value()
+    elseif op == 'ops' then
+        return self:ops_value()
     end
     fail('unknown expression ' .. tostring(op))
 end
@@ -360,12 +456,15 @@ function Fn:construct(t, st, fields)
     local J = C.lib()
     local ffi = require 'ffi'
     ctx:jt(t)
-    local n = #st.fields
+    -- The C record is authoritative: a storage/id representation may be a
+    -- header struct whose fields are shared with several SLC types.
+    local list = t.fields or st.fields
+    local n = #list
     local fs = ffi.new('gcc_jit_field*[?]', math.max(n, 1))
     local vs = ffi.new('gcc_jit_rvalue*[?]', math.max(n, 1))
-    for i, f in ipairs(st.fields) do
+    for i, f in ipairs(list) do
         fs[i - 1] = ctx:field(t, i)
-        vs[i - 1] = ctx:rv(ctx:conv(self:expr(fields[f.name]), t.fields[i][2]))
+        vs[i - 1] = ctx:rv(ctx:conv(self:expr(fields[f[1]]), f[2]))
     end
     return C.val(t, J.gcc_jit_context_new_struct_constructor(ctx.c, nil, ctx:jt(t), n, fs, vs))
 end
@@ -385,47 +484,6 @@ end
 function Fn:ops_value()
     if self.task_mode then return self.ctx:arrow(self.frame, 'ops') end
     return self.slc_ops
-end
-
--- names a template may use besides holes: the function's own locals
-function Fn:template_name(name)
-    if name == 'gs_sp' then return self.gs_sp_v end
-    local k = name:match('^gs_top(%d+)$')
-    if k then
-        if self.task_mode then return self.ctx:arrow(self.frame, name) end
-        return self.gs_tops[tonumber(k)]
-    end
-    if name == 'f' and self.task_mode then return self.frame end
-    if name == 'slc_tk' then return self:task_value() end
-    return nil
-end
-
--- a runtime-library expression or statement: the template text, read as C
-function Fn:template(text, args, place, as_stmt, extra)
-    local ast = C.template(text, self.u.scope, as_stmt)
-    local vals = {}
-    local env = {
-        scope = self.u.scope,
-        holes = function(h)
-            if h == 'P' then return self:place(place) end
-            if h == 'T' then return self:task_value() end
-            if h == 'O' then return self:ops_value() end
-            if extra and extra[h] then return extra[h] end
-            local i = tonumber(h)
-            if i then
-                if not vals[i] then vals[i] = self:expr(args[i]) end
-                return vals[i]
-            end
-        end,
-        names = function(n) return self:template_name(n) end,
-        unknown = function(n, ctx) return require('slc.probe').constant(self.u, n) end,
-    }
-    local l = C.lowerer(self.fb, env)
-    if as_stmt then
-        l:stmt(ast)
-        return nil
-    end
-    return l:expr(ast)
 end
 
 -- statements -------------------------------------------------------------------------------------------
@@ -507,18 +565,33 @@ function Fn:stmt(s)
         fb:assign(self:param_lv(s.name), self:expr(s.e))
     elseif op == 'wait' then
         self:wait(s)
+    elseif op == 'spawn' then
+        self:spawn(s)
     elseif op == 'label' then
         local b = self:label_block(s.label)
         fb:jump(b)
         fb:at(b)
     elseif op == 'nop' then
         return
-    elseif op == 'rt' then
-        if s.task then return self:spawn(s) end
-        self:template(s.text, s.args, s.place, true)
+    elseif op == 'fence' then
+        self:check(s)
+    elseif op == 'trap' then
+        fb:eval(ctx:call(self.u:rt_fn('slc_trap'), { self:expr(s.msg) }))
+    elseif op == 'gs_reset' then
+        -- give a data stack back: its base for this function, its saved top
+        local k = s.k
+        local at = k == 0 and self.gs_sp_v or ctx:binop('+', self.gs_sp_v, ctx:int_const(C.SIZE, k))
+        local top = self.task_mode and ctx:arrow(self.frame, 'gs_top' .. k) or self.gs_tops[k]
+        fb:eval(ctx:call(self.u:rt_fn('slc_gs_reset'), { at, top }))
     else
         fail('unknown statement ' .. tostring(op))
     end
+end
+
+-- an atomic fence: the memory order the stage chose
+function Fn:check(s)
+    local ctx, fb = self.ctx, self.fb
+    fb:eval(ctx:atomic('thread_fence', { ctx:int_const(C.INT, C.MEMORY_ORDERS[s.order]) }))
 end
 
 -- a spawn: a zeroed frame, the copies, then the task may run
@@ -557,9 +630,24 @@ function Fn:wait(s)
         self.blocking_n = (self.blocking_n or 0) + 1
         extra.F = self:blocking_fn(s.body)
     end
-    local args = {}
-    for i, a in ipairs(s.args) do args[i] = a end
-    local call = self:template(s.fmt, args, nil, false, extra)
+    local args = s.args
+    -- the callee is the runtime header's own declaration, so its parameter
+    -- types (and the conversions to them) come from there
+    local target = u:rt_fn(s.callee.cname)
+    local vals = {}
+    for i, a in ipairs(args) do
+        local v
+        if a.op == 'block_fn' then
+            v = ctx:addr({ fn = extra.F.fn, t = extra.F.t })
+        elseif a.op == 'block_env' then
+            v = ctx:conv(self.frame, C.VOIDP)
+        else
+            v = self:expr(a)
+        end
+        local pt = target.t.params[i]
+        vals[i] = pt and ctx:conv(v, pt) or v
+    end
+    local call = ctx:call(target, vals)
     local used = self.reads[s.result]
     local pending = ctx:cmp('==', call, ctx:int_const(INT, 1))
     if self.task_mode then
@@ -716,12 +804,19 @@ end
 function JG.build(mod, opts)
     opts = opts or {}
     local fns = G.prepare(mod)
+    -- Code generation belongs to this module: per-compilation caches (layout
+    -- representations) must be looked up for the module being emitted, even if
+    -- another compilation (the runtime policy) ran after it. Staging of the
+    -- caller may still be in progress, so the previous module is restored.
+    local saved_module = S.module
+    S.module = mod
+    local ok, result = pcall(function()
     local ctx = C.context(opts)
     local scope = C.scope(C.runtime_scope(opts.runtime_dir or JG.runtime_dir))
     local u = setmetatable({ ctx = ctx, scope = scope, cts = {}, fns = {}, externs = {}, tasks = {},
                              exports = {}, mod = mod }, U)
     local structs = G.collect_structs(fns)
-    u.probe = require('slc.probe').run(mod, fns, structs)
+    u.probe = require('slc.probe').run(mod, fns, structs, { opts.runtime_dir or JG.runtime_dir })
     u.getter_fns = {}
     for _, t in ipairs(structs) do u:ct(t) end
     for _, fn in ipairs(fns) do
@@ -740,6 +835,10 @@ function JG.build(mod, opts)
     end
     ctx:check()
     return u
+    end)
+    S.module = saved_module
+    if not ok then error(result, 0) end
+    return result
 end
 
 -- for in-process calls: per export, an argument block and a thunk over it, so
@@ -772,6 +871,7 @@ end
 -- the C declarations of the exports, for LuaJIT's FFI (prefix keeps units apart)
 function U:ffi_decls(prefix, everything)
     local out, done = {}, {}
+    local defined_names = {}
     local function cname(t)
         if t.k == 'int' then return (t.signed and 'int' or 'uint') .. (t.size * 8) .. '_t' end
         if t.k == 'float' then return t.size == 4 and 'float' or 'double' end
@@ -787,6 +887,14 @@ function U:ffi_decls(prefix, everything)
     local function define(t)
         if done[t] then return end
         done[t] = true
+        -- Two SLC views of one C struct are two descriptors with one name: the
+        -- FFI declaration unit holds one of them (a complete form wins).
+        local named = t.k == 'struct' or t.k == 'union'
+        if named and t.name then
+            local have = defined_names[t.name]
+            if have == 'full' or (have and not t.fields) then return end
+            defined_names[t.name] = t.fields and 'full' or 'forward'
+        end
         if t.k == 'ptr' then
             if t.to.k == 'struct' and not t.to.fields then
                 out[#out + 1] = 'struct ' .. prefix .. t.to.name .. ';'

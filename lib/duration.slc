@@ -1,0 +1,8 @@
+-- Unit conversion is ordinary SLC arithmetic, at either binding time.
+-- Duration's representation/overflow rules and sleep's wait remain primitives.
+local duration = {}
+duration.ns = do(x: Duration): Duration = Duration(x)
+duration.us = do(x: Duration): Duration = Duration(x) * Duration(1000)
+duration.ms = do(x: Duration): Duration = Duration(x) * Duration(1000000)
+duration.seconds = do(x: Duration): Duration = Duration(x) * Duration(1000000000)
+return duration

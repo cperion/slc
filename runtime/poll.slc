@@ -1,0 +1,125 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Poll backend policy and loop, including queue growth, deadline selection,
+-- readiness classification and compaction. C only starts the native thread.
+return function(t)
+    local Op, Mutex = t.Op, t.Mutex
+    local h = '"slc_io_poll.h"'
+    local State = cstruct("slc_poll_state", h, {
+        { "mu", Mutex }, { "reader", I32 }, { "writer", I32 },
+        { "pending", Ptr(Ptr Op) }, { "count", U64 }, { "capacity", U64 },
+    })
+    local Fd = cstruct("struct pollfd", "<poll.h>", {
+        { "fd", I32 }, { "events", I16 }, { "revents", I16 },
+    })
+    local ReadOp = t.posix.ReadOp
+    local ReadOpPtr = Ptr ReadOp
+    local options = { header = h }
+    local lock = extern("pthread_mutex_lock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
+    local unlock = extern("pthread_mutex_unlock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
+    local trap = extern("slc_trap", { CString }, Unit, options)
+    local now = extern("slc_now_ns", {}, U64, options)
+    local prepare, offload, wants_write = t.posix.prepare, t.posix.offload, t.posix.wants_write
+    local try, abandon, complete = t.posix.try, t.posix.abandon, t.complete
+    local pipe = t.posix.pipe
+    local resize_ops = extern("realloc", { Ptr(Ptr Op), U64 }, Ptr(Ptr Op), { header = "<stdlib.h>" })
+    local resize_fds = extern("realloc", { Ptr Fd, U64 }, Ptr Fd, { header = "<stdlib.h>" })
+    local read = extern("read", { I32, Ptr U8, U64 }, I64, { header = "<unistd.h>" })
+    local write = extern("write", { I32, Ptr U8, U64 }, I64, { header = "<unistd.h>" })
+    local poll = extern("poll", { Ptr Fd, U64, I32 }, I32, { header = "<poll.h>" })
+    local input = cconst("POLLIN", I16, "<poll.h>")
+    local output = cconst("POLLOUT", I16, "<poll.h>")
+    local done = cconst("SLC_IO_DONE", I32, h)
+    local timed_out = cconst("SLC_IO_TIMED_OUT", I32, h)
+    local slc_poll_prepare = do(state: Ptr State): Unit
+        local value = I64 0
+        if pipe(Ptr(state.reader), Ptr(state.writer), Ptr value) ~= done then
+            trap "cannot make the I/O wake-up pipe"
+        end
+    end
+    local slc_poll_submit = do(state: Ptr State, op: Ptr Op): Unit
+        if prepare(op) ~= 0 or offload(op) ~= 0 then return end
+        lock(Ptr state.mu)
+        if state.count == state.capacity then
+            local n = U64 16
+            if state.capacity ~= 0 then n = state.capacity * 2 end
+            local data = resize_ops(state.pending, n * size_of(Ptr Op))
+            if data == null(Ptr Op) then unlock(Ptr state.mu); trap "out of memory for I/O" end
+            state.pending = data
+            state.capacity = n
+        end
+        state.pending[state.count] = op
+        state.count = state.count + 1
+        unlock(Ptr state.mu)
+        local byte = U8 1
+        -- A full wake pipe already means "look again".
+        write(state.writer, Ptr byte, 1)
+    end
+    local slc_poll_run = do(state: Ptr State): Unit
+        local fds = null Fd
+        local capacity = U64 0
+        while true do
+            local timeout = I32(-1)
+            local buf: Array(U8, 64) = Array(U8, 64) {}
+            lock(Ptr state.mu)
+            local n = state.count
+            if n + 1 > capacity then
+                local data = resize_fds(fds, (n + 1) * size_of Fd)
+                if data == null Fd then unlock(Ptr state.mu); trap "out of memory for I/O" end
+                fds = data
+                capacity = n + 1
+            end
+            fds[0].fd = state.reader
+            fds[0].events = input
+            local time = now()
+            local i = U64 0
+            while i < n do
+                local op = state.pending[i]
+                fds[i + 1].fd = op.fd
+                fds[i + 1].events = input
+                if wants_write(ReadOpPtr op) ~= 0 then fds[i + 1].events = output end
+                fds[i + 1].revents = 0
+                if op.deadline ~= 0 then
+                    local left = U64 0
+                    if op.deadline > time then left = op.deadline - time end
+                    local ms = I32((left + 999999) / 1000000)
+                    if timeout < 0 or ms < timeout then timeout = ms end
+                end
+                i = i + 1
+            end
+            unlock(Ptr state.mu)
+            poll(fds, n + 1, timeout)
+            local bytes = (Ptr U8)(Ptr buf)
+            while read(state.reader, bytes, 64) > 0 do end
+            -- Appenders may have relocated pending while poll ran, but only
+            -- this thread removes: the first n entries still match fds.
+            lock(Ptr state.mu)
+            time = now()
+            i = 0
+            while i < n do
+                local op = state.pending[i]
+                if fds[i + 1].revents ~= 0 and try(op) ~= 0 then
+                    state.pending[i] = null Op
+                elseif op.deadline ~= 0 and time >= op.deadline then
+                    state.pending[i] = null Op
+                    abandon op
+                    complete(op, timed_out, 0)
+                end
+                i = i + 1
+            end
+            i = 0
+            local k = U64 0
+            while i < state.count do
+                if state.pending[i] ~= null Op then
+                    state.pending[k] = state.pending[i]
+                    k = k + 1
+                end
+                i = i + 1
+            end
+            state.count = k
+            unlock(Ptr state.mu)
+        end
+    end
+    export slc_poll_prepare
+    export slc_poll_submit
+    export slc_poll_run
+end

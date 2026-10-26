@@ -1,0 +1,199 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Kqueue policy and event loop. Foreign calls are POSIX operations only.
+return function(t)
+    local Op, Mutex = t.Op, t.Mutex
+    local Void = opaque "void"
+    local h = '"slc_io_kqueue.h"'
+    local options = { header = h }
+    local Waiters = cstruct("slc_fd_waiters", h, { { "head", Ptr Op }, { "tail", Ptr Op } })
+    local Queue = cstruct("slc_fd_queue", h, { { "read", Waiters }, { "write", Waiters } })
+    local State = cstruct("slc_kqueue_state", h, {
+        { "mu", Mutex }, { "kq", I32 }, { "incoming", Ptr Op }, { "fds", Ptr Queue }, { "capacity", U64 },
+    })
+    local Event = cstruct("struct kevent", h, {
+        { "ident", U64 }, { "filter", I16 }, { "flags", U16 }, { "fflags", U32 }, { "data", I64 }, { "udata", Ptr Void },
+    })
+    local Timespec = cstruct("struct timespec", "<time.h>", { { "tv_sec", I64 }, { "tv_nsec", I64 } })
+    local lock = extern("pthread_mutex_lock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
+    local unlock = extern("pthread_mutex_unlock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
+    local trap = extern("slc_trap", { CString }, Unit, options)
+    local now = extern("slc_now_ns", {}, U64, options)
+    local errno = cread("errno", I32, "<errno.h>")
+    local kqueue = extern("kqueue", {}, I32, options)
+    local kevent = extern("kevent", { I32, Ptr Event, I32, Ptr Event, I32, Ptr Timespec }, I32, options)
+    local close = extern("close", { I32 }, I32, { header = "<unistd.h>" })
+    local resize = extern("realloc", { Ptr Queue, U64 }, Ptr Queue, { header = "<stdlib.h>" })
+    local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.h>" })
+    local input, output, user = cconst("EVFILT_READ", I16, h), cconst("EVFILT_WRITE", I16, h), cconst("EVFILT_USER", I16, h)
+    local add, clear, oneshot, delete, eof = cconst("EV_ADD", U16, h), cconst("EV_CLEAR", U16, h), cconst("EV_ONESHOT", U16, h), cconst("EV_DELETE", U16, h), cconst("EV_EOF", U16, h)
+    local trigger = cconst("NOTE_TRIGGER", U32, h)
+    local failed, timed_out, connect_kind = cconst("SLC_IO_FAILED", I32, h), cconst("SLC_IO_TIMED_OUT", I32, h), cconst("SLC_K_CONNECT", I32, h)
+    local complete, try, abandon = t.complete, t.posix.try, t.posix.abandon
+    local ReadOpPtr = Ptr t.posix.ReadOp
+    local event = do(fd: U64, filter: I16, flags: U16, fflags: U32): Event
+        return Event { ident = fd, filter = filter, flags = flags, fflags = fflags, data = 0, udata = null Void }
+    end
+    local slc_kqueue_prepare = do(s: Ptr State): Unit
+        s.kq = kqueue()
+        if s.kq < 0 then trap "cannot make a kqueue" end
+        local flags = bor add clear
+        local ev = event 0 user flags 0
+        if kevent(s.kq, Ptr ev, 1, null Event, 0, null Timespec) < 0 then trap "cannot register the kqueue wake-up" end
+    end
+    local slc_kqueue_submit = do(s: Ptr State, op: Ptr Op): Unit
+        if t.posix.prepare(op) ~= 0 or t.posix.offload(op) ~= 0 then return end
+        lock(Ptr s.mu)
+        op.next = s.incoming
+        s.incoming = op
+        unlock(Ptr s.mu)
+        local ev = event 0 user 0 trigger
+        kevent(s.kq, Ptr ev, 1, null Event, 0, null Timespec)
+    end
+    local queue_of = do(s: Ptr State, fd: I32, direction: I32): Ptr Waiters
+        local index = U64 fd
+        if index >= s.capacity then
+            local n = s.capacity
+            if n == 0 then n = 64 end
+            while n <= index do n = n * 2 end
+            local queues = resize(s.fds, n * size_of Queue)
+            if queues == null Queue then trap "out of memory for I/O" end
+            zero(bytes(queues[s.capacity]), 0, (n - s.capacity) * size_of Queue)
+            s.fds = queues
+            s.capacity = n
+        end
+        if direction == 0 then return Ptr s.fds[index].read end
+        return Ptr s.fds[index].write
+    end
+    local watch = do(s: Ptr State, fd: I32, direction: I32, on: Bool): I32
+        local filter = input
+        if direction ~= 0 then filter = output end
+        local flags = delete
+        if on then flags = bor add oneshot end
+        local ev = event(U64 fd, filter, flags, 0)
+        return kevent(s.kq, Ptr ev, 1, null Event, 0, null Timespec)
+    end
+    local push = do(w: Ptr Waiters, op: Ptr Op): Unit
+        op.next = null Op
+        op.prev = w.tail
+        if w.tail ~= null Op then w.tail.next = op else w.head = op end
+        w.tail = op
+    end
+    local unlink = do(w: Ptr Waiters, op: Ptr Op): Unit
+        if op.prev ~= null Op then op.prev.next = op.next else w.head = op.next end
+        if op.next ~= null Op then op.next.prev = op.prev else w.tail = op.prev end
+        op.next = null Op
+        op.prev = null Op
+    end
+    local ready = do(s: Ptr State, fd: I32, direction: I32, eof_error: I32): Unit
+        local w = queue_of s fd direction
+        while w.head ~= null Op do
+            local op = w.head
+            unlink w op
+            if eof_error ~= 0 and op.kind == connect_kind then
+                close op.fd
+                complete(op, failed, I64 eof_error)
+                continue
+            end
+            if try(op) == 0 then
+                op.next = w.head
+                op.prev = null Op
+                if w.head ~= null Op then w.head.prev = op else w.tail = op end
+                w.head = op
+                break
+            end
+        end
+        if w.head ~= null Op and watch(s, fd, direction, true) < 0 then
+            local error = errno()
+            while w.head ~= null Op do
+                local op = w.head
+                unlink w op
+                complete(op, failed, I64 error)
+            end
+        end
+    end
+    local slc_kqueue_run = do(s: Ptr State): Unit
+        local storage: Array(Event, 64) = Array(Event, 64) {}
+        local events = (Ptr Event)(Ptr storage)
+        while true do
+            lock(Ptr s.mu)
+            local incoming = s.incoming
+            s.incoming = null Op
+            unlock(Ptr s.mu)
+            while incoming ~= null Op do
+                local next = incoming.next
+                local direction = t.posix.wants_write(ReadOpPtr incoming)
+                local w = queue_of s incoming.fd direction
+                if w.head == null Op and watch(s, incoming.fd, direction, true) < 0 then
+                    local error = errno()
+                    if try(incoming) == 0 then complete(incoming, failed, I64 error) end
+                    incoming = next
+                    continue
+                end
+                push w incoming
+                incoming = next
+            end
+            local soonest = U64 0
+            local fd = U64 0
+            while fd < s.capacity do
+                local direction = I32 0
+                while direction < 2 do
+                    local w = queue_of(s, I32 fd, direction)
+                    local op = w.head
+                    while op ~= null Op do
+                        if op.deadline ~= 0 and (soonest == 0 or op.deadline < soonest) then soonest = op.deadline end
+                        op = op.next
+                    end
+                    direction = direction + 1
+                end
+                fd = fd + 1
+            end
+            local ts = Timespec { tv_sec = 0, tv_nsec = 0 }
+            local timeout = null Timespec
+            if soonest ~= 0 then
+                local time = now()
+                local left = U64 0
+                if soonest > time then left = soonest - time end
+                ts.tv_sec = I64(left / 1000000000)
+                ts.tv_nsec = I64(left % 1000000000)
+                timeout = Ptr ts
+            end
+            local n = kevent(s.kq, null Event, 0, events, 64, timeout)
+            local i = I32 0
+            while i < n do
+                local ev = Ptr events[U32 i]
+                if ev.filter ~= user then
+                    local direction = I32 0
+                    if ev.filter == output then direction = 1 end
+                    local error = I32 0
+                    if band(ev.flags, eof) ~= 0 then error = I32 ev.fflags end
+                    ready(s, I32 ev.ident, direction, error)
+                end
+                i = i + 1
+            end
+            local time = now()
+            fd = 0
+            while fd < s.capacity do
+                local direction = I32 0
+                while direction < 2 do
+                    local w = queue_of(s, I32 fd, direction)
+                    local op = w.head
+                    while op ~= null Op do
+                        local next = op.next
+                        if op.deadline ~= 0 and time >= op.deadline then
+                            unlink w op
+                            if w.head == null Op then watch(s, I32 fd, direction, false) end
+                            abandon op
+                            complete(op, timed_out, 0)
+                        end
+                        op = next
+                    end
+                    direction = direction + 1
+                end
+                fd = fd + 1
+            end
+        end
+    end
+    export slc_kqueue_prepare
+    export slc_kqueue_submit
+    export slc_kqueue_run
+end

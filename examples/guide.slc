@@ -1,6 +1,6 @@
 -- The examples of docs/designing-and-writing-slc.md, as one program.
 -- Every lua block in the guide is an excerpt of this file (tests/guide.lua).
-local io = import "io"
+local io = require "slc.io"
 
 -- §3 Values first ----------------------------------------------------------------------------------
 

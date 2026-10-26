@@ -318,7 +318,25 @@ function Ctx:zero(t)
 end
 
 function Ctx:string(s)
-    local r = J.gcc_jit_context_new_string_literal(self.c, s)
+    local r
+    if s:find('\0', 1, true) then
+        -- new_string_literal takes a NUL-terminated C string, not a byte span.
+        -- Preserve binary literals in a constant, internally owned byte array.
+        self.byte_strings = self.byte_strings or {}
+        if self.byte_strings[s] then return self.byte_strings[s] end
+        self.byte_string_count = (self.byte_string_count or 0) + 1
+        local bytes = s .. '\0'
+        local char = J.gcc_jit_type_get_const(self:jt(C.CHAR))
+        local array = J.gcc_jit_context_new_array_type(self.c, nil, char, #bytes)
+        local global = J.gcc_jit_context_new_global(self.c, nil, J.GCC_JIT_GLOBAL_INTERNAL,
+            array, '__slc_binary_literal_' .. self.byte_string_count)
+        J.gcc_jit_global_set_initializer(global, bytes, #bytes)
+        r = J.gcc_jit_lvalue_get_address(global, nil)
+        local value = val(C.CHARP, J.gcc_jit_context_new_cast(self.c, nil, r, self:jt(C.CHARP)))
+        self.byte_strings[s] = value
+        return value
+    end
+    r = J.gcc_jit_context_new_string_literal(self.c, s)
     return val(C.CHARP, J.gcc_jit_context_new_cast(self.c, nil, r, self:jt(C.CHARP)))
 end
 
@@ -790,7 +808,8 @@ function C.release_result(r) J.gcc_jit_result_release(r) end
 -- the C reader ----------------------------------------------------------------------------------------
 -- The C subset the compiler contains: declarations, typedefs, structs and
 -- unions, prototypes, globals, static inline functions, object-like and
--- function-like macros, and template text with holes ($1, $P, $T, ...).
+-- function-like macros. The prepared IR carries no C text, so there is no
+-- template mode and no holes.
 
 local KEYWORDS = {}
 for w in ([[typedef extern static inline const volatile struct union enum void char short int long signed
@@ -816,10 +835,6 @@ local function lex(src, where)
         elseif c:match('[%a_]') then
             local s, e = src:find('^[%w_]+', i)
             toks[#toks + 1] = { k = 'id', v = src:sub(s, e) }
-            i = e + 1
-        elseif c == '$' then
-            local s, e = src:find('^%$[%w]+', i)
-            toks[#toks + 1] = { k = 'hole', v = src:sub(s + 1, e) }
             i = e + 1
         elseif c:match('%d') or (c == '.' and src:sub(i + 1, i + 1):match('%d')) then
             local s, e = src:find('^0[xX]%x+[uUlL]*', i)
@@ -1353,7 +1368,6 @@ function P:primary()
                  hex = body:match('^0[xX]') ~= nil }
     end
     if t.k == 'str' then return { k = 'str', v = t.v } end
-    if t.k == 'hole' then return { k = 'hole', h = t.v } end
     if t.k == 'id' then return { k = 'id', name = t.v } end
     if t.v == '(' then
         local e = self:expression()
@@ -1534,30 +1548,8 @@ function C.read(src, scope, where)
     return scope
 end
 
--- parse a template: an expression, or statements
-local tmpl_cache = setmetatable({}, { __mode = 'k' })
-function C.template(text, scope, as_stmt)
-    tmpl_cache[scope] = tmpl_cache[scope] or {}
-    local key = (as_stmt and 'S' or 'E') .. text
-    local hit = tmpl_cache[scope][key]
-    if hit then return hit end
-    local toks = expand(lex(text, 'template'), scope)
-    local p = parser(toks, scope, 'template "' .. text .. '"')
-    local ast
-    if as_stmt then
-        local items = {}
-        while p:peek() do items[#items + 1] = p:block_item() end
-        ast = { k = 'block', items = items }
-    else
-        ast = p:expression()
-        if p:peek() then p:err('trailing text') end
-    end
-    tmpl_cache[scope][key] = ast
-    return ast
-end
-
 -- lowering the reader's AST ------------------------------------------------------------------------
--- env: { scope, holes = function(name) -> value, names = function(name) -> value | nil }
+-- env: { scope, names = function(name) -> value | nil }
 
 local L = {}
 L.__index = L
@@ -1663,10 +1655,6 @@ function L:expr(e)
         if e.name == 'true' then return ctx:int_const(C.INT, 1) end
         if e.name == 'false' then return ctx:int_const(C.INT, 0) end
         return self:lookup(e.name)
-    elseif k == 'hole' then
-        local v = self.env.holes(e.h)
-        if not v then fail('template hole $' .. e.h .. ' has no value') end
-        return v
     elseif k == 'call' then
         if e.f.k == 'id' and ATOMIC_OPS[e.f.name] then
             local args = {}

@@ -1,0 +1,4 @@
+local name = ...
+local Item = struct { value: U32 }
+local increment = do(x: U32): U32 = x + 1
+return { name = name, Item = Item, increment = increment }

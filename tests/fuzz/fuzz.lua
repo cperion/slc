@@ -8,7 +8,8 @@
 --   native     f compiled into this process by gccjit
 --   c-O0/c-O2  f exported, C backend, cc
 --   splits     wrappers with some inputs known while compiling, through gccjit and C
--- Every tenth program the C build also runs under UBSan. A mismatch is shrunk
+-- Every tenth program the C build also runs under UBSan, every fiftieth under
+-- ASan. A mismatch is shrunk
 -- on the AST and saved to tests/fuzz/regressions/.
 
 local root = arg[0]:match('^(.*)/tests/fuzz/[^/]*$') or '.'
@@ -16,15 +17,38 @@ package.path = root .. '/?.lua;' .. package.path
 local saved_arg = arg
 arg = { [0] = root .. '/slc.lua' }
 package.loaded['slc.driver_loaded'] = true
-local slc = dofile(root .. '/slc.lua')
+-- the compiler: this tree's source, or the copy an embedding binary carries
+local function load_slc()
+    local provider = rawget(_G, '__slc_embedded_source')
+    if os.getenv('SLC_DIST_DEBUG') then
+        io.stderr:write('debug provider=', tostring(provider), ' slc.lua=', tostring(provider and provider('slc.lua') and #provider('slc.lua')), '\n')
+    end
+    local text = provider and provider('slc.lua')
+    local saved = package.loaded['slc.driver_loaded']
+    package.loaded['slc.driver_loaded'] = true
+    local module
+    if text then
+        module = assert(loadstring(text, '@slc.lua'))()
+    else
+        module = dofile(root .. '/slc.lua')
+    end
+    package.loaded['slc.driver_loaded'] = saved
+    return module
+end
+local slc = load_slc()
 arg = saved_arg
 local Gen = dofile(root .. '/tests/fuzz/gen.lua')
 local G = require 'slc.cgen'
 
-local TMP = (os.getenv('TMPDIR') or '/tmp') .. '/slc_fuzz_' .. tostring(os.time()) .. '_' .. math.random(1e6)
+-- unique per process: two fuzz runs in the same second must not share a directory
+local STAMP = tostring(os.time()) .. '_' .. tostring({}):match('0x(%x+)')
+local TMP = (os.getenv('TMPDIR') or '/tmp') .. '/slc_fuzz_' .. STAMP
 os.execute('mkdir -p ' .. TMP)
-local RT = root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c ' .. root .. '/runtime/slc_io_posix.c '
-    .. root .. '/runtime/slc_io_poll.c'
+-- the runtime as the embedding binary carries it (a prebuilt archive), or the
+-- sources in a development tree
+local RT = os.getenv('SLC_RT') and ('%q'):format(os.getenv('SLC_RT'))
+    or (require('slc.runtime_build').source() .. ' ' .. root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c '
+        .. root .. '/runtime/slc_io_posix.c ' .. root .. '/runtime/slc_io_poll.c')
 
 local function sh(cmd)
     local p = io.popen('(' .. cmd .. ') 2>&1; echo "__rc=$?"')
@@ -52,6 +76,19 @@ local function cliteral(t, v)
         return ('%d'):format(v) .. (d.bits == 64 and 'LL' or '')
     end
     return ('%d'):format(v) .. 'u' .. (d.bits == 64 and 'LL' or '')
+end
+
+-- a sanitizer run is only useful where the sanitizer exists: a missing runtime
+-- library is not a finding. Probed once per process.
+local sanitizers = {}
+local function have_sanitizer(kind)
+    if sanitizers[kind] ~= nil then return sanitizers[kind] end
+    local ok = os.execute(('printf "int main(void){return 0;}" | cc -x c -fsanitize=%s - -o /dev/null >/dev/null 2>&1'):format(kind))
+    sanitizers[kind] = (ok == 0 or ok == true)
+    if not sanitizers[kind] then
+        io.write(('  (%s sanitizer unavailable here: skipping those runs)\n'):format(kind))
+    end
+    return sanitizers[kind]
 end
 
 -- one program, all its runs: returns { [run] = { [vector] = outcome } } and the text
@@ -158,9 +195,12 @@ local function run_program(prog, vectors, opts)
     local dm = TMP .. '/main.c'
     fh = assert(io.open(dm, 'w')); fh:write(table.concat(d, '\n') .. '\n'); fh:close()
     local levels = opts.fast and { 'O0' } or { 'O0', 'O2' }
-    if opts.ubsan then levels[#levels + 1] = 'ubsan' end
+    if opts.ubsan and have_sanitizer('undefined') then levels[#levels + 1] = 'ubsan' end
+    if opts.asan and have_sanitizer('address') then levels[#levels + 1] = 'asan' end
     for _, lv in ipairs(levels) do
-        local flags = lv == 'ubsan' and '-O1 -fsanitize=undefined -fno-sanitize-recover=all' or ('-' .. lv)
+        local flags = lv == 'ubsan' and '-O1 -fsanitize=undefined -fno-sanitize-recover=all'
+            or lv == 'asan' and '-O1 -fsanitize=address -fno-omit-frame-pointer'
+            or ('-' .. lv)
         local okc, out = sh(('cc -std=c99 -w %s -I%s/runtime %s %s %s -pthread -o %s/p_%s && %s/p_%s'):format(
             flags, root, c, dm, RT, TMP, lv, TMP, lv))
         local tab = {}
@@ -197,7 +237,7 @@ local function mismatches(res, vectors)
             if got ~= k then bad[#bad + 1] = { what .. ' v' .. vi, k, tostring(got) } end
         end
         if res.native[vi] then cmp('native', res.native[vi]) end
-        for _, lv in ipairs { 'O0', 'O2', 'ubsan' } do
+        for _, lv in ipairs { 'O0', 'O2', 'ubsan', 'asan' } do
             local t = res['c_' .. lv]
             if t then
                 if t.error then
@@ -367,7 +407,7 @@ end
 local function check_seed(seed, opts)
     local prog = Gen.program(seed)
     local vectors = Gen.inputs(prog, seed, opts.vectors or 6)
-    local res = run_program(prog, vectors, { ubsan = opts.ubsan })
+    local res = run_program(prog, vectors, { ubsan = opts.ubsan, asan = opts.asan })
     local bad = mismatches(res, vectors)
     if #bad == 0 then return true end
     io.write(('seed %d: %d mismatches, first: %s: expected %s, got %s\n'):format(seed, #bad, bad[1][1],
@@ -393,7 +433,7 @@ local function check_seed(seed, opts)
                 end
                 return false
             end
-            local r = run_program(p, vectors, { ubsan = opts.ubsan })
+            local r = run_program(p, vectors, { ubsan = opts.ubsan, asan = opts.asan })
             local b = mismatches(r, vectors)
             for _, x in ipairs(b) do if x[1]:match('^(%S+)') == kind then return true end end
             return false
@@ -418,7 +458,7 @@ local function check_regression(path)
     return #bad == 0, bad
 end
 
-local opts = { seconds = 60, ubsan_every = 10 }
+local opts = { seconds = 60, ubsan_every = 10, asan_every = 50 }
 local i = 1
 while i <= #arg do
     local a = arg[i]
@@ -428,6 +468,9 @@ while i <= #arg do
     elseif a == '--no-shrink' then opts.shrink = false
     elseif a == '--regressions' then opts.regressions = true
     elseif a == '--keep' then opts.keep = true
+    elseif a == '--asan-every' then i = i + 1; opts.asan_every = tonumber(arg[i])
+    elseif a == '--no-asan' then opts.asan_every = 0
+    elseif a == '--ubsan-every' then i = i + 1; opts.ubsan_every = tonumber(arg[i])
     end
     i = i + 1
 end
@@ -452,7 +495,8 @@ local seed = opts.seed or (os.time() % 100000) * 1000
 local n, fails = 0, 0
 while true do
     n = n + 1
-    local ok = check_seed(seed, { ubsan = n % opts.ubsan_every == 0, shrink = opts.shrink })
+    local ok = check_seed(seed, { ubsan = n % opts.ubsan_every == 0,
+        asan = opts.asan_every > 0 and n % opts.asan_every == 0, shrink = opts.shrink })
     if not ok then fails = fails + 1 end
     seed = seed + 1
     if opts.count and n >= opts.count then break end

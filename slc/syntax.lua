@@ -841,6 +841,10 @@ function G:expr(e)
             -- a free name inside an opened region: an introduced name, or the binding outside
             return ('__S.oname(%s, %s, function() return %s end)'):format(self:open_list(), str(e.name), e.name)
         end
+        local v = self:lookup(e.name)
+        if v and v.loop_slot then
+            return '__S.inferred_state(' .. v.loop_slot .. ', ' .. e.name .. ')'
+        end
         return e.name
     elseif k == 'home' then
         local v = self:lookup('__home')
@@ -856,7 +860,7 @@ function G:expr(e)
     elseif k == 'field' then
         -- through __S.dot: a native value's fields never meet the evaluator's own keys
         return '__S.dot(' .. self:expr(e.obj) .. ', ' .. str(e.name) .. ')'
-    elseif k == 'index' then return self:prefix(e.obj) .. '[' .. self:expr(e.key) .. ']'
+    elseif k == 'index' then return '__S.index(' .. self:expr(e.obj) .. ', ' .. self:expr(e.key) .. ')'
     elseif k == 'call' and (e.fn.k == 'call' or e.fn.k == 'method') then
         -- a saturating chain: f(a)(b) do ... end accumulates arguments until f is saturated
         local groups = {}
@@ -1139,6 +1143,17 @@ function G:assign_target(t, value)
             -- an introduced field name: a store to its place
             return ('__S.oset(%s, %s, %s)'):format(self:open_list(), str(t.name), value)
         end
+        if v and v.inferred then
+            local host
+            if owner ~= self.body then
+                host = 'error(' .. str("cannot assign '" .. t.name .. "': a typed body can only assign bindings it declares") .. ')'
+            else
+                host = t.name .. ' = __S.assign_name(' .. t.name .. ', __value, '
+                    .. (self.body.region - v.region) .. ')'
+            end
+            return '__S.assign_inferred(' .. self:expr(t) .. ', ' .. value
+                .. ', function(__value) ' .. host .. ' end)'
+        end
         if v and v.typed then
             -- a typed local is a place, also from a callback inside its word
             return '__S.set(' .. t.name .. ', ' .. value .. ')'
@@ -1168,7 +1183,7 @@ function G:assign_target(t, value)
     elseif t.k == 'field' then
         return '__S.setindex(' .. self:prefix(t.obj) .. ', ' .. str(t.name) .. ', ' .. value .. ')'
     elseif t.k == 'index' then
-        return '__S.setindex(' .. self:prefix(t.obj) .. ', ' .. self:expr(t.key) .. ', ' .. value .. ')'
+        return '__S.setindex(' .. self:prefix(t.obj) .. ', ' .. self:expr(t.key) .. ', ' .. value .. ', true)'
     end
     self:err('cannot assign to this expression', t.line)
 end
@@ -1188,16 +1203,37 @@ function G:loop_state(nodes)
     local list = {}
     for name in pairs(seen) do
         local v, owner = self:lookup(name)
-        if v and v.typed and owner == self.body then list[#list + 1] = name end
+        if v and (v.typed or v.inferred) and owner == self.body then list[#list + 1] = name end
     end
     table.sort(list)
     return list
 end
 
 function G:state_list(state)
-    local q = {}
-    for i, n in ipairs(state) do q[i] = str(n) end
-    return '{ ' .. table.concat(state, ', ') .. ' }, { ' .. table.concat(q, ', ') .. ' }'
+    local q, values = {}, {}
+    for i, n in ipairs(state) do
+        q[i] = str(n)
+        values[i] = '(' .. self:expr({ k = 'name', name = n }) .. ' or false)'
+    end
+    return '{ ' .. table.concat(values, ', ') .. ' }, { ' .. table.concat(q, ', ') .. ' }'
+end
+
+function G:loop_bindings(state)
+    local params, bindings = {}, {}
+    for i, n in ipairs(state) do
+        local v = self:lookup(n)
+        if v.inferred then
+            self.loop_id = (self.loop_id or 0) + 1
+            params[i] = '__inferred_loop_' .. self.loop_id
+            bindings[n] = { inferred = true, loop_slot = params[i], region = v.region }
+        else
+            params[i] = n
+            bindings[n] = { typed = true, region = v.region }
+        end
+    end
+    return table.concat(params, ', '), function()
+        for n, v in pairs(bindings) do self.body.scopes[#self.body.scopes][n] = v end
+    end
 end
 
 function G:cond(e)
@@ -1231,16 +1267,18 @@ function G:stat(s)
         if has_type then
             if #s.exprs > #s.names then self:err('too many values in local declaration', s.line) end
             for i, n in ipairs(s.names) do
-                if not n.type then
-                    self:err(("in a typed declaration every name needs a type ('%s' has none)"):format(n.name), s.line)
-                end
                 if s.exprs[i] and s.exprs[i].k == 'spread' then
                     self:err('spread-context: a typed local takes one value; bind the spread to untyped locals', s.line)
                 end
                 local init = s.exprs[i] and self:expr(s.exprs[i]) or 'nil'
-                self:emit(' local ' .. n.name .. ' = __S.decl(' .. self:expr(n.type) .. ', ' .. init
-                    .. ', ' .. str(n.name) .. ')')
-                self:declare(n.name, { typed = true })
+                if n.type then
+                    self:emit(' local ' .. n.name .. ' = __S.decl(' .. self:expr(n.type) .. ', ' .. init
+                        .. ', ' .. str(n.name) .. ')')
+                    self:declare(n.name, { typed = true })
+                else
+                    self:emit(' local ' .. n.name .. ' = __S.infer(' .. init .. ', ' .. str(n.name) .. ')')
+                    self:declare(n.name, { inferred = true })
+                end
             end
             return
         end
@@ -1249,11 +1287,14 @@ function G:stat(s)
         if #s.exprs == 0 then
             self:emit(' local ' .. table.concat(names, ', '))
         elseif #s.names == 1 and #s.exprs == 1 and s.exprs[1].k ~= 'spread' then
-            self:emit(' local ' .. names[1] .. ' = __S.bind(' .. self:expr(s.exprs[1]) .. ')')
+            self:emit(' local ' .. names[1] .. ' = __S.infer(' .. self:expr(s.exprs[1]) .. ', ' .. str(names[1]) .. ')')
         else
-            self:emit(' local ' .. table.concat(names, ', ') .. ' = __S.bindn(' .. self:list(s.exprs) .. ')')
+            local quoted = {}
+            for i, name in ipairs(names) do quoted[i] = str(name) end
+            self:emit(' local ' .. table.concat(names, ', ') .. ' = __S.infern({ '
+                .. table.concat(quoted, ', ') .. ' }, ' .. self:list(s.exprs) .. ')')
         end
-        for _, n in ipairs(s.names) do self:declare(n.name, {}) end
+        for _, n in ipairs(s.names) do self:declare(n.name, { inferred = true }) end
     elseif k == 'localfunction' then
         self:no_shadow_check(s.name)
         self:declare(s.name, {})
@@ -1319,15 +1360,15 @@ function G:stat(s)
         end
         -- the loop's state: typed locals it mentions become its parameters
         local state = self:loop_state({ s.cond, s.body })
-        local params = table.concat(state, ', ')
+        local params, bind_state = self:loop_bindings(state)
         self.body.region = self.body.region + 1
         self:push_scope()
-        for _, n in ipairs(state) do self:declare(n, { typed = true }) end
+        bind_state()
         local cond = self:expr(s.cond)
         self:pop_scope()
         self.body.region = self.body.region - 1
         local body = self:closure(params, s.body, function()
-            for _, n in ipairs(state) do self:declare(n, { typed = true }) end
+            bind_state()
             self.body.loops[#self.body.loops + 1] = { native = true, region = self.body.region }
         end)
         self:emit(' __S.while_(function(' .. params .. ') return ' .. cond .. ' end, ' .. body
@@ -1342,10 +1383,11 @@ function G:stat(s)
             local lo, hi = self:expr(s.lo), self:expr(s.hi)
             local step = s.step and self:expr(s.step) or 'nil'
             local state = self:loop_state({ s.body })
-            local params = s.var .. (#state > 0 and (', ' .. table.concat(state, ', ')) or '')
+            local state_params, bind_state = self:loop_bindings(state)
+            local params = s.var .. (#state > 0 and (', ' .. state_params) or '')
             local body = self:closure(params, s.body, function()
                 self:declare(s.var, { immutable = true, loopvar = true })
-                for _, n in ipairs(state) do self:declare(n, { typed = true }) end
+                bind_state()
                 self.body.loops[#self.body.loops + 1] = { native = true, region = self.body.region }
             end)
             self:emit((' __S.for_(%s, %s, %s, %s, %s, %s)'):format(ty, lo, hi, step, body,

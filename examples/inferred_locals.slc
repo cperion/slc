@@ -1,0 +1,66 @@
+-- Native initializers supply the local type; Lua literals remain host values.
+local Point = struct { x: U32, y: U32 }
+
+local inferred_branch = do(flag: Bool, x: U32): U32
+    local p = Point { x = x, y = 2 }
+    local n = x
+    if flag then
+        n = n + 3
+        p.x = p.x + 4
+    else
+        n = n + 5
+    end
+    return n + p.x + p.y
+end
+
+local inferred_loops = do(n: U32): U32
+    local total, i = U32 0, U32 0
+    local missing
+    local host_count = 0
+    while host_count < 3 do
+        host_count = host_count + 1
+    end
+    while i < n do
+        local j = U32 0
+        while j < i do
+            total = total + 1
+            j = j + 1
+        end
+        i = i + 1
+    end
+    for k: U32 = 1, n do
+        total = total + k
+    end
+    while missing == nil do
+        missing = 1
+    end
+    return total + host_count
+end
+
+local inferred_snapshot = do(x: U32): U32
+    local a = x
+    local b = a
+    a = a + 10
+    local r = Ref a
+    r = r + 1
+    return a + b
+end
+
+local inferred_storage = do(n: U32): U32
+    local values = Array(U32, 2) { n, 3 }
+    local text = Text {}
+    text:write "abc"
+    return values[0] + values[1] + text.length
+end
+
+local inferred_mixed = do(x: U32): U32
+    local a: U32, b = x, x + 1
+    b = b + 2
+    return a + b
+end
+
+export inferred_branch
+export inferred_loops
+export inferred_snapshot
+export inferred_storage
+export inferred_mixed

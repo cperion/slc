@@ -1,5 +1,5 @@
 -- I/O by completion (§36.7): every operation is a wait, every result a sum.
-local io = import "io"
+local io = require "slc.io"
 
 -- a pipe between two tasks: the writer closes, the reader reads to the end
 local pipe_roundtrip = do(): U32

@@ -2,7 +2,7 @@
 -- compiling they run while compiling; over text known in part (a literal
 -- needle, a dynamic haystack) what is known unrolls.
 --
--- Methods call these (s:find(t) is str.find(s, t)); import "str" names them
+-- Methods call these (s:find(t) is str.find(s, t)); require "slc.str" names them
 -- and their result types directly.
 
 local str = {}
@@ -195,6 +195,10 @@ str.lines = do(s: Str, body): Unit
     end
 end
 
+-- UTF-8 validation and rune iteration are utf8 words
+local utf8 = require "slc.utf8"
+str.runes = do(s: Str, body): Unit = utf8.runes s body
+
 -- numbers: s:parse(T) gives oneof { value: T, bad: Unit }
 local parsed = {}
 function str.parsed(t)
@@ -267,6 +271,62 @@ for _, pair in ipairs { { I8, U8 }, { I16, U16 }, { I32, U32 }, { I64, U64 } } d
         end
         return P.value(T(m))
     end
+end
+
+local trap = extern("slc_trap", { CString }, Unit)
+
+-- decimal text: the grammar is checked here, then libc converts it, so strtod
+-- only ever sees text it consumes whole. A known text folds in the compiler.
+local strtod = extern("strtod", { CString, Ptr CString }, F64, { header = "<stdlib.h>" })
+local parse_known_p = __S.parse_float_known_p
+local parse_known = __S.parse_float_known
+local is_digit = do(c: U8): Bool = c >= 48 and c <= 57
+
+local function float_syntax(s: Str): Bool
+    local n = s.length
+    local i: U32 = 0
+    if i < n and (s[i] == 43 or s[i] == 45) then i = i + 1 end
+    local count: U32 = 0
+    while i < n and is_digit(s[i]) do
+        count = count + 1
+        i = i + 1
+    end
+    if i < n and s[i] == 46 then
+        i = i + 1
+        while i < n and is_digit(s[i]) do
+            count = count + 1
+            i = i + 1
+        end
+    end
+    if count == 0 then return false end
+    if i < n and (s[i] == 101 or s[i] == 69) then
+        i = i + 1
+        if i < n and (s[i] == 43 or s[i] == 45) then i = i + 1 end
+        local exponent: U32 = 0
+        while i < n and is_digit(s[i]) do
+            exponent = exponent + 1
+            i = i + 1
+        end
+        if exponent == 0 then return false end
+    end
+    return i == n
+end
+
+str.parse_F64 = do(s: Str): str.parsed(F64)
+    local P = str.parsed(F64)
+    if parse_known_p s then return parse_known s end
+    if not float_syntax s then return P.bad() end
+    return s:cstring() do(c)
+        return P.value(strtod(c, null CString))
+    end
+end
+str.c_length = do(bytes: Ptr U8): U32
+    local length = U32 0
+    while bytes[length] ~= 0 do
+        if length == 0xffffffff then trap "a C string longer than a Str can view" end
+        length = length + 1
+    end
+    return length
 end
 
 return str

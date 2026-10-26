@@ -1,0 +1,10 @@
+-- The public convenience names dispatch to ordinary SLC conversion words.
+assert(host(ns(7)) == 7)
+assert(host(us(7)) == 7000)
+assert(host(ms(7)) == 7000000)
+assert(host(seconds(7)) == 7000000000)
+
+local duration_units = do(n: I64): Duration
+    return ns(n) + us(n) + ms(n) + seconds(n)
+end
+export duration_units

@@ -1,0 +1,15 @@
+-- main(args: Args): the command line a process received. args.length counts it
+-- (the program path is args[0]) and args[i] is a Str view of one argument.
+local libc = require "slc.libc"
+
+local main = do(args: Args): I32
+    local bytes: U32 = 0
+    local i: U32 = 1
+    while i < args.length do
+        bytes = bytes + args[i].length
+        i = i + 1
+    end
+    libc.say("args = ", args.length, ", bytes = ", bytes, "\n")
+    return I32(args.length)
+end
+export main

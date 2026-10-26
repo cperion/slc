@@ -20,12 +20,15 @@ uint32_t entry(uint32_t x) {
 
 Start with [Designing and writing SLC](docs/designing-and-writing-slc.md).
 [The specification](docs/staged-lua-c-v0.5.md) owns the language and ABI rules.
-[The alpha roadmap](docs/alpha-design.md) separates the current text/fuzzing prototype
-from planned maps, broader fuzzing and the embedded distribution.
+[Maps and immutable lookup descriptions](docs/staged-lua-c-v0.5.md#40-maps-and-known-lookup-descriptions)
+are implemented in ordinary SLC. [The alpha roadmap](docs/alpha-design.md) covers
+broader fuzzing and the single-binary distribution; [the SLC-first inventory](docs/slc-first.md)
+tracks the remaining library migrations.
 
 ## Requirements
 
-- LuaJIT and LPeg built for **Lua 5.1**, not another Lua ABI.
+- LuaJIT and LPeg built for **Lua 5.1**, not another Lua ABI. `make dist` also
+  needs the LuaJIT development files (`lua.h`) and `libluajit-5.1`.
 - A C99 compiler and POSIX threads for the native runtime/harnesses.
 - libgccjit **13+**, on a 64-bit target, for JIT/native loading (optional for C output).
 - GNU make and `timeout` for the convenience/check targets. Some packaged checks
@@ -53,6 +56,44 @@ Generated files, logs and caches go under ignored `build/`. A local libgccjit co
 may be placed at `.local/lib/libgccjit.so.0`; Make selects it if `SLC_GCCJIT` is unset.
 Otherwise install the platform's libgccjit package or set `SLC_GCCJIT` explicitly.
 No compiler binary or machine-specific dependency is committed.
+
+## Formatting
+
+```sh
+luajit slc.lua fmt program.slc          # stdout; does not modify the source
+luajit slc.lua fmt --write program.slc  # explicitly update files
+luajit slc.lua fmt --check examples/*.slc
+```
+
+Defaults favor four-space indentation, a soft 100-column width, safe
+parenthesis-free calls and flat endall spines. A `.slcfmt.lua` can set
+`indent_width`, `column_width`, `call_style` (`"minimal"` or `"preserve"`) and
+`spine_style` (`"pure"`, `"all"` or `"none"`). See
+[formatting](docs/formatting.md) for semantics, configuration discovery and exit
+codes. `make test-format` checks style, idempotence, source preservation and
+compiler-output equivalence.
+
+## Modules
+
+```lua
+local hash = require "slc.hash" -- bundled SLC vocabulary
+local ffi = require "ffi"      -- ordinary Lua module
+local model = require "model"  -- project Lua or SLC module
+```
+
+This is Lua's actual `require`, extended with an SLC source searcher. Bundled
+names use `slc.*`, so Lua's `require "io"` still means Lua I/O. Newly loaded
+modules are cached per compilation, including Lua wrappers around staged
+values; host loader state is restored afterwards. See [module loading](docs/modules.md).
+Run `make test-modules` for the loader/cache contract checks.
+
+## Neovim syntax highlighting
+
+SLC has a dedicated Tree-sitter grammar and highlight queries. Build the local
+parser with `make tree-sitter`, then follow the
+[Neovim setup instructions](tools/tree-sitter-slc/README.md).
+`make test-tree-sitter` checks the parser and highlighting in headless Neovim.
+No changes to the compiler or your existing Lua filetype are required.
 
 ## Compiler and library
 

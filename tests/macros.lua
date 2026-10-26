@@ -45,6 +45,14 @@ local answer = do() = 42
 assert(answer() == 42)
 print('forms ok')
 ]]), 0, 'forms ok')
+check('exact hexadecimal integer suffixes in bare calls', cli .. ' -lmacro.let -e ' .. q([[
+local identity = do(x) = x
+local u = identity 0xffffffffffffffffULL
+local s = identity 0x7fffffffffffffffLL
+assert(type(u) == 'cdata' and u == 18446744073709551615ULL)
+assert(type(s) == 'cdata' and s == 9223372036854775807LL)
+print('hex suffixes ok')
+]]), 0, 'hex suffixes ok')
 -- A host application may have unrelated argv and run outside this checkout.
 local pwd = assert(io.popen('pwd')); local cwd = assert(pwd:read '*l'); pwd:close()
 local absolute = root:sub(1, 1) == '/' and root or (cwd .. '/' .. root)

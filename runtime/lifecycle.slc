@@ -1,0 +1,253 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Record lifecycle policy. Locks and failure traps belong to the caller so
+-- allocation failure never escapes with a mutex held.
+return function(types)
+    local Scope, Task, Op = types.Scope, types.Task, types.Op
+    local Channel, Pool, SlotMeta = types.Channel, types.Pool, types.SlotMeta
+    local claim_waiter, Waiters = types.claim_waiter, types.Waiters
+    local none = U32 0xffffffff
+    local alloc_scope = extern("calloc", { U64, U64 }, Ptr Scope, { header = "<stdlib.h>" })
+    local alloc_slots = extern("calloc", { U64, U64 }, Ptr SlotMeta, { header = "<stdlib.h>" })
+    local alloc_bytes = extern("calloc", { U64, U64 }, Ptr U8, { header = "<stdlib.h>" })
+    local alloc = extern("malloc", { U64 }, Ptr U8, { header = "<stdlib.h>" })
+    local free = extern("free", { Ptr U8 }, Unit, { header = "<stdlib.h>" })
+    local resize = extern("realloc", { Ptr U32, U64 }, Ptr U32, { header = "<stdlib.h>" })
+    local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.h>" })
+
+    local slc_scope_allocate = do(task: Ptr Task): Ptr Scope
+        local scope = alloc_scope(1, size_of Scope)
+        if scope ~= null Scope then
+            scope.parent = task.cur_scope
+            task.cur_scope = scope
+        end
+        return scope
+    end
+    local slc_scope_inside = do(task: Ptr Task, scope: Ptr Scope): Bool
+        local current = task.cur_scope
+        while current ~= null Scope do
+            if current == scope then return true end
+            current = current.parent
+        end
+        return false
+    end
+    local slc_scope_record = do(items: Ptr(Ptr U32), count: Ptr U64, capacity: Ptr U64,
+        initial: U64, index: U32): Bool
+        if count[0] == capacity[0] then
+            local n = initial
+            if capacity[0] ~= 0 then n = capacity[0] * 2 end
+            local data = resize(items[0], n * size_of U32)
+            if data == null U32 then return false end
+            items[0] = data
+            capacity[0] = n
+        end
+        items[0][count[0]] = index
+        count[0] = count[0] + 1
+        return true
+    end
+    local slc_channel_reuse = do(chunks: Ptr(Ptr Channel), head: Ptr U32): U32
+        local index = head[0]
+        if index ~= none then head[0] = chunks[index / 256][index % 256].next_free end
+        return index
+    end
+    local slc_pool_reuse = do(chunks: Ptr(Ptr Pool), head: Ptr U32, n: U32, elem: U64): U32
+        local link = head
+        while link[0] ~= none do
+            local index = link[0]
+            local candidate = Ptr chunks[index / 256][index % 256]
+            if candidate.cap_slots >= n and candidate.cap_bytes >= U64(n) * elem then
+                link[0] = candidate.next_free
+                return index
+            end
+            link = Ptr candidate.next_free
+        end
+        return none
+    end
+    -- Registry growth is policy too. The caller owns the registry mutex and
+    -- handles failures after unlocking; pthread initialization is a foreign call.
+    local PoolMeta, Mutex = types.PoolMeta, types.Mutex
+    local Attr = opaque "pthread_mutexattr_t"
+    local init_mutex = extern("pthread_mutex_init", { Ptr Mutex, Ptr Attr }, I32, { header = "<pthread.h>" })
+    local alloc_channels = extern("calloc", { U64, U64 }, Ptr Channel, { header = "<stdlib.h>" })
+    local alloc_pools = extern("calloc", { U64, U64 }, Ptr Pool, { header = "<stdlib.h>" })
+    local alloc_metas = extern("calloc", { U64, U64 }, Ptr PoolMeta, { header = "<stdlib.h>" })
+    local slc_channel_acquire = do(chunks: Ptr(Ptr Channel), head: Ptr U32, count: Ptr U32): I32
+        local index = slc_channel_reuse chunks head
+        if index ~= none then return I32 index end
+        index = count[0]
+        local page = index / 256
+        if page >= 4096 then return -1 end
+        if chunks[page] == null Channel then
+            local chunk = alloc_channels(256, size_of Channel)
+            if chunk == null Channel then return -2 end
+            local i = U32 0
+            while i < 256 do
+                init_mutex(Ptr(chunk[i].mu), null Attr)
+                i = i + 1
+            end
+            chunks[page] = chunk
+        end
+        count[0] = count[0] + 1
+        return I32 index
+    end
+    local slc_pool_acquire = do(chunks: Ptr(Ptr Pool), metas: Ptr(Ptr PoolMeta),
+        head: Ptr U32, count: Ptr U32, n: U32, elem: U64): I32
+        local index = slc_pool_reuse chunks head n elem
+        if index ~= none then return I32 index end
+        index = count[0]
+        local page = index / 256
+        if page >= 4096 then return -1 end
+        if chunks[page] == null Pool then
+            local chunk = alloc_pools(256, size_of Pool)
+            local metadata = alloc_metas(256, size_of PoolMeta)
+            if chunk == null Pool or metadata == null PoolMeta then return -2 end
+            local i = U32 0
+            while i < 256 do
+                init_mutex(Ptr(chunk[i].mu), null Attr)
+                chunk[i].m = Ptr metadata[i]
+                i = i + 1
+            end
+            metas[page] = metadata
+            chunks[page] = chunk
+        end
+        count[0] = count[0] + 1
+        return I32 index
+    end
+
+    local slc_channel_initialize = do(r: Ptr Channel, elem: U64, cap: U32): Bool
+        if r.gen == 0 then r.gen = 1 end
+        r.live = true
+        r.closed = false
+        r.elem = elem
+        r.cap = cap
+        r.head = 0
+        r.count = 0
+        r.recvq.head = null Op
+        r.recvq.tail = null Op
+        r.sendq.head = null Op
+        r.sendq.tail = null Op
+        r.buf = null U8
+        if cap ~= 0 then
+            r.buf = alloc(U64(cap) * elem)
+            if r.buf == null U8 then return false end
+        end
+        return true
+    end
+    local slc_pool_initialize = do(r: Ptr Pool, scope: Ptr Scope, elem: U64, n: U32): Bool
+        if r.m.gen == 0 then r.m.gen = 1 end
+        r.live = true
+        r.m.elem = elem
+        r.m.n = n
+        r.scope = scope
+        if r.m.data == null U8 then
+            local width = elem
+            if width == 0 then width = 1 end
+            r.m.data = alloc_bytes(U64 n, width)
+            r.m.slots = alloc_slots(U64 n, size_of SlotMeta)
+            if r.m.data == null U8 or r.m.slots == null SlotMeta then return false end
+            r.cap_bytes = U64(n) * elem
+            r.cap_slots = n
+        else
+            zero(r.m.data, 0, U64(n) * elem)
+        end
+        local i = U32 0
+        while i < n do
+            local slot = Ptr r.m.slots[i]
+            if slot.gen == 0 then slot.gen = 1 end
+            atomic_ptr(Ptr(slot.owner))[0]:store(0, "release")
+            slot.next_free = none
+            if i + 1 < n then slot.next_free = i + 1 end
+            i = i + 1
+        end
+        r.free_head = 0
+        r.takers.head = null Op
+        r.takers.tail = null Op
+        return true
+    end
+    local drain = do(q: Ptr Waiters, list: Ptr Op): Ptr Op
+        local result = list
+        local waiter = claim_waiter(q, null Task)
+        while waiter ~= null Op do
+            waiter.next = result
+            result = waiter
+            waiter = claim_waiter(q, null Task)
+        end
+        return result
+    end
+    local slc_channel_retire = do(r: Ptr Channel): Ptr Op
+        r.live = false
+        r.gen = r.gen + 1
+        if r.gen == 0 then r.gen = 1 end
+        free r.buf
+        r.buf = null U8
+        local list = drain(Ptr(r.recvq), null Op)
+        return drain(Ptr(r.sendq), list)
+    end
+    local slc_pool_retire = do(r: Ptr Pool): Ptr Op
+        r.live = false
+        local generation = r.m.gen + 1
+        if generation == 0 then generation = 1 end
+        atomic_ptr(Ptr(r.m.gen))[0]:store(generation, "release")
+        r.scope = null Scope
+        return drain(Ptr(r.takers), null Op)
+    end
+    local slc_channel_recycle_record = do(r: Ptr Channel, head: Ptr U32, index: U32): Unit
+        r.next_free = head[0]
+        head[0] = index
+    end
+    local slc_pool_recycle_record = do(r: Ptr Pool, head: Ptr U32, index: U32): Unit
+        r.next_free = head[0]
+        head[0] = index
+    end
+    local slc_channel_close_waiters = do(r: Ptr Channel): Ptr Op
+        r.closed = true
+        return drain(Ptr(r.recvq), null Op)
+    end
+    local wake = extern("slc_task_wake", { Ptr Task }, Unit, { header = '"slc_scheduler.h"' })
+    local retire_channel = extern("slc_retire_channel_sync", { U32 }, Unit, { header = '"slc_scheduler.h"' })
+    local retire_pool = extern("slc_retire_pool_sync", { U32 }, Unit, { header = '"slc_scheduler.h"' })
+    local free_indices = extern("free", { Ptr U32 }, Unit, { header = "<stdlib.h>" })
+    local free_scope = extern("free", { Ptr Scope }, Unit, { header = "<stdlib.h>" })
+    local slc_wait_wake = do(list: Ptr Op, plain: I32, selected: I32, clear: Bool): Unit
+        local op = list
+        while op ~= null Op do
+            -- Waking can free the frame holding op: capture next first.
+            local next = op.next
+            if op.index < 0 then op.task.result = plain else op.task.result = selected end
+            if clear then op.next = null Op end
+            wake op.task
+            op = next
+        end
+    end
+    local slc_scope_retire = do(scope: Ptr Scope): Unit
+        local i = U64 0
+        while i < scope.nchans do
+            retire_channel scope.chans[i]
+            i = i + 1
+        end
+        i = 0
+        while i < scope.npools do
+            retire_pool scope.pools[i]
+            i = i + 1
+        end
+        free_indices scope.chans
+        free_indices scope.pools
+        free_scope scope
+    end
+    export slc_channel_acquire
+    export slc_pool_acquire
+    export slc_channel_close_waiters
+    export slc_wait_wake
+    export slc_scope_retire
+    export slc_scope_allocate
+    export slc_scope_inside
+    export slc_scope_record
+    export slc_channel_reuse
+    export slc_pool_reuse
+    export slc_channel_initialize
+    export slc_pool_initialize
+    export slc_channel_retire
+    export slc_pool_retire
+    export slc_channel_recycle_record
+    export slc_pool_recycle_record
+    return { inside = slc_scope_inside, close_waiters = slc_channel_close_waiters, wake_list = slc_wait_wake }
+end

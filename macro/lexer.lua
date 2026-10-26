@@ -148,6 +148,9 @@ function lexer.scan_lua_tokenlist(input)
     return tokens
 end
 
+-- Source tools need the lossless lexer, before dialects insert macro markers.
+lexer.scan_raw_tokenlist = lexer.scan_lua_tokenlist
+
 --- get a token iterator from a source containing Lua code.
 -- Note that this token iterator includes spaces and comments, and does not convert
 -- string and number tokens - so e.g. a string token is quoted and a number token is

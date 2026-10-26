@@ -18,7 +18,7 @@ Every `lua` block below is an excerpt of [`examples/guide.slc`](../examples/guid
 | `endall` | closing a spine of trailing blocks |
 | `s[id]`, `g[i]`, `pool[slot]`, `a[i]` | checked places |
 | `tasks do(scope...)`, `spawn do`, `first_of` | concurrency |
-| `import "io"` | libraries, including I/O by completion |
+| `require "slc.io"` | libraries, including I/O by completion |
 | `native(word)`, `slc run` | compile now, into this process, and call from Lua |
 
 ---
@@ -46,10 +46,10 @@ Three commitments follow from Let and sharpen in slc:
 | Values | What does the program talk about? | `struct`, `oneof`, `Array` |
 | Ownership | What exists, and who owns it? | fields for trees, `Store`/`Id` for graphs, `Grow` for sequences, pools across tasks |
 | Activities | What bounded work happens? | activity words with a body |
-| Vocabularies | What can be done here? | methods, opened records, Lua tables, `import` |
+| Vocabularies | What can be done here? | methods, opened records, Lua tables, `require` |
 | Pure core | What is decided? | words from values to values |
 | Composition root | Who connects the parts? | an exported word |
-| Edges | Where does the world come in? | externs, `import "io"`, opened at the outside |
+| Edges | Where does the world come in? | externs, `require "slc.io"`, opened at the outside |
 | Tests | How do we know? | a C harness drives the exports; Lua asserts at compile time |
 | Costs | What must stay fast? | read the C; measure |
 
@@ -243,11 +243,11 @@ uint32_t type_word(Document *document, uint32_t n) {
     editing.length = editing.length + n;
     editing.cursor = editing.cursor + n;
     editing.edits = editing.edits + 1u;
-    uint32_t t = editing.cursor;
+    uint32_t before = editing.cursor;
     if (editing.cursor > 0u) {
         editing.cursor = editing.cursor - 1u;
     }
-    uint32_t moved = t - editing.cursor;
+    uint32_t moved = before - editing.cursor;
     document->length = editing.length;
     document->cursor = editing.cursor;
     document->edits = editing.edits;
@@ -289,7 +289,7 @@ A dialect is a vocabulary plus an engine. In slc the engine often runs while com
 
 * **Exports are the composition roots.** C calls them, and they wire the parts together. Only what they reach is compiled.
 * **Start-up is a binding time too.** `native(word)` compiles a word into this process and returns it as a Lua function, so a value read at start-up (an argument, a config file, a schema) can be specialized on like a table written in the source: `native(tab_stop { tab_width = width })`. Keep the reading in Lua and the work in words; the same words compile ahead of time.
-* **Effects enter at the edges.** Externs, `import "io"` and the POSIX library are opened at the outside and passed in. The word that opens a file is not the word that parses it.
+* **Effects enter at the edges.** Externs, `require "slc.io"` and the POSIX library are opened at the outside and passed in. The word that opens a file is not the word that parses it.
 * **The pure core decides.** Words from values to values are testable while compiling. Applied to known values, a typed word computes in the compiler, and Lua asserts the answer:
 
 ```lua
@@ -464,7 +464,9 @@ uint32_t first_or(U32Slice xs, uint32_t fallback) {
     r = (Found){ .tag = Found_missing };
 L1:;
     if (r.tag == Found_found) {
-        SLC_BOUND(r.as.found, xs.len);
+        if ((uint64_t)r.as.found >= (uint64_t)xs.len) {
+            slc_trap("slice index out of range");
+        }
         return xs.ptr[r.as.found];
     }
     return fallback;
@@ -531,7 +533,7 @@ Prefer explicit parenthesized calls when a computed result matters to the surrou
 
 ## 15. Files and libraries
 
-* **A file is a vocabulary or a program.** A program file defines its words and exports its edges. A library lives in `lib/` and returns its vocabulary table to `import`.
+* **A file is a vocabulary or a program.** A program file defines its words and exports its edges. A library returns ordinary Lua values through `require`. Bundled vocabularies live in `lib/` and use names such as `require "slc.io"`; project modules use their own names. Lua's `require "io"` still names Lua's I/O library. See [module loading](modules.md) for paths and compilation lifetimes.
 * **Newspaper order:** imports; types; exported words, each with a one-line promise; private helpers.
 * **Dependencies point toward the domain.** Activities use entities; entities do not import every activity that can operate on them. A free `transaction(document: Ref Document, body)` lives beside `Document` without growing it.
 

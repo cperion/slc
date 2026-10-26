@@ -1,5 +1,83 @@
 -- each case: a program that must not compile, and part of the diagnostic
 return {
+    { name = 'known map rejects dynamic entries', expect = 'must be known',
+      src = [[local f = do(k: U32): U32
+    local m = Map.known(U32, U32, { { k, 1 } })
+    return m.length
+end
+export f
+]] },
+    { name = 'known map indexing is not mutable', expect = 'immutable',
+      src = [[local m = Map.known(U32, U32, { { 1, 10 } })
+local f = do(): Unit
+    m[1] = 20
+end
+export f
+]] },
+    { name = 'known map missing key fails during specialization', expect = 'map-key',
+      src = [[local m = StrMap.known(U32, {})
+local f = do(): U32 return m["missing"] end
+export f
+]] },
+    { name = 'known map has no mutators', expect = 'immutable',
+      src = [[local m = Map.known(U32, U32, {})
+local f = do(): Unit m:put(1, 2) end
+export f
+]] },
+    { name = 'inferred local keeps its native type', expect = 'expected U32',
+      src = [[local f = do(x: U32): U32
+    local y = x
+    y = Bool true
+    return y
+end
+export f
+]] },
+    { name = 'inferred resizable storage cannot be reassigned', expect = 'cannot be reassigned',
+      src = [[local f = do(): U32
+    local text = Text {}
+    text = Text {}
+    return text.length
+end
+export f
+]] },
+    { name = 'host rebinding in a residual loop stays forbidden', expect = 'cannot be rebound',
+      src = [[local f = do(n: U32): U32
+    local host_count = 0
+    for i: U32 = 1, n do
+        host_count = host_count + 1
+    end
+    return host_count
+end
+export f
+]] },
+    { name = 'floating map keys', expect = 'Map key must have fixed semantic equality',
+      src = [[local M = Map(F64, U32)]] },
+    { name = 'borrowed map values', expect = 'Map value must be fixed-size owned data',
+      src = [[local M = Map(U32, Str)]] },
+    { name = 'nested mutable maps', expect = 'Map value must be fixed-size owned data',
+      src = [[local M = Map(U32, Map(U32, U32))]] },
+    { name = 'a map created while compiling', expect = 'runtime storage',
+      src = [[local M = Map(U32, U32)
+local f = do(): U32
+    local m: M = M {}
+    return m.length
+end
+local n = host(f())
+]] },
+    { name = 'a map reassigned', expect = 'cannot be reassigned',
+      src = [[local M = Map(U32, U32)
+local f = do(): U32
+    local m: M = M {}
+    m = M {}
+    return m.length
+end
+export f
+]] },
+    { name = 'a map passed by value', expect = 'passed as Ref',
+      src = [[local M = Map(U32, U32)
+local f = do(m: M): U32 = m.length
+export f
+]] },
     { name = 'signed overflow at compile time', line = 1, expect = 'signed overflow',
       src = [[local f = do(a: I32): I32 = a * 2
 local x = f(2147483647)
@@ -21,7 +99,7 @@ export g
 ]] },
     { name = 'rebinding a host local in a dynamic branch', line = 4, expect = 'cannot be rebound',
       src = [[local f = do(flag: Bool, x: U32): U32
-    local y = x
+    local y = 1
     if flag then
         y = y * 2
     end
@@ -630,7 +708,7 @@ local f = do(s: Slot B): U32 = s.n
 export f
 ]] },
     { name = 'I/O as a case of first_of', expect = 'I/O cannot lose a first_of: give io.read a deadline',
-      src = [[local io = import "io"
+      src = [[local io = require "slc.io"
 local f = do(c: Chan U32, file: io.File): Unit
     local buf: Array(U8, 8)
     first_of {
@@ -642,7 +720,7 @@ end
 export f
 ]] },
     { name = 'a read larger than its buffer', expect = 'io.read: 16 bytes do not fit a buffer of 8',
-      src = [[local io = import "io"
+      src = [[local io = require "slc.io"
 local f = do(file: io.File): Unit
     local buf: Array(U8, 8)
     io.read(file, buf, 16) { done = do(n) end, failed = do(e) end }
@@ -650,7 +728,7 @@ end
 export f
 ]] },
     { name = 'a read into something that is not a byte array', expect = 'io.read needs an Array(U8, N) to fill',
-      src = [[local io = import "io"
+      src = [[local io = require "slc.io"
 local f = do(file: io.File): Unit
     local n: U32 = 0
     io.read(file, n) { done = do(k) end, failed = do(e) end }
@@ -658,7 +736,7 @@ end
 export f
 ]] },
     { name = 'an unknown I/O option', expect = "io.read: unknown option 'timeout'",
-      src = [[local io = import "io"
+      src = [[local io = require "slc.io"
 local f = do(file: io.File): Unit
     local buf: Array(U8, 8)
     io.read(file, buf, 8, { timeout = ms(5) }) { done = do(n) end, failed = do(e) end }
@@ -666,7 +744,7 @@ end
 export f
 ]] },
     { name = 'a timed read matched without timed_out', expect = "alternative 'timed_out' has no handler",
-      src = [[local io = import "io"
+      src = [[local io = require "slc.io"
 local f = do(file: io.File): Unit
     local buf: Array(U8, 8)
     io.read(file, buf, 8, { deadline = ms(5) }) { done = do(n) end, failed = do(e) end }

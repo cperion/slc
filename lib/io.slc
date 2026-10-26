@@ -4,7 +4,7 @@
 -- sums matched exhaustively: done, failed (the system's error code) and, for
 -- an operation given a deadline, timed_out.
 --
---     local io = import "io"
+--     local io = require "slc.io"
 --     ...
 --         io.read(f, buf, n, { deadline = ms(100) }) {
 --             done = do(got) ... end, failed = do(e) ... end, timed_out = do ... end,

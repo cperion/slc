@@ -1,0 +1,177 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- io_uring ring/submission/completion policy. C supplies setup/mmap, the enter
+-- syscall, and the kernel's integer-address encoding; no operation algorithms.
+return function(t)
+    local Op, Mutex, Address = t.Op, t.Mutex, t.posix.Address
+    local Void = opaque "void"
+    local VP = Ptr Void
+    local h = '"slc_io_uring.h"'
+    local options = { header = h }
+    local SQE = cstruct("struct io_uring_sqe", h, {
+        { "opcode", U8 }, { "flags", U8 }, { "fd", I32 }, { "off", U64 }, { "addr", U64 },
+        { "len", U32 }, { "op_flags", U32, "rw_flags" }, { "user_data", U64 },
+    })
+    local CQE = cstruct("struct io_uring_cqe", h, { { "user_data", U64 }, { "res", I32 } })
+    local Timespec = cstruct("struct __kernel_timespec", h, { { "tv_sec", I64 }, { "tv_nsec", I64 } })
+    local Extra = cstruct("slc_uring_extra", h, { { "ts", Timespec }, { "addr", Address } })
+    local BytePtr = Ptr U8
+    local State = cstruct("slc_uring_state", h, {
+        { "mu", Mutex }, { "fd", I32 }, { "sq_head", Ptr U32 }, { "sq_tail", Ptr U32 },
+        { "sq_mask", Ptr U32 }, { "sq_array", Ptr U32 }, { "sq_entries", U32 },
+        { "cq_head", Ptr U32 }, { "cq_tail", Ptr U32 }, { "cq_mask", Ptr U32 },
+        { "sqes", Ptr SQE }, { "cqes", Ptr CQE },
+    })
+    local function constant(name, T) return cconst(name, T or I32, h) end
+    local read_kind, write_kind = constant "SLC_K_READ", constant "SLC_K_WRITE"
+    local accept_kind, connect_kind, open_kind, close_kind = constant "SLC_K_ACCEPT", constant "SLC_K_CONNECT", constant "SLC_K_OPEN", constant "SLC_K_CLOSE"
+    local done, failed, timed_out = constant "SLC_IO_DONE", constant "SLC_IO_FAILED", constant "SLC_IO_TIMED_OUT"
+    local read_op, write_op, accept_op, connect_op = constant("IORING_OP_READ", U8), constant("IORING_OP_WRITE", U8), constant("IORING_OP_ACCEPT", U8), constant("IORING_OP_CONNECT", U8)
+    local open_op, close_op, timeout_op = constant("IORING_OP_OPENAT", U8), constant("IORING_OP_CLOSE", U8), constant("IORING_OP_LINK_TIMEOUT", U8)
+    local link_flag = constant("IOSQE_IO_LINK", U8)
+    local getevents = constant("IORING_ENTER_GETEVENTS", U32)
+    local canceled = cconst("ECANCELED", I32, "<errno.h>")
+    local interrupted, again, busy = cconst("EINTR", I32, "<errno.h>"), cconst("EAGAIN", I32, "<errno.h>"), cconst("EBUSY", I32, "<errno.h>")
+    local af_inet, sock_stream, sock_cloexec = cconst("AF_INET", I32, "<sys/socket.h>"), cconst("SOCK_STREAM", I32, "<sys/socket.h>"), cconst("SOCK_CLOEXEC", I32, "<sys/socket.h>")
+    local at_fdcwd, cloexec = cconst("AT_FDCWD", I32, "<fcntl.h>"), cconst("O_CLOEXEC", U32, "<fcntl.h>")
+    local lock = extern("pthread_mutex_lock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
+    local unlock = extern("pthread_mutex_unlock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
+    local trap = extern("slc_trap", { CString }, Unit, options)
+    local now = extern("slc_now_ns", {}, U64, options)
+    local errno = cread("errno", I32, "<errno.h>")
+    local socket = extern("socket", { I32, I32, I32 }, I32, { header = "<sys/socket.h>" })
+    local close = extern("close", { I32 }, I32, { header = "<unistd.h>" })
+    local alloc = extern("calloc", { U64, U64 }, Ptr Extra, { header = "<stdlib.h>" })
+    local free = extern("free", { Ptr U8 }, Unit, { header = "<stdlib.h>" })
+    local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.h>" })
+    local enter = extern("slc_uring_enter", { Ptr State, U32, U32, U32 }, I32, options)
+    local set_address = extern("slc_uring_address", { Ptr SQE, VP }, Unit, options)
+    local set_user = extern("slc_uring_user", { Ptr SQE, Ptr Op }, Unit, options)
+    local decode = extern("slc_uring_decode", { U64 }, Ptr Op, options)
+    local complete = t.complete
+    local next_sqe = do(s: Ptr State): Ptr SQE
+        local tail = s.sq_tail[0]
+        while tail - atomic_ptr(s.sq_head)[0]:load("acquire") >= s.sq_entries do enter(s, 0, 0, 0) end
+        local index = band tail s.sq_mask[0]
+        local sqe = Ptr s.sqes[index]
+        zero(bytes(sqe[0]), 0, size_of SQE)
+        s.sq_array[index] = index
+        atomic_ptr(s.sq_tail)[0]:store(tail + 1, "release")
+        return sqe
+    end
+    local slc_uring_submit = do(s: Ptr State, op: Ptr Op): Unit
+        local extra = null Extra
+        local n = U32 1
+        if op.deadline ~= 0 or op.kind == connect_kind then
+            extra = alloc(1, size_of Extra)
+            if extra == null Extra then trap "out of memory for I/O" end
+        end
+        op.backend = BytePtr extra
+        if op.kind == connect_kind then
+            local flags = bor sock_stream sock_cloexec
+            local fd = socket(af_inet, flags, 0)
+            if fd < 0 then
+                free(BytePtr extra)
+                complete(op, failed, I64(errno()))
+                return
+            end
+            op.fd = fd
+            extra.addr = t.posix.address(U32 op.offset, op.len)
+        end
+        lock(Ptr s.mu)
+        local sqe = next_sqe s
+        set_user(sqe, op)
+        if op.kind == read_kind or op.kind == write_kind then
+            sqe.opcode = write_op
+            if op.kind == read_kind then sqe.opcode = read_op end
+            sqe.fd = op.fd
+            set_address(sqe, VP op.buf)
+            sqe.len = op.len
+            sqe.off = U64 0xffffffffffffffffULL
+            if op.offset >= 0 then sqe.off = U64 op.offset end
+        elseif op.kind == accept_kind then
+            sqe.opcode = accept_op
+            sqe.fd = op.fd
+            sqe.op_flags = U32 sock_cloexec
+        elseif op.kind == connect_kind then
+            sqe.opcode = connect_op
+            sqe.fd = op.fd
+            set_address(sqe, VP(Ptr extra.addr))
+            sqe.off = size_of Address
+        elseif op.kind == open_kind then
+            sqe.opcode = open_op
+            sqe.fd = at_fdcwd
+            set_address(sqe, VP op.buf)
+            sqe.len = op.len
+            local flags = U32 op.fd
+            sqe.op_flags = bor flags cloexec
+        elseif op.kind == close_kind then
+            sqe.opcode = close_op
+            sqe.fd = op.fd
+        end
+        if op.deadline ~= 0 then
+            local time = now()
+            local left = U64 0
+            if op.deadline > time then left = op.deadline - time end
+            sqe.flags = bor sqe.flags link_flag
+            extra.ts.tv_sec = I64(left / 1000000000)
+            extra.ts.tv_nsec = I64(left % 1000000000)
+            local timeout = next_sqe s
+            timeout.opcode = timeout_op
+            set_address(timeout, VP(Ptr extra.ts))
+            timeout.len = 1
+            timeout.user_data = 1
+            n = 2
+        end
+        if enter(s, n, 0, 0) < 0 then unlock(Ptr s.mu); trap "io_uring_enter failed to submit" end
+        unlock(Ptr s.mu)
+    end
+    local finish = do(op: Ptr Op, res: I32): Unit
+        if op.kind == connect_kind then
+            if res < 0 then
+                close op.fd
+                if res == -canceled and op.deadline ~= 0 then complete(op, timed_out, 0)
+                else complete(op, failed, I64(-res)) end
+            else
+                t.posix.nonblocking op.fd
+                complete(op, done, I64 op.fd)
+            end
+            return
+        end
+        if res >= 0 then
+            if op.kind == accept_kind or op.kind == open_kind then t.posix.nonblocking res end
+            local value = I64 res
+            if op.kind == close_kind then value = 0 end
+            complete(op, done, value)
+        elseif res == -canceled and op.deadline ~= 0 then complete(op, timed_out, 0)
+        else complete(op, failed, I64(-res)) end
+    end
+    local slc_uring_run = do(s: Ptr State): Unit
+        while true do
+            if enter(s, 0, 1, getevents) < 0 then
+                local error = errno()
+                if error ~= interrupted and error ~= again and error ~= busy then trap "io_uring_enter failed to wait" end
+            end
+            local head = s.cq_head[0]
+            local tail = atomic_ptr(s.cq_tail)[0]:load("acquire")
+            -- Preserve the tool-visible publication edge from all submitters.
+            lock(Ptr s.mu)
+            unlock(Ptr s.mu)
+            while head ~= tail do
+                local index = band head s.cq_mask[0]
+                local event = Ptr s.cqes[index]
+                local data = event.user_data
+                local res = event.res
+                head = head + 1
+                atomic_ptr(s.cq_head)[0]:store(head, "release")
+                if data ~= 1 and data ~= 0 then
+                    local op = decode data
+                    local extra = op.backend
+                    finish op res
+                    free extra
+                end
+            end
+        end
+    end
+    export slc_uring_submit
+    export slc_uring_run
+end

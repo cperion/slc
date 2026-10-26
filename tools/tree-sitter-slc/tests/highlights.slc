@@ -1,0 +1,25 @@
+-- An editor fixture, not an executable program.
+local Point = struct { x: F32, y: F32 }
+local inc = do(x: U32): U32 = x + 1
+local greet = do(name: Str): Unit
+    print "hello\n"
+end
+export inc
+local text = [==[do fake(): U32
+not code ]=] still text
+]==]
+--[=[ A long comment
+local fake = do(): U32 = 0
+]=]
+local applied = inc 2
+local next_value = inc(3)
+local x = 1
+x = x + 1
+local result = match(value) { ok(v) = v, bad() = 0 }
+local nested = do(): U32
+    activity do(ctx...)
+        activity do(...)
+            tick()
+        endall
+    return 1
+end

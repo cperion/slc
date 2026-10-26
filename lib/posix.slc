@@ -5,7 +5,7 @@
 -- their munmap, failures are sums, kernel constants and struct layouts come
 -- from the system headers, and everything is evaluated in place.
 --
---     local px = import "posix"
+--     local px = require "slc.posix"
 --     ...
 --         local px...
 --         with_fd(path, O_RDONLY) do(fd...) ... end { done() = ..., failed(e) = ... }

@@ -90,3 +90,53 @@ local order = do(a: Str, b: Str): I32
     }
 end
 export order
+
+-- UTF-8: the validity rule, and iteration by rune rather than byte
+local utf8 = require "slc.utf8"
+local valid_utf8 = do(s: Str): Bool = utf8.valid s
+export valid_utf8
+
+local rune_count = do(s: Str): U32
+    local n: U32 = 0
+    s:runes() do(cp, at)
+        n = n + 1
+    end
+    return n
+end
+export rune_count
+
+-- the replacement code point for an ill-formed byte, and where it starts
+local first_rune = do(s: Str): U32
+    local cp: U32 = 0
+    s:runes() do(code, at)
+        if cp == 0 then
+            cp = code
+        end
+    end
+    return cp
+end
+export first_rune
+
+-- C text: a NUL-terminated copy lent on a data stack, for a C call
+local strlen = extern("strlen", { CString }, U64, { header = "<string.h>" })
+local cstring_len = do(s: Str): U32
+    local n: U32 = 0
+    s:cstring() do(c)
+        n = U32(strlen(c))
+    end
+    return n
+end
+export cstring_len
+
+-- decimals: known text folds while compiling (the asserts), dynamic text
+-- converts at run time (the harness passes Str values)
+local parse_float = do(s: Str): F64
+    return s:parse(F64) {
+        value(v) = v,
+        bad() = F64(-1),
+    }
+end
+export parse_float
+assert(host(parse_float("2.5")) == 2.5)
+assert(host(parse_float("-1e3")) == -1000)
+assert(host(parse_float("1.2.3")) == -1)

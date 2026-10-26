@@ -1,0 +1,23 @@
+-- Channel library behavior is ordinary SLC. Only send/receive/close and their
+-- suspension/ownership transitions are compiler/runtime primitives.
+local channel = {}
+local iterators = {}
+
+function channel.each(T, body)
+    local by_body = iterators[T]
+    if not by_body then by_body = {}; iterators[T] = by_body end
+    if by_body[body] then return by_body[body] end
+    local each = do(ch: Chan T): Unit
+        local open = Bool true
+        while open do
+            ch:recv() {
+                value = do(value) body value end,
+                closed = do open = false end,
+            }
+        end
+    end
+    by_body[body] = each
+    return each
+end
+
+return channel

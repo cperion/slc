@@ -1,0 +1,73 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- I/O operation construction and completion. C owns only submission/wakeup
+-- accounting, backend dispatch, and the const-pointer ABI adapters.
+return function(t)
+    local Op, Task = t.Op, t.Task
+    local Void = opaque "void"
+    local BytePtr = Ptr U8
+    local h = '"slc_io.h"'
+    local options = { header = h }
+    local now = extern("slc_now_ns", {}, U64, options)
+    local publish = extern("slc_io_publish", { Ptr Op }, Unit, options)
+    local notify = extern("slc_io_notify", { Ptr Task }, Unit, options)
+    local trap = extern("slc_trap", { CString }, Unit, options)
+    local function kind(name) return cconst(name, I32, h) end
+    local read_kind, write_kind = kind "SLC_K_READ", kind "SLC_K_WRITE"
+    local open_kind, close_kind = kind "SLC_K_OPEN", kind "SLC_K_CLOSE"
+    local accept_kind, connect_kind = kind "SLC_K_ACCEPT", kind "SLC_K_CONNECT"
+    local start = do(task: Ptr Task, ops: Ptr Op, operation: I32, fd: I32, buf: Ptr Void,
+        n: U32, offset: I64, deadline: U64, value: Ptr I64, site: CString): I32
+        task.ops = ops
+        task.nops = 1
+        task.site = site
+        ops.task = task
+        ops.kind = operation
+        ops.index = -1
+        ops.queued = 0
+        ops.fd = fd
+        ops.buf = BytePtr buf
+        ops.len = n
+        ops.offset = offset
+        ops.value = value
+        ops.backend = null U8
+        ops.deadline = 0
+        if deadline ~= 0 then ops.deadline = now() + deadline end
+        publish ops
+        return 1
+    end
+    local slc_io_read = do(task: Ptr Task, ops: Ptr Op, fd: I32, buf: Ptr Void, n: U32,
+        offset: I64, deadline: U64, value: Ptr I64, site: CString): I32
+        return start task ops read_kind fd buf n offset deadline value site
+    end
+    local slc_io_write_bytes = do(task: Ptr Task, ops: Ptr Op, fd: I32, buf: Ptr Void, n: U32,
+        offset: I64, deadline: U64, value: Ptr I64, site: CString): I32
+        return start task ops write_kind fd buf n offset deadline value site
+    end
+    local slc_io_accept = do(task: Ptr Task, ops: Ptr Op, fd: I32, deadline: U64, value: Ptr I64, site: CString): I32
+        return start(task, ops, accept_kind, fd, null Void, 0, -1, deadline, value, site)
+    end
+    local slc_io_connect = do(task: Ptr Task, ops: Ptr Op, host: U32, port: U32, deadline: U64, value: Ptr I64, site: CString): I32
+        return start(task, ops, connect_kind, -1, null Void, port, I64 host, deadline, value, site)
+    end
+    local slc_io_open_path = do(task: Ptr Task, ops: Ptr Op, path: Ptr Void, flags: I32, mode: U32, value: Ptr I64, site: CString): I32
+        return start(task, ops, open_kind, flags, path, mode, -1, 0, value, site)
+    end
+    local slc_io_close = do(task: Ptr Task, ops: Ptr Op, fd: I32, value: Ptr I64, site: CString): I32
+        return start(task, ops, close_kind, fd, null Void, 0, -1, 0, value, site)
+    end
+    local slc_io_complete = do(op: Ptr Op, status: I32, value: I64): Unit
+        local task = op.task
+        op.value[0] = value
+        if not t.claim(task) then trap "an I/O operation completed twice" end
+        task.result = status
+        notify task
+    end
+    export slc_io_read
+    export slc_io_write_bytes
+    export slc_io_accept
+    export slc_io_connect
+    export slc_io_open_path
+    export slc_io_close
+    export slc_io_complete
+    return { complete = slc_io_complete }
+end

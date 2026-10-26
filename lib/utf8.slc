@@ -1,0 +1,81 @@
+-- UTF-8: validation and rune iteration.
+--
+-- Bytes are the storage; UTF-8 is what the text words assume. A rune that is not
+-- well formed decodes as U+FFFD, so iteration never stops on bad input. The
+-- validity rule is RFC 3629: no overlong forms, no surrogates, nothing above
+-- U+10FFFF.
+local utf8 = {}
+
+local Rune = struct { cp: U32, size: U32 }
+
+-- the rune starting at i: its code point and width, or U+FFFD with size 0
+local function step(s: Str, i: U32): Rune
+    local c: U8 = s[i]
+    if c < 0x80 then
+        return Rune { cp = U32(c), size = 1 }
+    end
+    -- a continuation byte must be 0x80..0xBF
+    local function cont(at: U32): Bool
+        if at >= s.length then return false end
+        local b: U8 = s[at]
+        return b >= 0x80 and b <= 0xBF
+    end
+    if c >= 0xC2 and c <= 0xDF then
+        if not cont(i + 1) then return Rune { cp = 0xFFFD, size = 0 } end
+        local cp: U32 = (U32(c) - 0xC0) * 0x40 + (U32(s[i + 1]) - 0x80)
+        return Rune { cp = cp, size = 2 }
+    end
+    if c >= 0xE0 and c <= 0xEF then
+        if not cont(i + 1) or not cont(i + 2) then return Rune { cp = 0xFFFD, size = 0 } end
+        local b1: U8 = s[i + 1]
+        -- E0 A0..BF, ED 80..9F: no overlongs, no surrogates
+        if c == 0xE0 and b1 < 0xA0 then return Rune { cp = 0xFFFD, size = 0 } end
+        if c == 0xED and b1 > 0x9F then return Rune { cp = 0xFFFD, size = 0 } end
+        local cp: U32 = (U32(c) - 0xE0) * 0x1000 + (U32(b1) - 0x80) * 0x40 + (U32(s[i + 2]) - 0x80)
+        return Rune { cp = cp, size = 3 }
+    end
+    if c >= 0xF0 and c <= 0xF4 then
+        if not cont(i + 1) or not cont(i + 2) or not cont(i + 3) then
+            return Rune { cp = 0xFFFD, size = 0 }
+        end
+        local b1: U8 = s[i + 1]
+        -- F0 90..BF, F4 80..8F: no overlongs, nothing above U+10FFFF
+        if c == 0xF0 and b1 < 0x90 then return Rune { cp = 0xFFFD, size = 0 } end
+        if c == 0xF4 and b1 > 0x8F then return Rune { cp = 0xFFFD, size = 0 } end
+        local cp: U32 = (U32(c) - 0xF0) * 0x40000 + (U32(b1) - 0x80) * 0x1000
+            + (U32(s[i + 2]) - 0x80) * 0x40 + (U32(s[i + 3]) - 0x80)
+        return Rune { cp = cp, size = 4 }
+    end
+    return Rune { cp = 0xFFFD, size = 0 }
+end
+
+utf8.Rune = Rune
+utf8.step = step
+
+-- is every byte part of a well-formed sequence?
+utf8.valid = do(s: Str): Bool
+    local i: U32 = 0
+    while i < s.length do
+        local r = step s i
+        if r.size == 0 then return false end
+        i = i + r.size
+    end
+    return true
+end
+
+-- each rune: its code point and the byte it starts at
+utf8.runes = do(s: Str, body): Unit
+    local i: U32 = 0
+    while i < s.length do
+        local r = step s i
+        if r.size == 0 then
+            body(0xFFFD, i)
+            i = i + 1
+        else
+            body(r.cp, i)
+            i = i + r.size
+        end
+    end
+end
+
+return utf8

@@ -1,0 +1,168 @@
+-- Semantic key encoding, not native object bytes: no padding, inactive sum
+-- payload, or unused Chars capacity enters the hash. Type traversal is host
+-- metaprogramming; the resulting encoders are ordinary SLC words.
+local hash = require "slc.hash"
+local keys = {}
+local encoders, hashers = {}, {}
+local State = hash.State
+local trap = extern("slc_trap", { CString }, Unit)
+local id_components, field_value = __S.id_components, __S.dot
+
+function keys.encoder(T)
+    if encoders[T] then return encoders[T] end
+    local encode
+    if T.kind == "int" or T.kind == "bool" then
+        encode = do(h: Ref State, key: T): Unit
+            local value = U64 key
+            hash.u64 h value
+        end
+    elseif T.chars_cap then
+        encode = do(h: Ref State, key: T): Unit
+            if key.len > T.chars_cap then trap "Map: invalid Chars length" end
+            local copy = key
+            local length = U64 copy.len
+            hash.u64 h length
+            local text = copy:str()
+            hash.bytes h text
+        end
+    elseif T.kind == "id" then
+        encode = do(h: Ref State, key: T): Unit
+            local token, slot, generation = id_components key
+            local index = U64 slot
+            local gen = U64 generation
+            hash.u64 h token
+            hash.u64 h index
+            hash.u64 h gen
+        end
+    elseif T.kind == "struct" then
+        encode = do(h: Ref State, key: T): Unit
+            for _, field in ipairs(T.fields) do
+                local part = field_value(key, field.name)
+                local feed = keys.encoder field.type
+                feed h part
+            end
+        end
+    elseif T.kind == "sum" then
+        encode = do(h: Ref State, key: T): Unit
+            local handlers = {}
+            for _, alt in ipairs(T.alts) do
+                local Payload = alt.type
+                if Payload == Unit then
+                    handlers[alt.name] = do
+                        local tag = U64 alt.tag
+                        hash.u64 h tag
+                    end
+                else
+                    local feed = keys.encoder Payload
+                    handlers[alt.name] = do(payload: Payload): Unit
+                        local tag = U64 alt.tag
+                        hash.u64 h tag
+                        feed h payload
+                    end
+                end
+            end
+            key handlers
+        end
+    elseif T.kind == "unit" then
+        encode = do(h: Ref State, key: T): Unit end
+    else
+        error("unsupported semantic key: " .. T.display)
+    end
+    encoders[T] = encode
+    return encode
+end
+
+function keys.hash(T)
+    if hashers[T] then return hashers[T] end
+    local encode = keys.encoder T
+    local hashed = do(key: T): U64
+        local h = hash.process()
+        local state = Ref h
+        encode state key
+        local result = hash.finish state
+        return bor result 1
+    end
+    hashers[T] = hashed
+    return hashed
+end
+
+local equalities = {}
+local strings = require "slc.str"
+function keys.equal(T)
+    if equalities[T] then return equalities[T] end
+    local equal
+    if T == Str then
+        equal = strings.equals
+    elseif T.kind == "int" or T.kind == "bool" then
+        equal = do(a: T, b: T): Bool return a == b end
+    elseif T.kind == "unit" then
+        equal = do(a: T, b: T): Bool return true end
+    elseif T.chars_cap then
+        equal = do(a: T, b: T): Bool
+            if a.len > T.chars_cap or b.len > T.chars_cap then trap "Map: invalid Chars length" end
+            local left, right = a, b
+            local x, y = left:str(), right:str()
+            return strings.equals x y
+        end
+    elseif T.kind == "id" then
+        equal = do(a: T, b: T): Bool
+            local at, ai, ag = id_components a
+            local bt, bi, bg = id_components b
+            return at == bt and ai == bi and ag == bg
+        end
+    elseif T.kind == "struct" then
+        equal = do(a: T, b: T): Bool
+            for _, field in ipairs(T.fields) do
+                local x, y = field_value(a, field.name), field_value(b, field.name)
+                local same = keys.equal field.type
+                if not same x y then return false end
+            end
+            return true
+        end
+    elseif T.kind == "sum" then
+        -- Fresh exhaustive handler tables are host generators, not mutations of
+        -- host state from a native conditional. Comparisons remain SLC words.
+        local function right_handlers(alt, x)
+            local right = {}
+            for _, other in ipairs(T.alts) do
+                local Payload = other.type
+                if Payload == Unit then
+                    local matches = other.name == alt.name
+                    right[other.name] = do(): Bool return Bool matches end
+                elseif other.name == alt.name then
+                    local same = keys.equal Payload
+                    right[other.name] = do(y: Payload): Bool return same x y end
+                else
+                    right[other.name] = do(y: Payload): Bool return false end
+                end
+            end
+            return right
+        end
+        local function left_handlers(b)
+            local left = {}
+            for _, alt in ipairs(T.alts) do
+                local Payload = alt.type
+                if Payload == Unit then
+                    left[alt.name] = do(): Bool
+                        local right = right_handlers(alt, nil)
+                        return b right
+                    end
+                else
+                    left[alt.name] = do(x: Payload): Bool
+                        local right = right_handlers(alt, x)
+                        return b right
+                    end
+                end
+            end
+            return left
+        end
+        equal = do(a: T, b: T): Bool
+            local left = left_handlers b
+            return a left
+        end
+    else error("unsupported semantic key: " .. T.display) end
+    equalities[T] = equal
+    return equal
+end
+
+return keys

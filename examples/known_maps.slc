@@ -1,0 +1,48 @@
+local source = { { 1, 10 }, { 2, 20 } }
+local numbers = Map.known(U32, U32, source)
+source[1][2] = 999
+source[2][1] = 9
+assert(host(numbers[U32 1]) == 10)
+assert(host(numbers.length) == 2)
+local words = StrMap.known(U32, { { "if", 1 }, { "a\0b", 2 }, { "length", 3 }, { "", 4 } })
+local empty = StrMap.known(U32, {})
+assert(not host(empty:has "anything"))
+
+local known_number = do(key: U32): U32
+    return numbers:find(key) { found(v) = v, missing() = U32 0 }
+end
+export known_number
+local known_word = do(key: Str): U32
+    return words:find(key) { found(v) = v, missing() = U32 0 }
+end
+export known_word
+local known_checked = do(key: Str): U32 return words[key] end
+export known_checked
+local known_constant = do(): U32 return words["length"] + numbers[U32 1] end
+export known_constant
+assert(host(known_constant()) == 13)
+local known_order = do(): U32
+    local result = U32 0
+    numbers:each do(k, v)
+        result = result * 10 + k
+    end
+    return result
+end
+export known_order
+assert(host(known_order()) == 12)
+
+local Label = Chars 8
+local tagged = Map.known(Label, U32, { { Label "x", 42 } })
+local known_label = do(text: Str): U32
+    local label = Label text
+    label.bytes[7] = 99
+    return tagged:find(label) { found(v) = v, missing() = U32 0 }
+end
+export known_label
+
+local ok, err = pcall(function() return Map.known(U32, U32, { { 1, 2 }, { 1, 3 } }) end)
+assert(not ok and tostring(err):find("duplicate semantic key", 1, true))
+ok, err = pcall(function() return numbers[U32 7] end)
+assert(not ok and tostring(err):find("map-key", 1, true))
+ok, err = pcall(function() numbers[1] = 0 end)
+assert(not ok and tostring(err):find("immutable", 1, true))

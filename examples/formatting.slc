@@ -1,0 +1,24 @@
+-- The same formatting words execute at compile time and residualize at runtime.
+local format = require "slc.format"
+
+local u = host(format.u64(U64(18446744073709551615ULL)))
+assert(u.len == 20 and u.bytes[1] == 49 and u.bytes[20] == 53)
+local s = host(format.i64(I64(-9223372036854775807LL) - 1))
+assert(s.len == 20 and s.bytes[1] == 45 and s.bytes[20] == 56)
+
+local format_unsigned = do(value: U64): Chars(20) = format.u64(value)
+local format_signed = do(value: I64): Chars(20) = format.i64(value)
+export format_unsigned
+export format_signed
+
+local format_known_length = do(): U32 = format.u64(U64(18446744073709551615ULL)).len
+export format_known_length
+
+local format_render = do(a: I64, b: U64, flag: Bool, expected: Str): Bool
+    local out: Text = Text {}
+    out:write(a, ",", b, ",", flag, ",", 42, ",", U64(18446744073709551615ULL))
+    local same: Bool = false
+    out:str() do(text) same = text:equals(expected) end
+    return same
+end
+export format_render

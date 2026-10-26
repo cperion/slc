@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Text append must accept unrelated sources and survive same-stack relocation. */
-#include "slc_rt.h"
+#include "text_reference.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -18,15 +18,11 @@ int main(void) {
     slc_grow_write_bytes(&text, NULL, 0);
     assert(text.len == 0);
     assert(slc_gs(0)->data == NULL);
-    slc_grow_write_bytes(&text, (const uint8_t *)"n = ", 4);
-    slc_grow_write_u64(&text, UINT64_MAX);
-    slc_grow_write_bytes(&text, (const uint8_t *)", min = ", 8);
-    slc_grow_write_i64(&text, INT64_MIN);
-    slc_grow_write_bytes(&text, (const uint8_t *)", ok = ", 7);
-    slc_grow_write_bool(&text, true);
-    slc_grow_write_bytes(&text, (const uint8_t *)", unit = ", 9);
+    /* Integer/Bool formatting now lives in SLC (formatting_main.c tests it).
+     * The remaining float helper still supplies an unrelated stack buffer. */
+    slc_grow_write_bytes(&text, (const uint8_t *)"unit = ", 7);
     slc_grow_write_f64(&text, 1.5);
-    expect(&text, "n = 18446744073709551615, min = -9223372036854775808, ok = true, unit = 1.5");
+    expect(&text, "unit = 1.5");
     slc_grow_clear(&text);
     uint8_t stack_bytes[] = { 's', 't', 'a', 'c', 'k' };
     uint8_t *heap_bytes = malloc(4);

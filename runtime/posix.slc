@@ -1,0 +1,199 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Shared POSIX I/O policy. Only syscalls, errno and callback submission are foreign.
+return function(types)
+    local Op = types.Op
+    local h = '"slc_io_posix.h"'
+    local Void, Char = opaque "void", opaque "char"
+    local Sockaddr = cstruct("struct sockaddr", "<sys/socket.h>", {})
+    local VP, CP, AP = Ptr Void, Ptr Char, Ptr Sockaddr
+    local Address = cstruct("struct sockaddr_in", "<netinet/in.h>", {
+        { "family", U16, "sin_family" }, { "port", U16, "sin_port" }, { "host", U32, "sin_addr.s_addr" },
+    })
+    local Stat = cstruct("struct stat", "<sys/stat.h>", { { "mode", U32, "st_mode" } })
+    local ReadOp = cstruct("const slc_op", h, { { "kind", I32 } })
+    local errno = cread("errno", I32, "<errno.h>")
+    local function constant(name, header) return cconst(name, I32, header) end
+    local again_error, would_block, interrupted = constant("EAGAIN", "<errno.h>"), constant("EWOULDBLOCK", "<errno.h>"), constant("EINTR", "<errno.h>")
+    local in_progress, already, aborted, not_connected = constant("EINPROGRESS", "<errno.h>"), constant("EALREADY", "<errno.h>"), constant("ECONNABORTED", "<errno.h>"), constant("ENOTCONN", "<errno.h>")
+    local getfl, setfl, setfd = constant("F_GETFL", "<fcntl.h>"), constant("F_SETFL", "<fcntl.h>"), constant("F_SETFD", "<fcntl.h>")
+    local nonblock, cloexec, open_cloexec = constant("O_NONBLOCK", "<fcntl.h>"), constant("FD_CLOEXEC", "<fcntl.h>"), constant("O_CLOEXEC", "<fcntl.h>")
+    local family, stream = constant("AF_INET", "<sys/socket.h>"), constant("SOCK_STREAM", "<sys/socket.h>")
+    local socket_level, reuseaddr, socket_error = constant("SOL_SOCKET", "<sys/socket.h>"), constant("SO_REUSEADDR", "<sys/socket.h>"), constant("SO_ERROR", "<sys/socket.h>")
+    local read_kind, write_kind, open_kind, close_kind, accept_kind, connect_kind =
+        constant("SLC_K_READ", h), constant("SLC_K_WRITE", h), constant("SLC_K_OPEN", h),
+        constant("SLC_K_CLOSE", h), constant("SLC_K_ACCEPT", h), constant("SLC_K_CONNECT", h)
+    local done, failed = constant("SLC_IO_DONE", h), constant("SLC_IO_FAILED", h)
+    local mode_mask = cconst("S_IFMT", U32, "<sys/stat.h>")
+    local regular_mode = cconst("S_IFREG", U32, "<sys/stat.h>")
+    local fcntl = extern("fcntl", { I32, I32 }, I32, { header = "<fcntl.h>", variadic = true })
+    local open = extern("open", { CP, I32 }, I32, { header = "<fcntl.h>", variadic = true })
+    local close = extern("close", { I32 }, I32, { header = "<unistd.h>" })
+    local pipe = extern("pipe", { Ptr I32 }, I32, { header = "<unistd.h>" })
+    local read = extern("read", { I32, VP, U64 }, I64, { header = "<unistd.h>" })
+    local write = extern("write", { I32, VP, U64 }, I64, { header = "<unistd.h>" })
+    local pread = extern("pread", { I32, VP, U64, I64 }, I64, { header = "<unistd.h>" })
+    local pwrite = extern("pwrite", { I32, VP, U64, I64 }, I64, { header = "<unistd.h>" })
+    local fstat = extern("fstat", { I32, Ptr Stat }, I32, { header = "<sys/stat.h>" })
+    local socket = extern("socket", { I32, I32, I32 }, I32, { header = "<sys/socket.h>" })
+    local connect = extern("connect", { I32, AP, U32 }, I32, { header = "<sys/socket.h>" })
+    local bind = extern("bind", { I32, AP, U32 }, I32, { header = "<sys/socket.h>" })
+    local listen = extern("listen", { I32, I32 }, I32, { header = "<sys/socket.h>" })
+    local accept = extern("accept", { I32, AP, Ptr U32 }, I32, { header = "<sys/socket.h>" })
+    local setsockopt = extern("setsockopt", { I32, I32, I32, VP, U32 }, I32, { header = "<sys/socket.h>" })
+    local getsockopt = extern("getsockopt", { I32, I32, I32, VP, Ptr U32 }, I32, { header = "<sys/socket.h>" })
+    local getpeername = extern("getpeername", { I32, AP, Ptr U32 }, I32, { header = "<sys/socket.h>" })
+    local getsockname = extern("getsockname", { I32, AP, Ptr U32 }, I32, { header = "<sys/socket.h>" })
+    local htons = extern("htons", { U16 }, U16, { header = "<arpa/inet.h>" })
+    local htonl = extern("htonl", { U32 }, U32, { header = "<arpa/inet.h>" })
+    local ntohs = extern("ntohs", { U16 }, U16, { header = "<arpa/inet.h>" })
+    local complete = types.complete
+    local offload_open_close = extern("slc_posix_submit_open_close", { Ptr Op }, Unit, { header = h })
+    local offload_file = extern("slc_posix_submit_file", { Ptr Op }, Unit, { header = h })
+    local address = do(host: U32, port: U32): Address
+        return Address { family = U16 family, port = htons(U16 port), host = htonl(host) }
+    end
+    local again = do(error: I32): Bool = error == again_error or error == would_block or error == interrupted
+    local slc_io_nonblocking = do(fd: I32): I32
+        local flags = fcntl(fd, getfl)
+        if flags < 0 then return -1 end
+        if fcntl(fd, setfl, bor flags nonblock) < 0 then return -1 end
+        return fcntl(fd, setfd, cloexec)
+    end
+    local slc_posix_open_close = do(op: Ptr Op): Unit
+        if op.kind == open_kind then
+            local fd = open(CP op.buf, bor op.fd open_cloexec, op.len)
+            if fd < 0 then complete(op, failed, I64(errno())) else complete(op, done, I64 fd) end
+        else
+            if close(op.fd) < 0 then complete(op, failed, I64(errno())) else complete(op, done, 0) end
+        end
+    end
+    local slc_io_prepare = do(op: Ptr Op): I32
+        if op.kind == open_kind or op.kind == close_kind then offload_open_close op; return 1 end
+        if op.kind ~= connect_kind then return 0 end
+        local fd = socket(family, stream, 0)
+        if fd < 0 then complete(op, failed, I64(errno())); return 1 end
+        slc_io_nonblocking fd
+        local a = address(U32 op.offset, op.len)
+        op.fd = fd
+        if connect(fd, AP(Ptr a), U32(size_of Address)) == 0 then complete(op, done, I64 fd); return 1 end
+        local error = errno()
+        if error ~= in_progress then
+            close fd
+            complete(op, failed, I64 error)
+            return 1
+        end
+        return 0
+    end
+    local slc_io_wants_write = do(op: Ptr ReadOp): I32
+        if op.kind == write_kind or op.kind == connect_kind then return 1 end
+        return 0
+    end
+    local slc_io_try = do(op: Ptr Op): I32
+        local n = I64 0
+        if op.kind == read_kind then
+            if op.offset >= 0 then n = pread(op.fd, VP op.buf, U64 op.len, op.offset)
+            else n = read(op.fd, VP op.buf, U64 op.len) end
+        elseif op.kind == write_kind then
+            if op.offset >= 0 then n = pwrite(op.fd, VP op.buf, U64 op.len, op.offset)
+            else n = write(op.fd, VP op.buf, U64 op.len) end
+        elseif op.kind == accept_kind then
+            local fd = accept(op.fd, null Sockaddr, null U32)
+            if fd < 0 then
+                local error = errno()
+                if again(error) or error == aborted then return 0 end
+                complete(op, failed, I64 error)
+                return 1
+            end
+            slc_io_nonblocking fd
+            complete(op, done, I64 fd)
+            return 1
+        elseif op.kind == connect_kind then
+            local error = I32 0
+            local len = U32(size_of I32)
+            if getsockopt(op.fd, socket_level, socket_error, VP(Ptr error), Ptr len) < 0 then error = errno() end
+            if error == in_progress or error == already then return 0 end
+            if error == 0 then
+                local peer = Address { family = 0, port = 0, host = 0 }
+                local plen = U32(size_of Address)
+                if getpeername(op.fd, AP(Ptr peer), Ptr plen) < 0 then
+                    local byte = U8 0
+                    if read(op.fd, VP(Ptr byte), 1) < 0 then
+                        error = errno()
+                        if again error then return 0 end
+                    else error = not_connected end
+                end
+            end
+            if error ~= 0 then close op.fd; complete(op, failed, I64 error)
+            else complete(op, done, I64 op.fd) end
+            return 1
+        else return 0 end
+        if n < 0 then
+            local error = errno()
+            if again error then return 0 end
+            complete(op, failed, I64 error)
+        else complete(op, done, n) end
+        return 1
+    end
+    local slc_posix_file_io = do(op: Ptr Op): Unit
+        if slc_io_try(op) == 0 then complete(op, failed, I64 again_error) end
+    end
+    local slc_io_offload_file = do(op: Ptr Op): I32
+        if op.kind ~= read_kind and op.kind ~= write_kind then return 0 end
+        local st = Stat { mode = 0 }
+        if fstat(op.fd, Ptr st) ~= 0 then return 0 end
+        if band(st.mode, mode_mask) ~= regular_mode then return 0 end
+        offload_file op
+        return 1
+    end
+    local slc_io_abandon = do(op: Ptr Op): Unit
+        if op.kind == connect_kind and op.fd >= 0 then close op.fd end
+    end
+    local slc_io_pipe = do(reader: Ptr I32, writer: Ptr I32, value: Ptr I64): I32
+        local fds: Array(I32, 2) = Array(I32, 2) { 0, 0 }
+        local data = (Ptr I32)(Ptr fds)
+        if pipe(data) < 0 then value[0] = I64(errno()); return failed end
+        slc_io_nonblocking fds[0]
+        slc_io_nonblocking fds[1]
+        reader[0] = fds[0]
+        writer[0] = fds[1]
+        value[0] = 0
+        return done
+    end
+    local slc_io_listen = do(host: U32, port: U32, value: Ptr I64): I32
+        local fd = socket(family, stream, 0)
+        if fd < 0 then value[0] = I64(errno()); return failed end
+        local one = I32 1
+        setsockopt(fd, socket_level, reuseaddr, VP(Ptr one), U32(size_of I32))
+        local a = address host port
+        if bind(fd, AP(Ptr a), U32(size_of Address)) < 0 or listen(fd, 128) < 0 then
+            local error = errno()
+            close fd
+            value[0] = I64 error
+            return failed
+        end
+        slc_io_nonblocking fd
+        value[0] = I64 fd
+        return done
+    end
+    local slc_io_local_port = do(fd: I32): U32
+        local a = Address { family = 0, port = 0, host = 0 }
+        local len = U32(size_of Address)
+        if getsockname(fd, AP(Ptr a), Ptr len) < 0 then return 0 end
+        return U32(ntohs(a.port))
+    end
+    export slc_io_nonblocking
+    export slc_posix_open_close
+    export slc_posix_file_io
+    export slc_io_prepare
+    export slc_io_wants_write
+    export slc_io_try
+    export slc_io_offload_file
+    export slc_io_abandon
+    export slc_io_pipe
+    export slc_io_listen
+    export slc_io_local_port
+    return { ReadOp = ReadOp, Address = Address, address = address,
+        prepare = slc_io_prepare, offload = slc_io_offload_file, try = slc_io_try,
+        abandon = slc_io_abandon, wants_write = slc_io_wants_write,
+        nonblocking = slc_io_nonblocking, pipe = slc_io_pipe }
+end

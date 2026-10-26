@@ -1,0 +1,320 @@
+-- Collection algorithms over storage projections. The compiler supplies only
+-- representation access and the activity that lends one entry's snapshots.
+local map = {}
+local zero = __S.zero_value
+local iterators = {}
+
+function map.each(T, storage, body)
+    local by_storage = iterators[T]
+    if not by_storage then by_storage = {}; iterators[T] = by_storage end
+    local by_body = by_storage[storage]
+    if not by_body then by_body = {}; by_storage[storage] = by_body end
+    if by_body[body] then return by_body[body] end
+    -- Distinct activities are distinct specializations: a nested traversal is
+    -- not recursion with a changing compile-time callback parameter.
+    local each = do(m: Ref T): Unit
+        local capacity = storage.capacity m
+        local slot = U32 0
+        while slot < capacity do
+            if storage.occupied m slot then storage.visit m slot body end
+            slot = slot + 1
+        end
+    end
+    by_body[body] = each
+    return each
+end
+
+local hash = require "slc.hash"
+local keys = require "slc.key"
+local trap = extern("slc_trap", { CString }, Unit)
+local none = U32 0xffffffff
+local libraries = {}
+
+function map.library(T, storage, Entry, Result, string_keys)
+    if libraries[T] then return libraries[T] end
+    local K, V = T.key, T.elem
+    local equal = keys.equal K
+    local digest = string_keys and hash.text or keys.hash(K)
+    local get, set = storage.get, storage.set
+    local read, write = storage.read, storage.write
+    local api = {}
+
+    local distance = do(h: U64, slot: U32, capacity: U32): U32
+        local low = U32 h
+        local delta = slot - low
+        local mask = capacity - 1
+        return band delta mask
+    end
+    local byte_count = do(m: Ref T, capacity: U32): U64
+        local count = U64 capacity
+        count = count + 1
+        local width = get(m, "width")
+        local maximum = storage.maximum()
+        if count > maximum / width then trap "Map is full" end
+        return count * width
+    end
+    local check_top = do(m: Ref T): Unit
+        local capacity = get(m, "cap")
+        local bytes = U64 0
+        if capacity ~= 0 then bytes = byte_count m capacity end
+        local base = get(m, "base")
+        local top = storage.top m
+        if top - base ~= bytes then trap "Map grew while it was not at the top of its data stack" end
+    end
+    local check_mutation = do(m: Ref T): Unit
+        local active = get(m, "iterating")
+        if active ~= 0 then trap "Map structural mutation during iteration" end
+    end
+    api.slot = do(m: Ref T, key: K, hashed: U64): U32
+        local capacity = get(m, "cap")
+        local base = get(m, "base")
+        local steps = U32 0
+        local mask = capacity - 1
+        local low = U32 hashed
+        while steps < capacity do
+            local candidate = low + steps
+            local slot = band candidate mask
+            local entry = read m base slot
+            if entry.hash == 0 then return none end
+            local prior = distance entry.hash slot capacity
+            if prior < steps then return none end
+            if entry.hash == hashed then
+                local found = storage.key m entry
+                if equal found key then return slot end
+            end
+            steps = steps + 1
+        end
+        return none
+    end
+    local insert_raw = do(m: Ref T, base: U64, capacity: U32, value: Entry): Unit
+        local entry = value
+        local mask = capacity - 1
+        local low = U32 entry.hash
+        local slot = band low mask
+        local steps = U32 0
+        while true do
+            local old = read m base slot
+            if old.hash == 0 then
+                write m base slot entry
+                return
+            end
+            local prior = distance old.hash slot capacity
+            if prior < steps then
+                write m base slot entry
+                entry = old
+                steps = prior
+            end
+            local next_slot = slot + 1
+            slot = band next_slot mask
+            steps = steps + 1
+        end
+    end
+    local grow = do(m: Ref T): Unit
+        local old_capacity = get(m, "cap")
+        if old_capacity >= 0x80000000 then trap "Map is full" end
+        local capacity = U32 8
+        if old_capacity ~= 0 then capacity = old_capacity * 2 end
+        local bytes = byte_count m capacity
+        local base = get(m, "base")
+        local fresh = storage.push m bytes
+        storage.zero m fresh bytes
+        local slot = U32 0
+        while slot < old_capacity do
+            local entry = read m base slot
+            if entry.hash ~= 0 then insert_raw m fresh capacity entry end
+            slot = slot + 1
+        end
+        storage.copy m base fresh bytes
+        local top = base + bytes
+        storage.reset m top
+        set(m, "cap", capacity)
+    end
+    local append
+    if string_keys then
+        append = do(m: Ref T, key: Str): U64
+            local base = get(m, "arena_base")
+            local length = get(m, "arena_len")
+            local dead = get(m, "dead")
+            local top = storage.arena_top m
+            if top - base ~= length then trap "StrMap grew while its arena was not at the top of its data stack" end
+            local pinned = storage.pin m key
+            local n = U64 key.length
+            local offset = length
+            if dead >= 4096 and dead >= length / 2 then
+                local live = length - dead
+                local maximum = storage.maximum()
+                if n > maximum - live then trap "StrMap key arena is full" end
+                local bytes = live + n
+                local fresh = storage.arena_push m bytes
+                local out = U64 0
+                local slot = U32 0
+                local capacity = get(m, "cap")
+                local table_base = get(m, "base")
+                while slot < capacity do
+                    local entry = read m table_base slot
+                    if entry.hash ~= 0 then
+                        local source = base + entry.key.offset
+                        local target = fresh + out
+                        local size = U64 entry.key.len
+                        storage.arena_copy m target source size
+                        entry.key.offset = out
+                        out = out + size
+                        write m table_base slot entry
+                    end
+                    slot = slot + 1
+                end
+                offset = out
+                local target = fresh + out
+                if pinned ~= maximum then
+                    local pending = storage.arena_view(m, pinned, key.length)
+                    storage.arena_write m target pending
+                else storage.arena_write m target key end
+                storage.arena_copy m base fresh bytes
+                local end_at = base + bytes
+                storage.arena_reset m end_at
+                set(m, "arena_len", bytes)
+                set(m, "dead", n)
+            else
+                storage.arena_push m n
+                local maximum = storage.maximum()
+                local target = base + offset
+                if pinned ~= maximum then
+                    local pending = storage.arena_view(m, pinned, key.length)
+                    storage.arena_write m target pending
+                else storage.arena_write m target key end
+                local new_length = length + n
+                local new_dead = dead + n
+                set(m, "arena_len", new_length)
+                set(m, "dead", new_dead)
+            end
+            return offset
+        end
+    end
+    api.put = do(m: Ref T, key: K, value: V, only_missing): Unit
+        local hashed = digest key
+        local slot = api.slot m key hashed
+        local base = get(m, "base")
+        if slot ~= none then
+            if not only_missing then storage.replace m slot value end
+            return
+        end
+        check_mutation m
+        check_top m
+        local entry = zero Entry
+        entry.hash = hashed
+        entry.value = value
+        if string_keys then
+            entry.key.offset = append m key
+            entry.key.len = key.length
+        else entry.key = key end
+        local capacity = get(m, "cap")
+        local length = get(m, "len")
+        if capacity == 0 or length >= capacity - capacity / 8 then grow m end
+        capacity = get(m, "cap")
+        insert_raw m base capacity entry
+        local new_length = length + 1
+        set(m, "len", new_length)
+        if string_keys then
+            local dead = get(m, "dead")
+            local n = U64 key.length
+            dead = dead - n
+            set(m, "dead", dead)
+        end
+    end
+    api.has = do(m: Ref T, key: K): Bool
+        local hashed = digest key
+        local slot = api.slot m key hashed
+        return slot ~= none
+    end
+    api.find = do(m: Ref T, key: K): Result
+        local hashed = digest key
+        local slot = api.slot m key hashed
+        if slot == none then return Result.missing() end
+        local base = get(m, "base")
+        local entry = read m base slot
+        return Result.found entry.value
+    end
+    api.borrow = do(m: Ref T, key: K): U32
+        local hashed = digest key
+        local slot = api.slot m key hashed
+        if slot == none then trap "map-key: missing key" end
+        return slot
+    end
+    api.remove = do(m: Ref T, key: K): Bool
+        local hashed = digest key
+        local slot = api.slot m key hashed
+        if slot == none then return false end
+        check_mutation m
+        local base = get(m, "base")
+        local capacity = get(m, "cap")
+        local removed = read m base slot
+        local mask = capacity - 1
+        local moving = Bool true
+        while moving do
+            local next_slot = slot + 1
+            next_slot = band next_slot mask
+            local entry = read m base next_slot
+            local prior = distance entry.hash next_slot capacity
+            if entry.hash == 0 or prior == 0 then moving = false
+            else
+                write m base slot entry
+                slot = next_slot
+            end
+        end
+        local width = get(m, "width")
+        local index = U64 slot
+        local at = base + index * width
+        storage.zero m at width
+        local length = get(m, "len")
+        length = length - 1
+        set(m, "len", length)
+        if string_keys then
+            local n = U64 removed.key.len
+            local dead = get(m, "dead")
+            dead = dead + n
+            set(m, "dead", dead)
+            if length == 0 then
+                local arena_base = get(m, "arena_base")
+                storage.arena_reset m arena_base
+                local zero = U64 0
+                set(m, "arena_len", zero)
+                set(m, "dead", zero)
+            end
+        end
+        return true
+    end
+    libraries[T] = api
+    return api
+end
+
+-- Immutable host descriptions emit these same ordinary comparisons for dynamic
+-- keys; known keys execute the words while specializing, without a native heap.
+function map.known(K, V, Result, entries)
+    local equal = keys.equal K
+    local api = {}
+    api.find = do(key: K): Result
+        for _, entry in ipairs(entries) do
+            if equal(key, entry[1]) then return Result.found(entry[2]) end
+        end
+        return Result.missing()
+    end
+    api.has = do(key: K): Bool
+        for _, entry in ipairs(entries) do
+            if equal(key, entry[1]) then return true end
+        end
+        return false
+    end
+    api.get = do(key: K): V
+        for _, entry in ipairs(entries) do
+            if equal(key, entry[1]) then return entry[2] end
+        end
+        trap "map-key: missing key in known map"
+        return zero V -- unreachable after the runtime trap
+    end
+    api.each = do(body): Unit
+        for _, entry in ipairs(entries) do body(entry[1], entry[2]) end
+    end
+    return api
+end
+
+return map

@@ -38,7 +38,23 @@ local is_type = types.is_type
 -- errors carry a clean message located at the innermost line of the program
 -- being compiled (the driver sets S.user_source); evaluation rethrows errors
 -- across pcalls, so the location is fixed where the error is raised
+local current               -- the active builder (declared here for the trail)
+local function active_trail()
+    local b = current
+    if not b or not b.frames or #b.frames == 0 then return '' end
+    local out = {}
+    for i = 1, #b.frames do                 -- outermost first, deepest last
+        local f = b.frames[i]
+        local w = f.word
+        local name = (w and (w.name or w.cname)) or f.kind or '?'
+        local loc = (w and w.loc) or f.loc
+        out[#out + 1] = ('\n    in %s%s'):format(tostring(name), loc and (' (' .. tostring(loc) .. ')') or '')
+    end
+    return table.concat(out)
+end
+
 local function fail(msg, level)
+    msg = msg .. active_trail()
     if S.user_source then
         for l = 2, 60 do
             local info = debug.getinfo(l, 'Sl')
@@ -55,6 +71,10 @@ S.fail = fail
 -- the module being compiled ------------------------------------------------------------
 
 local module
+local reset_hooks = {}
+-- a host-lifetime type may cache work that belongs to one compilation
+function S.on_reset(f) reset_hooks[#reset_hooks + 1] = f end
+
 function S.reset()
     module = {
         functions = {},          -- in creation order
@@ -67,6 +87,7 @@ function S.reset()
         version = 0,
     }
     S.module = module
+    for _, f in ipairs(reset_hooks) do f() end
 end
 S.reset()
 
@@ -183,7 +204,6 @@ S.free = free
 local Builder = {}
 Builder.__index = Builder
 
-local current               -- the active builder
 local builders = {}         -- stack, for nested function construction
 
 function S.builder() return current end
@@ -479,10 +499,13 @@ function Builder:resolve_checked(p)
     self.ccache = self.ccache or {}
     local here = self.path or ''
     local e = self.ccache[c.key]
-    if not (e and e.epoch == (self.cepoch or 0) and here:sub(1, #e.path) == e.path) then
-        local t = self:new_temp(c.call.T)
+    if not (c.cache and e and e.epoch == (self.cepoch or 0) and here:sub(1, #e.path) == e.path) then
+        -- Library-defined lookup may stage control flow before yielding its
+        -- pointer. Resolve it at use, not when a checked reference is captured.
+        local call = c.resolve and c.resolve() or c.call
+        local t = self:new_temp(call.T)
         rawset(t, 'hint', 'at')
-        self:emit { op = 'let', place = t, e = copy_expr(c.call), what = 'a checked lookup' }
+        self:emit { op = 'let', place = t, e = copy_expr(call), what = 'a checked lookup' }
         e = { epoch = self.cepoch or 0, path = here,
               root = new_place { pk = 'deref', T = r.T, name = r.name, ptr = read_expr(t), id = uid() } }
         self.ccache[c.key] = e
@@ -518,9 +541,10 @@ end
 S.expr_key = expr_key
 
 -- a place found by a checked lookup
-function S.checked_place(t, call, name)
+function S.checked_place(t, call, name, cache, resolve, key)
+    assert(call or (resolve and key), 'a deferred checked place needs its semantic key')
     local p = new_place { pk = 'deref', T = t, name = name or 'element', ptr = call, id = uid() }
-    rawset(p, 'checked', { key = expr_key(call), call = call })
+    rawset(p, 'checked', { key = key or expr_key(call), call = call, cache = cache ~= false, resolve = resolve })
     return p
 end
 
@@ -567,7 +591,8 @@ local function pendable(v)
     return false
 end
 
-local function reads_under(e, p)
+local h = {}
+h.reads_under = function(e, p)
     local found = false
     local function walk(x)
         if type(x) ~= 'table' or found then return end
@@ -616,7 +641,7 @@ function Builder:store(p, v)
         local selfref = false
         for _, f in ipairs(p.T.fields) do
             local fv = v.f[f.name]
-            if fv.k ~= 'known' and not pendable(fv) and reads_under(ex(fv), p) then selfref = true break end
+            if fv.k ~= 'known' and not pendable(fv) and h.reads_under(ex(fv), p) then selfref = true break end
         end
         if selfref and not self.dead then
             local e = ex(v)
@@ -730,11 +755,17 @@ end
 -- a tracked local whose address leaves the evaluator becomes ordinary storage
 function Builder:escape(p)
     local r = root_of(p)
-    if r.pk ~= 'local' or rawget(r, 'escaped') then return end
+    if r.pk ~= 'local' then return end
+    -- Escaped is shared across speculative paths; pending stores are not.
+    -- A replayed branch must flush its own owner state before taking an address.
     for _, l in ipairs(leaves(r)) do self:materialize(l) end
     for _, l in ipairs(leaves(r)) do self:invalidate(l) end
-    rawset(r, 'escaped', true)
-    self.escapes[#self.escapes + 1] = r
+    if not rawget(r, 'escaped') then
+        rawset(r, 'escaped', true)
+        self.escapes[#self.escapes + 1] = r
+    end
+    -- Replayed paths must drop tracking too, or a later loop repeatedly tries
+    -- to escape an owner whose global escaped flag was set by an earlier path.
     for _, l in ipairs(leaves(r)) do self.state[l] = nil end
 end
 
@@ -961,7 +992,10 @@ local function is_zero(v) return v.k == 'known' and v.v == 0 end
 local function is_one(v) return v.k == 'known' and v.v == 1 end
 
 local function binary(op, a, b)
-    local t = operand_type(a, b, OPSYM[op] or op)
+    -- A shift's result type comes from its left operand; the independently
+    -- checked integer count must not first pass ordinary operand unification.
+    local shift = op == 'shl' or op == 'shr'
+    local t = (shift and is_staged(a)) and a.T or operand_type(a, b, OPSYM[op] or op)
     if not types.is_numeric(t) then
         fail(("operator %s is not defined for %s"):format(OPSYM[op] or op, t.display), 3)
     end
@@ -1030,10 +1064,9 @@ local function compare(op, a, b)
         -- IDs compare by token, slot and generation
         local av = value_of(a, t, 'comparison')
         local bv = value_of(b, t, 'comparison')
-        local e = { op = 'rt', text = 'slc_id_eq($1, $2)', args = { ex(av), ex(bv) }, T = types.Bool,
-                    pure = true }
-        if op == 'ne' then e = { op = 'un', o = 'not', a = e, T = types.Bool } end
-        return dyn(types.Bool, e)
+        local equal = require('slc.key').equal(t)(av, bv)
+        if op == 'ne' then return unary('not', equal) end
+        return equal
     end
     if t.kind == 'ptr' and (op == 'eq' or op == 'ne') then
         local av = value_of(a, t, 'comparison')
@@ -1182,6 +1215,20 @@ function S.dot(obj, key)
     if is_staged(obj) then return member(obj, key) end
     return obj[key]
 end
+-- Brackets are distinct from member selection: a StrMap key may be "length",
+-- "put", or any internal evaluator field name, without shadowing the API.
+function S.index(obj, key)
+    if is_staged(obj) then
+        local ip = rawget(struct_of(obj), 'index_place')
+        if ip then return ip(obj, key) end
+    end
+    -- Host descriptions can distinguish checked indexing from API members,
+    -- including when a native key is still dynamic. No native storage is implied.
+    local mt = getmetatable(obj)
+    local index = type(mt) == 'table' and rawget(mt, '__slc_index')
+    if index then return index(obj, key) end
+    return obj[key]
+end
 function S.mcall(obj, key, ...)
     local f = S.dot(obj, key)
     if f == nil then fail(("no method '%s' on %s"):format(tostring(key), describe(obj)), 2) end
@@ -1191,9 +1238,13 @@ end
 V.__index = function(x, key) return member(x, key) end
 P.__index = function(x, key) return member(x, key) end
 
-function S.setindex(obj, key, v)
+function S.setindex(obj, key, v, bracket)
     if is_staged(obj) then
         local t = struct_of(obj)
+        if bracket and rawget(t, 'index_place') then
+            S.set(t.index_place(obj, key), v)
+            return
+        end
         if (t.kind == 'pool' or rawget(t, 'index_place')) and is_staged(key) or (rawget(t, 'index_place') and type(key) == 'number') then
             S.set(member(obj, key), v)
             return
@@ -1284,6 +1335,14 @@ Type.__call = function(t, x)
         end
         return agg(t, f)
     end
+    if t.kind == 'ptr' then
+        local v = is_staged(x) and value_of(x, nil, t.display .. '(...)')
+        if not v or v.T.kind ~= 'ptr' then
+            fail(t.display .. '(...) requires a pointer; integer-pointer conversion is not offered', 2)
+        end
+        if v.T == t then return v end
+        return dyn(t, { op = 'conv', a = ex(v), T = t })
+    end
     if types.is_scalar(t) then
         -- conversion with C semantics
         if not is_staged(x) then
@@ -1372,8 +1431,9 @@ function S.decl(t, init, name)
             name or '?', t.display, name or 'x', t.display), 2)
     end
     if init == nil and t.kind == 'array' then init = t() end     -- arrays start zeroed
+    local unreachable = b.dead
     if init ~= nil then
-        if t.kind == 'store' or t.kind == 'grow' then
+        if t.resizable and t.kind ~= 'struct' then
             S.init_resizable(p, init)
         else
             local was = b.initializing
@@ -1385,13 +1445,21 @@ function S.decl(t, init, name)
             if not ok then error(err, 0) end
         end
     end
+    if unreachable then
+        -- A declaration in unreachable code stores nothing. Give it a zero of
+        -- its type: the value is discarded, but a later walk still type-checks.
+        for _, l in ipairs(leaves(p)) do
+            local en = b.state[l]
+            if not en or en.uninit then b.state[l] = { val = S.zero_value(l.T), mat = false } end
+        end
+    end
     return p
 end
 
 function S.set(p, v)
     local b = cur()
     if not is_place(p) then fail('assignment target is not a native place', 2) end
-    if p.T.kind == 'store' or p.T.kind == 'grow' then
+    if p.T.resizable and p.T.kind ~= 'struct' then
         fail(("'%s' is resizable storage; it cannot be reassigned"):format(p.name), 2)
     end
     b:store(p, coerce(v, p.T, ("assignment to '%s'"):format(p.name)))
@@ -1403,6 +1471,36 @@ end
 function S.open_bind(v)
     if is_place(v) then return v end
     return S.bind(v)
+end
+
+-- Infer storage only for native values that can inhabit a local. References
+-- retain write-through semantics; borrowed views and existing resizable places
+-- remain aliases, never implicitly stored or copied.
+function S.infer(v, name)
+    if current and (is_value(v) or is_place(v)) and v.T.kind ~= 'ref'
+        and v.T.kind ~= 'unit' and v.T.kind ~= 'opaque'
+        and not rawget(v, 'view')
+        and not (is_place(v) and v.T.resizable) then
+        return S.decl(v.T, v, name)
+    end
+    return S.bind(v)
+end
+
+function S.infern(names, ...)
+    local values = { ... }
+    for i, name in ipairs(names) do values[i] = S.infer(values[i], name) end
+    return unpack(values, 1, #names)
+end
+
+-- Loop parameters replace only native places, not host bindings. Host names
+-- still refer to their lexical binding, including generation-time rebinding.
+function S.inferred_state(slot, host)
+    if is_place(slot) then return slot end
+    return host
+end
+
+function S.assign_inferred(slot, value, host_assign)
+    if is_place(slot) then S.set(slot, value) else host_assign(value) end
 end
 
 function S.bind(v)
@@ -1867,7 +1965,7 @@ local function round_known(b, frame, args)
 end
 
 -- is the code since a frame began under dynamic control?
-local function under_dynamic(b, frame)
+h.under_dynamic = function(b, frame)
     for i = frame.region_base + 1, #b.regions do
         local k = b.regions[i]
         if k == 'dyn' or k == 'loop' then return true end
@@ -1974,7 +2072,7 @@ local function static(v)
 end
 S.static = static
 
-local function host_key(v)
+h.host_key = function(v)
     local t = type(v)
     if t == 'number' or t == 'boolean' or t == 'nil' then return 'h' .. tostring(v) end
     if t == 'string' then return 'h' .. ('%q'):format(v) end
@@ -1982,7 +2080,7 @@ local function host_key(v)
 end
 
 local function arg_key(v)
-    if is_host(v) then return host_key(v) end
+    if is_host(v) then return h.host_key(v) end
     if v.k == 'sumv' and is_known(v) then
         local q = rawget(v, 'p')
         return v.T.display .. '.' .. v.tag .. '(' .. (q ~= nil and arg_key(q) or '') .. ')'
@@ -2085,7 +2183,9 @@ function W:__call(...)
 end
 
 -- the shape of a specialization key: knownness and types, not known values
-local function arg_shape(v)
+h.arg_shape = function(v)
+    -- a place passed on to a handler is read like any other argument
+    if is_place(v) then v = cur():read(v) end
     if is_host(v) then return 'H' end
     if static(v) then return 'K' .. v.T.display end
     if v.k == 'ref' then return '&' .. v.T.elem.display end
@@ -2094,7 +2194,7 @@ end
 
 local function shape_of(args)
     local parts = {}
-    for i, a in ipairs(args) do parts[i] = arg_shape(a) end
+    for i, a in ipairs(args) do parts[i] = h.arg_shape(a) end
     return table.concat(parts, ',')
 end
 
@@ -2109,7 +2209,7 @@ end
 
 -- can new arguments take the place of a frame's arguments after generalizing?
 -- (same types; a known position may become dynamic, never the reverse)
-local function compatible(a, b)
+h.compatible = function(a, b)
     if #a ~= #b then return false end
     for i = 1, #a do
         local x, y = a[i], b[i]
@@ -2124,7 +2224,7 @@ local function compatible(a, b)
     return true
 end
 
-local function widened(args, positions)
+h.widened = function(args, positions)
     local out = {}
     for i, a in ipairs(args) do
         if positions[i] and is_host(a) then
@@ -2148,7 +2248,8 @@ function Builder:release_since(frame)
     for k in pairs(self.gs_live or {}) do if not mark[k] then ks[#ks + 1] = k end end
     table.sort(ks, function(a, b) return a > b end)
     for _, k in ipairs(ks) do
-        self:emit { op = 'rt', text = 'slc_release($P.stack, $P.base);', place = self.gs_live[k] }
+        local owned = self.gs_live[k]
+        owned.release()
     end
 end
 
@@ -2156,6 +2257,14 @@ end
 -- restarting rounds in a more general mode when asked
 function Builder:run_frame(desc, args, opts)
     opts = opts or {}
+    if self.dead then
+        -- Unreachable code is still written, but applying a word there must not
+        -- run its body: the result is discarded, so a null value of its type
+        -- keeps the enclosing expression well typed.
+        local ret = desc.ret
+        if not ret or ret.kind == 'unit' then return nil end
+        return dyn(ret, { op = 'zero', T = ret })
+    end
     local mode = opts.mode or 'inline'
     local widen, escapes = {}, {}
     local rounds = 0
@@ -2194,7 +2303,7 @@ function Builder:run_frame(desc, args, opts)
             self:rollback(frame.snap)
             if sig.escape then escapes[#escapes + 1] = sig.escape end
             for i in pairs(sig.widen or {}) do widen[i] = true end
-            args = widened(args, widen)
+            args = h.widened(args, widen)
             mode = sig.mode
             if mode == 'function' then
                 return self:call_materialized(desc.word, args, spec_key(desc.word, args))
@@ -2499,7 +2608,7 @@ function Builder:apply(w, args, opts)
     for i = #self.frames, 1, -1 do
         local f = self.frames[i]
         if f.kind == 'word' and f.word == w and f.shape == shape
-            and (f.mode == 'inline' or f.mode == 'loop') and under_dynamic(self, f) then
+            and (f.mode == 'inline' or f.mode == 'loop') and h.under_dynamic(self, f) then
             signal('restart', f, { widen = changed(f.args, args), mode = f.mode })
         end
     end
@@ -2686,7 +2795,7 @@ function S.ret_one(...)
 end
 
 -- `return f(args)`: a tail call
-local function saturate(w, n, ...)
+h.saturate = function(w, n, ...)
     if not is_word(w) then return nil end
     local need = #w.params
     if #w.supplied + n ~= need then return nil end
@@ -2709,7 +2818,7 @@ function S.tail(f, ...)
         local recv = (...)
         if is_value(recv) and recv.k ~= 'ref' then return S.ret(f(...)) end
     end
-    local args = saturate(f, select('#', ...), ...)
+    local args = h.saturate(f, select('#', ...), ...)
     if not args then return S.ret(f(...)) end
     local wf = innermost(b, 'word')
     if not wf then fail('return outside a word', 2) end
@@ -2717,7 +2826,7 @@ function S.tail(f, ...)
     local target
     local F = wf
     while F do
-        if F.word == f and compatible(F.args, args) then target = F break end
+        if F.word == f and h.compatible(F.args, args) then target = F break end
         F = F.tail_parent
     end
     if not target then
@@ -2742,8 +2851,8 @@ end
 -- a tail self-call in a materialized function: reassign parameters, jump to the top
 function Builder:root_tail(frame, args)
     local fn = self.fn
-    for k, p in pairs(self.gs_live or {}) do
-        self:emit { op = 'rt', text = 'slc_release($P.stack, $P.base);', place = p }
+    for _, owned in pairs(self.gs_live or {}) do
+        owned.release()
     end
     fn.top_label = fn.top_label or ('L' .. uid())
     local moves = {}
@@ -2817,7 +2926,7 @@ function S.loop(params, args, body, opts)
 end
 
 -- the full arguments of the next round: the loop's own, then its state
-local function round_args(b, frame, fixed)
+h.round_args = function(b, frame, fixed)
     local args = {}
     for i = 1, frame.desc.nfixed do
         local p = frame.desc.params[i]
@@ -2842,7 +2951,7 @@ function S.loop_next(...)
     local b = cur()
     if b.dead then return end
     local frame = loop_frame(b, 'next')
-    local args = round_args(b, frame, { ... })
+    local args = h.round_args(b, frame, { ... })
     if frame.mode == 'inline' then
         if round_known(b, frame, args) and frame.rounds < LOOP_FUEL then
             signal('tail', frame, { args = args })
@@ -2973,7 +3082,7 @@ end
 
 -- functions ----------------------------------------------------------------------------------
 
-local function new_fn(name, w, key)
+h.new_fn = function(name, w, key)
     return { name = name, cname = nil, word = w, key = key, params = {}, ret = w.ret,
              locals = {}, body = {}, status = 'building' }
 end
@@ -3009,7 +3118,7 @@ end
 
 -- construct the residual C function for a specialization key
 function build_function(w, args, key, cname, opts)
-    local fn = new_fn(w.name, w, key)
+    local fn = h.new_fn(w.name, w, key)
     fn.task = opts and opts.task
     fn.capture = opts and opts.capture
     fn.cname = cname and unique(module.names, cname) or unique(module.names, w.name)
@@ -3145,6 +3254,55 @@ function S.export_word(w, cname)
 end
 
 S.export = S.export_word
+
+-- test "name" do ... end: a word with no parameters, materialized so `slc test`
+-- can call it; its body runs under the runtime's trap recovery.
+local test_ids = 0
+function S.test(name, body)
+    local nm = type(name) == 'string' and name or (is_value(name) and name.k == 'known' and name.v) or nil
+    if type(nm) ~= 'string' then
+        fail('test "name" do ... end: the name must be text known while compiling', 2)
+    end
+    if body == nil then
+        -- `test "name" do ... end` reaches the macro as test("name")(function ...):
+        -- the declaration hands back what the block is applied to
+        return function(block) return S.test(nm, block) end
+    end
+    if type(body) ~= 'function' and not (getmetatable(body) and getmetatable(body).__call) then
+        fail('test "name" do ... end takes a block, got ' .. describe(body), 2)
+    end
+    test_ids = test_ids + 1
+    local w = S.word { name = 'test ' .. nm, params = {}, result = types.Unit,
+                       loc = S.site('test'), body = function() body() end }
+    local fn = build_function(w, {}, 'test#' .. test_ids, nil, {})
+    fn.test_name = nm
+    fn.exported = true
+    fn.cname = fn.cname or unique(module.names, 'slc_test_' .. test_ids)
+    fn.export_name = nm
+    module.tests = module.tests or {}
+    module.tests[#module.tests + 1] = fn
+    module.exports[#module.exports + 1] = fn
+    return fn
+end
+
+-- check(cond): a test's assertion; a known false one fails while compiling, a
+-- dynamic one traps where it runs, naming the site
+function S.check(cond)
+    -- a host boolean (a plain block's comparison) is decided now
+    if type(cond) == 'boolean' then
+        if not cond then fail(('check failed: %s'):format(S.site('check')), 3) end
+        return
+    end
+    local cv = condition(cond)
+    if not cv then fail('check(cond) takes a Bool', 2) end
+    if cv.k == 'known' then
+        if not cv.v then fail(('check failed: %s'):format(S.site('check')), 3) end
+        return
+    end
+    S.if_(cond, nil, function()
+        S.trap(known(types.CString, 'check failed: ' .. S.site('check')))
+    end)
+end
 
 -- materialize a word to call now (the in-process backend): like an export, but
 -- a function of its own that the module's C does not include
@@ -3373,6 +3531,7 @@ end
 -- same; on any other function each group is its own application.
 
 S.arity = setmetatable({}, { __mode = 'k' })
+for _, name in ipairs { 'band', 'bor', 'bxor', 'shl', 'shr' } do S.arity[S[name]] = 2 end
 
 function S.args(...)
     return { n = select('#', ...), ... }
@@ -3414,7 +3573,7 @@ local Keyed = { __name = 'Keyed' }
 S.Keyed = Keyed
 
 -- the data fields of a record source, as values
-local function record_fields(x)
+h.record_fields = function(x)
     local t = is_staged(x) and x.T
     if t and t.kind == 'ref' then t = t.elem end
     if not t or t.kind ~= 'struct' then
@@ -3443,7 +3602,7 @@ function S.keyed(items)
     end
     for n, it in ipairs(items) do
         if it[1] == 'spread' then
-            for _, fv in ipairs(record_fields(it[2])) do
+            for _, fv in ipairs(h.record_fields(it[2])) do
                 local name = fv[1]
                 if spread_from[name] then
                     fail(("spread-overlap: field '%s' comes from two spreads"):format(name), 2)
@@ -3473,7 +3632,7 @@ local function record_type(x)
     end
 end
 
-local function names_of(ctx)
+h.names_of = function(ctx)
     local out = {}
     local t = record_type(ctx)
     if t then
@@ -3496,7 +3655,7 @@ local function has_name(ctx, name)
 end
 
 -- the program's own names, as opposed to Lua's standard library globals
-local function visible_global(env, name)
+h.visible_global = function(env, name)
     local v = env and env[name]
     if v == nil then return false end
     if LUA_GLOBALS[name] and rawget(env, name) == nil and v == _G[name] then return false end
@@ -3507,7 +3666,7 @@ end
 -- names, the names earlier openings introduced, and the program's globals
 function S.open(ctx, outer, declared, env, label)
     if is_pack(ctx) then fail('spread-source: packs cannot introduce names', 2) end
-    for _, name in ipairs(names_of(ctx)) do
+    for _, name in ipairs(h.names_of(ctx)) do
         for _, d in ipairs(declared) do
             if d == name then
                 fail(("spread-shadow: opening %s introduces '%s', which is already a visible name"):format(label, name), 2)
@@ -3518,7 +3677,7 @@ function S.open(ctx, outer, declared, env, label)
                 fail(("spread-shadow: opening %s introduces '%s', which an enclosing opening already introduced"):format(label, name), 2)
             end
         end
-        if visible_global(env, name) then
+        if h.visible_global(env, name) then
             fail(("spread-shadow: opening %s introduces '%s', which is already a visible name"):format(label, name), 2)
         end
     end
@@ -3641,7 +3800,8 @@ function S.constructor(t, name)
         end
     elseif pt.kind == 'struct' then
         c = function(x)
-            return sumv(t, name, pt(x))
+            local payload = is_staged(x) and coerce(x, pt, 'sum payload') or pt(x)
+            return sumv(t, name, payload)
         end
     else
         c = function(x)
@@ -3654,8 +3814,8 @@ function S.constructor(t, name)
     return c
 end
 
-local function tag_of(e) return { op = 'field', a = e, name = 'tag', T = types.U32 } end
-local function payload_of(e, alt)
+h.tag_of = function(e) return { op = 'field', a = e, name = 'tag', T = types.U32 } end
+h.payload_of = function(e, alt)
     return { op = 'field', a = { op = 'field', a = e, name = 'as' }, name = alt.name, T = alt.type }
 end
 
@@ -3698,11 +3858,11 @@ local function match(s, handlers)
         local function arm(i)
             local alt = t.alts[i]
             local function run()
-                local payload = alt.type.kind ~= 'unit' and dyn(alt.type, payload_of(e, alt)) or nil
+                local payload = alt.type.kind ~= 'unit' and dyn(alt.type, h.payload_of(e, alt)) or nil
                 S.ret(call(alt, payload))
             end
             if i == #t.alts then return run() end
-            S.if_(dyn(types.Bool, { op = 'cmp', o = 'eq', a = tag_of(e), T = types.Bool,
+            S.if_(dyn(types.Bool, { op = 'cmp', o = 'eq', a = h.tag_of(e), T = types.Bool,
                                     b = { op = 'tagname', sum = t, alt = alt.name, T = types.U32 } }),
                 run, function() arm(i + 1) end)
         end
@@ -3748,15 +3908,17 @@ local function index_place(pv, iv, elem)
     local base = ex(pv)
     local idx = iv
     -- an element of `&p[a]` is an element of p: the offsets add
-    if base.op == 'addr' and base.place.pk == 'index' then
+    if base.op == 'addr' and base.place.pk == 'index' and base.place.T == elem then
         local inner = base.place
         local ie = rawget(inner, 'idx')
         local ia = ie.op == 'const' and known(ie.T, ie.v) or dyn(ie.T, ie)
         if ia.T ~= idx.T then idx = ia.T(idx) end
         idx = binary('add', ia, idx)
         base = rawget(inner, 'base')
-    elseif base.op == 'addr' and base.place.pk ~= 'index' and idx.k == 'known' and tonumber(idx.v) == 0 then
-        -- Ptr(place)[0] is the place itself
+    elseif base.op == 'addr' and base.place.T == elem and base.place.pk ~= 'index'
+        and idx.k == 'known' and tonumber(idx.v) == 0 then
+        -- Ptr(place)[0] is the place itself only without a retyped view.
+        -- atomic_ptr(Ptr(place))[0] must retain its Atomic element type.
         return base.place
     end
     return new_place { pk = 'index', T = elem, base = base, idx = ex(idx),
@@ -3833,6 +3995,13 @@ local function check_view(s)
     return v
 end
 
+-- the checked-access words: the bounds and the trap text are library policy
+local slice_checks
+local function checks()
+    if not slice_checks then slice_checks = require('slc.slice') end
+    return slice_checks
+end
+
 local function bound_check(i, n, what, thing)
     if i.k == 'known' and n.k == 'known' then
         if tonumber(i.v) >= tonumber(n.v) then
@@ -3844,8 +4013,7 @@ local function bound_check(i, n, what, thing)
     local b = cur()
     -- a branch on this path already proved i < n
     if b:proves_less(ex(i), ex(n)) then return end
-    b:emit { op = 'rt', text = 'SLC_BOUND($1, $2);', args = { ex(i), ex(n) }, what = 'a bounds check' }
-    b.fn.uses_rt = true
+    checks().index(types.U64(i), types.U64(n))
 end
 
 -- A read-only view can retain an abstract address while its owner is tracked.
@@ -3861,7 +4029,7 @@ function S.array_pointer(place, offset, builder)
                           offset = cur():bind(offset or known(types.U32, 0)), builder = builder or cur() }, V)
 end
 
-local function array_pointer_read(ptr, index)
+h.array_pointer_read = function(ptr, index)
     if ptr.k ~= 'array_ptr' or ptr.offset.k ~= 'known' or index.k ~= 'known' then return nil end
     local value = ptr.builder:read(ptr.place)
     if value.k ~= 'array' then return nil end
@@ -3891,18 +4059,18 @@ local function make_slice(t, ptr, len, view)
     return v
 end
 
-local function slice_get(s, key)
+h.slice_get = function(s, key)
     check_view(s)
     local ptr, len = slice_parts(s)
     local iv = index_value(key)
     if iv.T ~= types.U32 then iv = types.U32(iv) end
     bound_check(iv, len, 'index')
-    local value = array_pointer_read(ptr, iv)
+    local value = h.array_pointer_read(ptr, iv)
     if value then return value end
     return cur():read(index_place(ptr, iv, ptr.T.elem))
 end
 
-local function slice_sub(s, a, b_)
+h.slice_sub = function(s, a, b_)
     local view = check_view(s)
     local ptr, len, t = slice_parts(s)
     local av, bv = index_value(a), index_value(b_)
@@ -3916,20 +4084,11 @@ local function slice_sub(s, a, b_)
     elseif av.k == 'known' and bv.k == 'known' and av.v > bv.v then
         fail(('index-range: sub(%s, %s) is empty backwards'):format(fold.show(av.T, av.v), fold.show(bv.T, bv.v)), 3)
     else
-        local bld = cur()
-        if av.k == 'known' and av.v == 0 then
-            -- All indices are unsigned: 0 <= b is already true. Keeping it in
-            -- SLC_RANGE would make newly propagated constants fail strict C.
-            bld:emit { op = 'rt', text = 'if ($1 > $2) slc_trap("slice range out of bounds");',
-                       args = { ex(bv), ex(len) }, what = 'a range check' }
-        elseif bv.k == 'known' and bv.v == 0 then
-            bld:emit { op = 'rt', text = 'if ($1 > 0u) slc_trap("slice range out of bounds");',
-                       args = { ex(av) }, what = 'a range check' }
-        else
-            bld:emit { op = 'rt', text = 'SLC_RANGE($1, $2, $3);', args = { ex(av), ex(bv), ex(len) },
-                       what = 'a range check' }
-        end
-        bld.fn.uses_rt = true
+        -- All indices are unsigned: 0 <= b is already true. Dropping it keeps
+        -- newly propagated constants out of a redundant comparison.
+        if av.k == 'known' and av.v == 0 then checks().high(types.U64(bv), types.U64(len))
+        elseif bv.k == 'known' and bv.v == 0 then checks().nonempty(types.U64(av))
+        else checks().range(types.U64(av), types.U64(bv), types.U64(len)) end
     end
     local p2 = ptr
     if ptr.k == 'array_ptr' then
@@ -3948,9 +4107,9 @@ function member_slice(x, key)
         return len
     end
     if key == 'sub' then
-        return function(self, a, b_) return slice_sub(self, a, b_) end
+        return function(self, a, b_) return h.slice_sub(self, a, b_) end
     end
-    if type(key) == 'number' or is_staged(key) then return slice_get(x, key) end
+    if type(key) == 'number' or is_staged(key) then return h.slice_get(x, key) end
     fail(("%s: a slice offers s[i], s.length and s:sub(a, b), not '%s'"):format(
         struct_of(x).display, tostring(key)), 3)
 end
@@ -4023,7 +4182,7 @@ function S.array_member(x, key, want_place)
         end
         if want_place then fail('cannot assign to an element of an array value; store it in a typed local first', 3) end
         local xv = value_of(x, t, 'array')
-        return dyn(t.elem, { op = 'rt', text = '$1.e[$2]', args = { ex(xv), ex(iv) }, T = t.elem, pure = true })
+        return dyn(t.elem, { op = 'array_index', a = ex(xv), idx = ex(iv), T = t.elem })
     end
     fail(("%s offers a[i], a.length and a:slice(), not '%s'"):format(t.display, tostring(key)), 3)
 end
@@ -4063,11 +4222,10 @@ function S.Array(elem, n)
     if not rawget(t, 'construct') then
         -- Array(T, n)() is zeroed; Array(T, n) { a, b, ... } lists every element
         rawset(t, 'construct', function(x)
-            local ct = require('slc.cgen').ctype(t)
             if x == nil or (type(x) == 'table' and not is_staged(x) and next(x) == nil) then
                 local value = zero_value(t)
                 if is_known(value) then return value end
-                return dyn(t, { op = 'rt', text = '(' .. ct .. '){ { 0 } }', T = t, pure = true })
+                return dyn(t, { op = 'zero', T = t })
             end
             if type(x) ~= 'table' or is_staged(x) then
                 fail(('%s { ... } lists its elements, or %s() is zeroed'):format(t.display, t.display), 3)
@@ -4075,17 +4233,15 @@ function S.Array(elem, n)
             if #x ~= t.length then
                 fail(('%s { ... } lists %d elements, got %d'):format(t.display, t.length, #x), 3)
             end
-            local args, slots, items, all_known = {}, {}, {}, true
+            local fields, items, all_known = {}, {}, true
             for i = 1, t.length do
                 local value = coerce(x[i], t.elem, ('element %d of %s'):format(i, t.display))
                 items[i - 1] = value
                 all_known = all_known and is_known(value)
-                args[i] = ex(value)
-                slots[i] = '$' .. i
+                fields[i - 1] = ex(value)
             end
             if all_known then return array_value(t, Arrays.new(t, zero_value(t.elem), items)) end
-            return dyn(t, { op = 'rt', text = '(' .. ct .. '){ { ' .. table.concat(slots, ', ') .. ' } }', args = args,
-                            T = t, pure = true })
+            return dyn(t, { op = 'array', fields = fields, T = t })
         end)
     end
     return t
@@ -4097,9 +4253,11 @@ end
 -- to the C type its conversion expects: the format always matches the values.
 
 local FORMATS = {
-    U8 = { '%u', 'unsigned' }, U16 = { '%u', 'unsigned' }, U32 = { '%u', 'unsigned' },
-    U64 = { '%llu', 'unsigned long long' },
-    I8 = { '%d', 'int' }, I16 = { '%d', 'int' }, I32 = { '%d', 'int' }, I64 = { '%lld', 'long long' },
+    -- the conversion, and the ABI type its argument is promoted to: a varargs
+    -- call carries the promoted value, and the format matches that type
+    U8 = { '%u', 'uint' }, U16 = { '%u', 'uint' }, U32 = { '%u', 'uint' },
+    U64 = { '%llu', 'ullong' },
+    I8 = { '%d', 'int' }, I16 = { '%d', 'int' }, I32 = { '%d', 'int' }, I64 = { '%lld', 'llong' },
     F32 = { '%g', 'double' }, F64 = { '%g', 'double' }, Bool = { '%d', 'int' },
 }
 
@@ -4125,8 +4283,7 @@ function S.cformat(...)
         elseif is_value(x) and FORMATS[x.T.name] then
             local f = FORMATS[x.T.name]
             fmt[#fmt + 1] = f[1]
-            args[#args + 1] = dyn(x.T, { op = 'rt', text = '(' .. f[2] .. ')$1', args = { ex(x) }, T = x.T,
-                                         pure = true, prec = 14 })
+            args[#args + 1] = dyn(x.T, { op = 'vaconv', abi = f[2], a = ex(x), T = x.T })
         else
             fail(('cformat: cannot format %s'):format(describe(x)), 2)
         end
@@ -4146,13 +4303,19 @@ end
 -- each optionally mapped to a C member path: { "fd", I32, "data.fd" }
 function S.cstruct(cname, header, fields)
     needs_header(cname, header)
-    local list, paths = {}, {}
-    for i, f in ipairs(fields) do
-        list[i] = { f[1], f[2] }
-        if f[3] then paths[f[1]] = f[3] end
+    local paths = {}
+    local function describe_fields(self)
+        local source = type(fields) == 'function' and fields(self) or fields
+        if type(source) ~= 'table' then fail('cstruct: fields must be a table or a function returning a table', 2) end
+        local list = {}
+        for i, f in ipairs(source) do
+            list[i] = { f[1], f[2] }
+            if f[3] then paths[f[1]] = f[3] end
+        end
+        return list
     end
     local display = cname:gsub('^struct ', '')
-    local ok, t = pcall(types.struct, display, list)
+    local ok, t = pcall(types.struct, display, describe_fields)
     if not ok then fail((tostring(t):gsub('^[^:]+:%d+: ', '')), 2) end
     rawset(t, 'cname', cname)
     rawset(t, 'foreign', header)
@@ -4165,7 +4328,7 @@ end
 function S.cconst(name, t, header)
     needs_header(name, header)
     if not is_type(t) then fail('cconst: ' .. name .. ' needs a type', 2) end
-    return dyn(t, { op = 'rt', text = name, T = t, pure = true, prec = 16, cconst = name })
+    return dyn(t, { op = 'cconst', T = t, cconst = name })
 end
 
 -- a C variable or macro read where it is called: cread("errno", I32, "<errno.h>")()
@@ -4181,16 +4344,13 @@ function S.bytes(x)
     local p = S.Ptr(x)
     local u8 = types.ptr(types.U8)
     if p.T == u8 then return p end
-    return dyn(u8, { op = 'rt', text = '(uint8_t *)$1', args = { p.e }, T = u8, pure = true, prec = 14,
-                     slot_prec = 14 })
+    return dyn(u8, { op = 'conv', a = p.e, T = u8 })
 end
 
 -- the C size of a type
 function S.size_of(t)
     if not is_type(t) then fail('size_of(T) takes a type', 2) end
-    local ct = require('slc.cgen').ctype(t)
-    return dyn(types.U64, { op = 'rt', text = '(uint64_t)sizeof(' .. ct .. ')', T = types.U64, pure = true,
-                            prec = 14, sizeof = t })
+    return dyn(types.U64, { op = 'sizeof', sizeof = t, T = types.U64, pure = true })
 end
 
 -- a scoped read-only view of n elements at p, for library activities
@@ -4231,9 +4391,12 @@ end
 local CAS_FAIL = { relaxed = 'relaxed', consume = 'acquire', acquire = 'acquire', release = 'relaxed',
                    acq_rel = 'acquire', seq_cst = 'seq_cst' }
 
-local function atomic_effect(t, text, args, what, place)
+-- An atomic operation is one IR op: the memory order is part of it, so no
+-- backend reads a C template for it.
+local function atomic_effect(t, o, ptr, args, what, place)
+    local e = { op = 'atomic', o = o, ptr = ptr, args = args.values or {}, T = t, place = place,
+                order = args.order, fail_order = args.fail_order, expected_place = args.expected }
     local b = cur()
-    local e = { op = 'rt', text = text, args = args, T = t, place = place }
     if t.kind == 'unit' then
         b:emit { op = 'expr', e = e, what = what }
         return nil
@@ -4251,16 +4414,18 @@ function S.atomic_method(x, key)
     local function operand(v, what) return ex(coerce(v, et, what)) end
     local methods = {
         load = function(self, order)
-            return atomic_effect(et, '__atomic_load_n($1, ' .. order_of(order, LOAD_ORDERS, 'load') .. ')',
-                { addr() }, 'an atomic load')
+            return atomic_effect(et, 'load', addr(), { values = {}, order = order_of(order, LOAD_ORDERS, 'load') },
+                'an atomic load')
         end,
         store = function(self, v, order)
-            atomic_effect(types.Unit, '__atomic_store_n($1, $2, ' .. order_of(order, STORE_ORDERS, 'store') .. ')',
-                { addr(), operand(v, 'value stored') }, 'an atomic store')
+            atomic_effect(types.Unit, 'store', addr(),
+                { values = { operand(v, 'value stored') }, order = order_of(order, STORE_ORDERS, 'store') },
+                'an atomic store')
         end,
         exchange = function(self, v, order)
-            return atomic_effect(et, '__atomic_exchange_n($1, $2, ' .. order_of(order, nil, 'exchange') .. ')',
-                { addr(), operand(v, 'value exchanged') }, 'an atomic exchange')
+            return atomic_effect(et, 'exchange', addr(),
+                { values = { operand(v, 'value exchanged') }, order = order_of(order, nil, 'exchange') },
+                'an atomic exchange')
         end,
         -- compare-and-swap: true when the value was `expected` and is now `desired`
         cas = function(self, expected, desired, order)
@@ -4270,19 +4435,20 @@ function S.atomic_method(x, key)
             local b = cur()
             local slot = b:new_temp(et, 'expected')
             b:emit { op = 'let', place = slot, e = operand(expected, 'expected value') }
-            return atomic_effect(types.Bool, '__atomic_compare_exchange_n($1, &$P, $2, false, ' .. succ .. ', '
-                .. fail_o .. ')', { addr(), operand(desired, 'desired value') }, 'an atomic compare-exchange', slot)
+            return atomic_effect(types.Bool, 'cas', addr(),
+                { values = { operand(desired, 'desired value') }, expected = slot, order = succ,
+                  fail_order = fail_o }, 'an atomic compare-exchange', slot)
         end,
     }
     if et.kind == 'int' then
         -- read-modify-write: the result is the value before
         methods.add = function(self, v, order)
-            return atomic_effect(et, '__atomic_fetch_add($1, $2, ' .. order_of(order, nil, 'add') .. ')',
-                { addr(), operand(v, 'addend') }, 'an atomic add')
+            return atomic_effect(et, 'fetch_add', addr(),
+                { values = { operand(v, 'addend') }, order = order_of(order, nil, 'add') }, 'an atomic add')
         end
         methods.sub = function(self, v, order)
-            return atomic_effect(et, '__atomic_fetch_sub($1, $2, ' .. order_of(order, nil, 'sub') .. ')',
-                { addr(), operand(v, 'subtrahend') }, 'an atomic sub')
+            return atomic_effect(et, 'fetch_sub', addr(),
+                { operand(v, 'subtrahend'), order = order_of(order, nil, 'sub') }, 'an atomic sub')
         end
     end
     local m = methods[key]
@@ -4297,7 +4463,21 @@ end
 -- a memory fence
 function S.fence(order)
     local o = order_of(order, nil, 'fence')
-    cur():emit { op = 'rt', text = '__atomic_thread_fence(' .. o .. ');', what = 'a fence' }
+    cur():emit { op = 'fence', order = o, what = 'a fence' }
+end
+
+-- trap(message): stop the program. The message is a known CString, and the
+-- statement has no memory effect, so a check around it cannot invalidate the
+-- values the checked code goes on to use.
+function S.trap(msg)
+    local mv = is_place(msg) and cur():read(msg) or msg
+    local ev = ex(coerce(mv, types.CString, 'trap'))
+    if not (ev.op == 'const' and ev.T.kind == 'cstr') then
+        fail('trap(message): message must be text known while compiling', 2)
+    end
+    local b = cur()
+    b.fn.uses_rt = true
+    b:emit { op = 'trap', msg = ev, what = 'a trap' }
 end
 
 -- Ptr T viewed as Ptr (Atomic T): the same address, accessed atomically from here
@@ -4355,13 +4535,17 @@ local function hinted(b, t, hint)
     return p
 end
 
-local function rt_value(t, text, args, what, place, hint)
+-- A runtime call: the header's declaration and its arguments. `args` may hold
+-- the `task` node and `sizeof` expressions; no backend parses call text.
+local function rt_value(t, cname, args, what, place, hint)
     local b = cur()
     if b.fn then
         b.fn.uses_rt = true
-        if text:find('$T', 1, true) then b.fn.needs_self = true end
+        for _, a in ipairs(args) do
+            if type(a) == 'table' and a.op == 'task' then b.fn.needs_self = true end
+        end
     end
-    local e = { op = 'rt', text = text, args = args, T = t, place = place }
+    local e = { op = 'rtcall', cname = cname, args = args, T = t, place = place }
     if t.kind == 'unit' then
         b:emit { op = 'expr', e = e, what = what }
         return nil
@@ -4371,9 +4555,52 @@ local function rt_value(t, text, args, what, place, hint)
     return dyn(t, read_expr(tmp))
 end
 
--- a wait: `fmt` names the runtime call, with $T the waiting party, $O its
--- operation records, $S the site; the result is the runtime's I32
-local function wait_op(fmt, args, nops, what)
+-- The command line a program's main sees (§3.7): count and NUL-terminated
+-- argument strings. `args.length` counts them; `args[i]` is a Str view of one.
+local args_type
+function S.args_type()
+    -- the header is requested for every compilation, not just the first: the
+    -- probe is built per module and must see the record
+    needs_header('slc_args', '"slc_rt.h"')
+    if args_type then return args_type end
+    local t = S.cstruct('slc_args', '"slc_rt.h"',
+        { { 'count', types.U32 }, { 'argv', types.ptr(types.CString) } })
+    local strlen = S.extern('strlen', { types.CString }, types.U32, { header = '<string.h>' })
+    t.properties = t.properties or {}
+    t.properties.length = function(x) return S.dot(x, 'count') end
+    t.index_place = function(x, key)
+        local i = index_value(key)
+        if i.T ~= types.U32 then i = types.U32(i) end
+        local argv = S.dot(x, 'argv')
+        local element = new_place { pk = 'index', T = types.CString, base = ex(argv), idx = ex(i),
+                                     name = 'element', id = uid() }
+        local cstr = cur():read(element)
+        local len = strlen(cstr)
+        local ptr = dyn(types.ptr(types.U8), { op = 'conv', a = ex(cstr), T = types.ptr(types.U8) })
+        return S.make_slice(types.Str, ptr, len)
+    end
+    args_type = t
+    return t
+end
+
+-- A runtime wait names a C function and its arguments. The waiting party and
+-- its operation records are IR nodes (`task`, `ops`); the callee is the runtime
+-- header's own declaration, so no backend parses a call template.
+local TASK, OPS = { op = 'task' }, { op = 'ops' }
+local function rt_call(name) return { cname = name } end
+local RT = {
+    Recv = rt_call('slc_recv'), Send = rt_call('slc_send'), Sleep = rt_call('slc_sleep'),
+    Take = rt_call('slc_take'), ScopeEnd = rt_call('slc_scope_end'),
+    Read = rt_call('slc_io_read'), Write = rt_call('slc_io_write'),
+    Open = rt_call('slc_io_open'), Close = rt_call('slc_io_close'),
+    Accept = rt_call('slc_io_accept'), Connect = rt_call('slc_io_connect'), FirstOf = rt_call('slc_first_of'),
+    Blocking = rt_call('slc_blocking'),
+}
+
+-- a wait: the callee, its arguments (task and ops included), and how many
+-- operation records it uses; the result is the runtime's I32. `extra` adds
+-- statement fields, such as a blocking block's body.
+local function wait_op(callee, args, nops, what, extra)
     local b = cur()
     if not b.fn then fail(('cannot evaluate at compile time: it performs %s'):format(what), 3) end
     if b.in_blocking then
@@ -4382,9 +4609,10 @@ local function wait_op(fmt, args, nops, what)
     b.fn.uses_rt = true
     b.fn.waits = math.max(b.fn.waits or 0, nops)
     args[#args + 1] = { op = 'const', T = types.CString, v = S.site(what) }
-    fmt = fmt:gsub('%$S', '$' .. #args)
     local res = hinted(b, types.I32, 'r')
-    b:emit { op = 'wait', fmt = fmt, args = args, nops = nops, result = res, what = what }
+    local stmt = { op = 'wait', callee = callee, args = args, nops = nops, result = res, what = what }
+    for k, v in pairs(extra or {}) do stmt[k] = v end
+    b:emit(stmt)
     return dyn(types.I32, read_expr(res))
 end
 
@@ -4414,7 +4642,7 @@ local function call_handler(h, what, ...)
     return h(...)
 end
 
-local function check_handlers(R, handlers)
+h.check_handlers = function(R, handlers)
     if type(handlers) ~= 'table' or getmetatable(handlers) then
         fail('a receive is matched with handlers: ch:recv() { value = do(v) ... end, closed = do ... end }', 4)
     end
@@ -4432,7 +4660,7 @@ end
 local function receive(ch)
     local b = cur()
     local buf = hinted(b, ch.T.elem, 'got')
-    local r = wait_op('slc_recv($T, $O, $1, $2, $S)', { ex(ch), addr_of(buf) }, 1, 'recv')
+    local r = wait_op(RT.Recv, { TASK, OPS, ex(ch), addr_of(buf) }, 1, 'recv')
     return buf, S.eq(r, known(types.I32, 1))
 end
 
@@ -4462,7 +4690,7 @@ local function slot_moves(place, fn_name)
     local paths = slot_paths(place.T)
     if #paths == 0 then return end
     for _, path in ipairs(paths) do
-        rt_value(types.Unit, fn_name .. '($T, $1)', { path_expr(place, path) }, 'moving a slot')
+        rt_value(types.Unit, fn_name, { TASK, path_expr(place, path) }, 'moving a slot')
     end
     cur():bump_checked()
 end
@@ -4513,42 +4741,30 @@ function S.chan_method(x, key)
     -- send a copy; waits while the channel is full (unbuffered: until taken)
     methods.send = function(self, v)
         local msg = send_value(ch, v)
-        wait_op('slc_send($T, $O, $1, $2, $S)', { ex(ch), addr_of(msg) }, 1, 'send')
+        wait_op(RT.Send, { TASK, OPS, ex(ch), addr_of(msg) }, 1, 'send')
     end
     -- receive: a Received T, or matched straight away with its handlers
     methods.recv = function(self, handlers)
         local b = cur()
         local R = received_type(et)
-        if handlers ~= nil then check_handlers(R, handlers) end
+        if handlers ~= nil then h.check_handlers(R, handlers) end
         local buf, ok = receive(ch)
-        local desc = { kind = 'word', name = 'recv', infer = true, body = function()
-            S.if_(ok, function()
-                slot_moves(buf, 'slc_slot_adopt')
-                local v = dyn(et, read_expr(buf))
-                if handlers then S.ret(call_handler(handlers.value, "the handler for 'value'", v))
-                else S.ret(sumv(R, 'value', v)) end
-            end, function()
-                if handlers then S.ret(call_handler(handlers.closed, "the handler for 'closed'"))
-                else S.ret(sumv(R, 'closed')) end
-            end)
-        end }
-        return b:run_frame(desc, {}, {})
+        local function read_owned()
+            slot_moves(buf, 'slc_slot_adopt')
+            return dyn(et, read_expr(buf))
+        end
+        local result = require('slc.completion').receive(R, read_owned)(ok)
+        if handlers then return match(result, handlers) end
+        return result
     end
     S.arity[methods.recv] = 2
     methods.close = function(self)
-        rt_value(types.Unit, 'slc_chan_close($1)', { ex(ch) }, 'closing a channel')
+        rt_value(types.Unit, 'slc_chan_close', { ex(ch) }, 'closing a channel')
     end
-    -- for v := range ch
+    -- Iteration is library control flow, not a compiler-built loop. recv owns
+    -- the primitive wait and slot-adoption rules on both backends.
     methods.each = function(self, body)
-        local b = cur()
-        S.loop({}, {}, function()
-            local buf, ok = receive(ch)
-            S.if_(ok, function()
-                slot_moves(buf, 'slc_slot_adopt')
-                call_handler(body, 'the body of each', dyn(et, read_expr(buf)))
-                if not b.dead then S.loop_next() end
-            end, function() S.loop_exit() end)
-        end, { on_continue = function() S.loop_next() end })
+        return require('slc.channel').each(et, body)(ch)
     end
     local m = methods[key]
     if not m then
@@ -4559,19 +4775,14 @@ end
 
 -- durations ---------------------------------------------------------------------------------------
 
-local function duration(x, scale, what)
-    local d = coerce(types.Duration(x), types.Duration, what)
-    if scale == 1 then return d end
-    return S.binary('mul', d, known(types.Duration, fold.from_host(types.Duration, scale)))
-end
-S.ns = function(x) return duration(x, 1, 'ns(...)') end
-S.us = function(x) return duration(x, 1000, 'us(...)') end
-S.ms = function(x) return duration(x, 1000000, 'ms(...)') end
-S.seconds = function(x) return duration(x, 1000000000, 'seconds(...)') end
+S.ns = function(x) return require('slc.duration').ns(types.Duration(x)) end
+S.us = function(x) return require('slc.duration').us(types.Duration(x)) end
+S.ms = function(x) return require('slc.duration').ms(types.Duration(x)) end
+S.seconds = function(x) return require('slc.duration').seconds(types.Duration(x)) end
 
 function S.sleep(d)
     d = coerce(d, types.Duration, 'sleep(d)')
-    wait_op('slc_sleep($T, $O, $1, $S)', { ex(d) }, 1, 'sleep')
+    wait_op(RT.Sleep, { TASK, OPS, ex(d) }, 1, 'sleep')
 end
 
 -- first_of ----------------------------------------------------------------------------------------
@@ -4634,27 +4845,36 @@ function S.first_of(cases)
     if nrecv == 0 and cases.closed ~= nil then
         fail('first_of: `closed` runs when every received channel is closed, but no case receives', 2)
     end
-    local args, items, bufs = {}, {}, {}
-    local function arg(e) args[#args + 1] = e; return '$' .. #args end
+    local items, bufs = {}, {}
+    local ChanT = S.cstruct('slc_chan', '"slc_rt.h"', { { 'idx', types.U32 }, { 'gen', types.U32 } })
+    local CaseT = S.cstruct('slc_case', '"slc_rt.h"', { { 'kind', types.I32 }, { 'chan', ChanT },
+        { 'buf', types.ptr(types.Unit) }, { 'ns', types.U64 } })
+    local function field(v, name, T) return { op = 'field', a = v, name = name, T = T } end
+    local function case_item(kind, chan, buf, ns)
+        items[#items + 1] = { kind = { op = 'cconst', cconst = kind, T = types.I32 }, chan = chan, buf = buf, ns = ns }
+    end
     for i, c in ipairs(list) do
         if c.kind == 'recv' then
             bufs[i] = hinted(b, c.ch.T.elem, 'got')
-            items[i] = ('{ SLC_CASE_RECV, %s, %s, 0 }'):format(arg(ex(c.ch)), arg(addr_of(bufs[i])))
+            case_item('SLC_CASE_RECV', ex(c.ch), addr_of(bufs[i]))
         elseif c.kind == 'send' then
             local msg = send_value(c.ch, c.v, true)
             c.msg = msg
-            items[i] = ('{ SLC_CASE_SEND, %s, %s, 0 }'):format(arg(ex(c.ch)), arg(addr_of(msg)))
+            case_item('SLC_CASE_SEND', ex(c.ch), addr_of(msg))
         elseif c.kind == 'take' then
             bufs[i] = hinted(b, types.slot(c.pool.T.elem), 'slot')
-            local pa = arg(ex(c.pool))
-            items[i] = ('{ SLC_CASE_TAKE, (slc_chan){ %s.idx, %s.gen }, %s, 0 }'):format(pa, pa, arg(addr_of(bufs[i])))
+            -- a pool and a channel name the same pair: { idx, gen }
+            local pool = ex(c.pool)
+            local chan = { op = 'agg', T = ChanT, fields = {
+                idx = field(pool, 'idx', types.U32), gen = field(pool, 'gen', types.U32) } }
+            case_item('SLC_CASE_TAKE', chan, addr_of(bufs[i]))
         else
-            items[i] = ('{ SLC_CASE_AFTER, { 0, 0 }, NULL, %s }'):format(arg(ex(c.d)))
+            case_item('SLC_CASE_AFTER', nil, nil, ex(c.d))
         end
     end
-    local fmt = ('slc_first_of($T, $O, (slc_case[]){ %s }, %d, %s, $S)'):format(
-        table.concat(items, ', '), #list, cases.default ~= nil and 'true' or 'false')
-    local k = wait_op(fmt, args, #list, 'first_of')
+    local case_list = { op = 'case_array', items = items, T = types.ptr(CaseT) }
+    local k = wait_op(RT.FirstOf, { TASK, OPS, case_list, ex(known(types.I32, #list)),
+        ex(known(types.Bool, cases.default ~= nil)) }, #list, 'first_of')
     local arms = {}
     -- a send case that loses keeps its slots: they come back in every other arm
     local function take_back(except)
@@ -4714,12 +4934,12 @@ function S.pool_method(x, key)
     methods.take = function(self)
         local b = cur()
         local buf = hinted(b, st, 'slot')
-        wait_op('slc_take($T, $O, $1, $2, $S)', { ex(p), addr_of(buf) }, 1, 'take')
+        wait_op(RT.Take, { TASK, OPS, ex(p), addr_of(buf) }, 1, 'take')
         return dyn(st, read_expr(buf))
     end
     methods.release = function(self, s)
         local sv = slot_value(p, s, 'pool:release(slot)')
-        rt_value(types.Unit, 'slc_slot_release($T, $1)', { ex(sv) }, 'releasing a slot')
+        rt_value(types.Unit, 'slc_slot_release', { TASK, ex(sv) }, 'releasing a slot')
         cur():bump_checked()
         mark_gone(sv, 'released at ' .. S.site('release'))
     end
@@ -4736,9 +4956,7 @@ function S.pool_index(x, s)
     local sv = slot_value(p, s, 'pool[slot]')
     local b = cur()
     if b.fn then b.fn.uses_rt, b.fn.needs_self = true, true end
-    local ct = require('slc.cgen').ctype(et)
-    local ptr = { op = 'rt', text = '(' .. ct .. ' *)slc_slot_at($T, $1)', args = { ex(sv) }, T = types.ptr(et),
-                  prec = 14 }
+    local ptr = { op = 'slot_at', slot = ex(sv), T = types.ptr(et) }
     return S.checked_place(et, ptr, 'slot')
 end
 
@@ -4920,12 +5138,10 @@ function S.blocking(body)
     b.block, b.in_blocking = outer, nil
     b:bump_checked()
     if not ok then error(r, 0) end
-    b.fn.uses_rt = true
-    b.fn.waits = math.max(b.fn.waits or 0, 1)
-    local site = { op = 'const', T = types.CString, v = S.site('blocking') }
-    local res = hinted(b, types.I32, 'r')
-    b:emit { op = 'wait', fmt = 'slc_blocking($T, $O, $F, f, $1)', args = { site }, nops = 1, result = res,
-             body = block, what = 'a blocking block' }
+    -- the callee's blocked function and its frame are IR nodes: the backends
+    -- name the function they emit and pass the frame as its argument
+    wait_op(RT.Blocking, { TASK, OPS, { op = 'block_fn' }, { op = 'block_env' } }, 1,
+        'a blocking block', { body = block })
     return r
 end
 
@@ -4955,7 +5171,7 @@ local function spawn_block(scope, block, name, names)
     local args = { ex(scope.group) }
     for _, v in ipairs(cap.values) do args[#args + 1] = ex(v) end
     b.fn.uses_rt = true
-    b:emit { op = 'rt', text = '', args = args, task = fn, what = 'starting a task' }
+    b:emit { op = 'spawn', args = args, task = fn, what = 'starting a task' }
 end
 
 local function spawn(scope, f, ...)
@@ -5018,7 +5234,7 @@ function S.tasks(body)
     if type(body) ~= 'function' and not (mt and mt.__call) then
         fail('tasks takes a body: tasks do(scope...) ... end', 2)
     end
-    local group = rt_value(types.Group, 'slc_scope_new($T)', {}, 'opening a tasks scope', nil, 'scope')
+    local group = rt_value(types.Group, 'slc_scope_new', { TASK }, 'opening a tasks scope', nil, 'scope')
     local scope = { group = group }
     local vocab = {}
     vocab.spawn = function(f, ...)
@@ -5032,8 +5248,7 @@ function S.tasks(body)
         local ok, ct = pcall(types.chan, t)
         if not ok then fail((tostring(ct):gsub('^[^:]+:%d+: ', '')), 2) end
         local cap = coerce(n == nil and 0 or n, types.U32, 'channel capacity')
-        local ctn = require('slc.cgen').ctype(t)
-        return rt_value(ct, 'slc_chan_new($1, sizeof(' .. ctn .. '), $2)', { ex(group), ex(cap) }, 'making a channel',
+        return rt_value(ct, 'slc_chan_new', { ex(group), ex(S.size_of(t)), ex(cap) }, 'making a channel',
             nil, 'ch')
     end
     vocab.pool = function(t, n, ...)
@@ -5043,14 +5258,13 @@ function S.tasks(body)
         local ok, pt = pcall(types.pool, t)
         if not ok then fail((tostring(pt):gsub('^[^:]+:%d+: ', '')), 2) end
         local cap = coerce(n, types.U32, 'pool size')
-        local ctn = require('slc.cgen').ctype(t)
-        return rt_value(pt, 'slc_pool_new($1, sizeof(' .. ctn .. '), $2)', { ex(group), ex(cap) }, 'making a pool',
+        return rt_value(pt, 'slc_pool_new', { ex(group), ex(S.size_of(t)), ex(cap) }, 'making a pool',
             nil, 'pool')
     end
     local ok, r = pcall(body, vocab)
     scope.ended = true
     if not ok then error(r, 0) end
-    wait_op('slc_scope_end($T, $O, $1, $S)', { ex(group) }, 1, 'the end of a tasks scope')
+    wait_op(RT.ScopeEnd, { TASK, OPS, ex(group) }, 1, 'the end of a tasks scope')
     if is_value(r) and holds_chan(r.T) then
         fail('a channel cannot leave its tasks scope: it retires when the scope ends', 2)
     end
@@ -5115,12 +5329,13 @@ local function io_args(name, ...)
 end
 
 -- wait for an operation, then its result as a sum (or straight into handlers)
-local function io_wait(name, fmt, args, sum, done_of, handlers)
+local function io_wait(name, callee, args, sum, done_of, handlers)
     local b = cur()
     local val = hinted(b, types.I64, 'io')
-    args[#args + 1] = addr_of(val)
-    fmt = fmt:gsub('%$V', '$' .. #args)
-    local st = wait_op(fmt, args, 1, name)
+    local all = { TASK, OPS }
+    for i, a in ipairs(args) do all[#all + 1] = a end
+    all[#all + 1] = addr_of(val)
+    local st = wait_op(callee, all, 1, name)
     if handlers then
         for k in pairs(handlers) do
             if not sum.index[k] then fail(("%s has no alternative '%s' to handle"):format(sum.display, tostring(k)), 4) end
@@ -5132,27 +5347,9 @@ local function io_wait(name, fmt, args, sum, done_of, handlers)
         end
     end
     local v = dyn(types.I64, read_expr(val))
-    local desc = { kind = 'word', name = name, infer = true, body = function()
-        local function give(alt, payload)
-            if handlers then
-                local h = handlers[alt]
-                if sum.index[alt].type.kind == 'unit' then return S.ret(call_handler(h, "the handler for '" .. alt .. "'")) end
-                return S.ret(call_handler(h, "the handler for '" .. alt .. "'", payload))
-            end
-            return S.ret(sumv(sum, alt, payload))
-        end
-        S.if_(S.eq(st, known(types.I32, 0)), function()
-            give('done', done_of and done_of(v) or nil)
-        end, function()
-            if sum.index.timed_out then
-                S.if_(S.eq(st, known(types.I32, 2)), function() give('timed_out') end,
-                    function() give('failed', types.I32(v)) end)
-            else
-                give('failed', types.I32(v))
-            end
-        end)
-    end }
-    return b:run_frame(desc, {}, {})
+    local result = require('slc.completion').io(sum, done_of)(st, v)
+    if handlers then return match(result, handlers) end
+    return result
 end
 
 local function file_of(f, what)
@@ -5188,9 +5385,7 @@ local function count_arg(n, cap, what)
             fail(('%s: %s bytes do not fit a buffer of %d'):format(what, fold.show(types.U32, nv.v), cap), 4)
         end
     else
-        local b = cur()
-        b:emit { op = 'rt', text = 'SLC_RANGE(0u, $1, ' .. cap .. 'u);', args = { ex(nv) }, what = 'a count check' }
-        b.fn.uses_rt = true
+        checks().high(types.U64(nv), types.U64(known(types.U32, cap)))
     end
     return nv
 end
@@ -5216,7 +5411,7 @@ function S.io_vocabulary()
         local n = count_arg(pos[3], cap, 'io.read')
         local at, dl = io_opts(opts, 'read')
         local sum = dl and T.count_t or T.count
-        return io_wait('read', 'slc_io_read($T, $O, $1, $2, $3, $4, $5, $V, $S)',
+        return io_wait('read', RT.Read,
             { ex(f.fd), ptr, ex(n), ex(at), ex(dl or known(types.Duration, 0)) }, sum,
             function(v) return types.U32(v) end, handlers)
     end
@@ -5240,7 +5435,7 @@ function S.io_vocabulary()
         end
         local at, dl = io_opts(opts, 'write')
         local sum = dl and T.count_t or T.count
-        return io_wait('write', 'slc_io_write($T, $O, $1, $2, $3, $4, $5, $V, $S)',
+        return io_wait('write', RT.Write,
             { ex(f.fd), ptr, ex(n), ex(at), ex(dl or known(types.Duration, 0)) }, sum,
             function(v) return types.U32(v) end, handlers)
     end
@@ -5254,7 +5449,7 @@ function S.io_vocabulary()
         path = coerce(path, types.CString, 'io.open path')
         local flags = coerce(pos[2] or 0, types.I32, 'io.open flags')
         local mode = coerce(pos[3] or 420, types.U32, 'io.open mode')
-        return io_wait('open', 'slc_io_open($T, $O, $1, $2, $3, $V, $S)', { ex(path), ex(flags), ex(mode) },
+        return io_wait('open', RT.Open, { ex(path), ex(flags), ex(mode) },
             T.file, file_value, handlers)
     end
     S.arity[io.open] = 4
@@ -5262,7 +5457,7 @@ function S.io_vocabulary()
     io.close = function(...)
         local pos, _, handlers = io_args('close', ...)
         local f = file_of(pos[1], 'io.close')
-        return io_wait('close', 'slc_io_close($T, $O, $1, $V, $S)', { ex(f.fd) }, T.unit, nil, handlers)
+        return io_wait('close', RT.Close, { ex(f.fd) }, T.unit, nil, handlers)
     end
     S.arity[io.close] = 2
 
@@ -5271,7 +5466,7 @@ function S.io_vocabulary()
         local pos, opts, handlers = io_args('accept', ...)
         local l = file_of(pos[1], 'io.accept')
         local _, dl = io_opts(opts, 'accept')
-        return io_wait('accept', 'slc_io_accept($T, $O, $1, $2, $V, $S)',
+        return io_wait('accept', RT.Accept,
             { ex(l.fd), ex(dl or known(types.Duration, 0)) }, dl and T.file_t or T.file, file_value, handlers)
     end
     S.arity[io.accept] = 3
@@ -5282,36 +5477,27 @@ function S.io_vocabulary()
         local host = coerce(pos[1], types.U32, 'io.connect host')
         local port = coerce(pos[2], types.U32, 'io.connect port')
         local _, dl = io_opts(opts, 'connect')
-        return io_wait('connect', 'slc_io_connect($T, $O, $1, $2, $3, $V, $S)',
+        return io_wait('connect', RT.Connect,
             { ex(host), ex(port), ex(dl or known(types.Duration, 0)) }, dl and T.file_t or T.file, file_value, handlers)
     end
     S.arity[io.connect] = 4
 
     -- setup that never waits: a pipe, a listening socket
-    local function immediate(name, text, args, sum, done_of, handlers)
+    local function immediate(name, callee, args, sum, done_of, handlers)
         local b = cur()
         local val = hinted(b, types.I64, 'io')
         args[#args + 1] = addr_of(val)
-        text = text:gsub('%$V', '$' .. #args)
-        local st = rt_value(types.I32, text, args, 'io.' .. name, nil, 'st')
+        local st = rt_value(types.I32, callee, args, 'io.' .. name, nil, 'st')
         local v = dyn(types.I64, read_expr(val))
-        local desc = { kind = 'word', name = name, infer = true, body = function()
-            S.if_(S.eq(st, known(types.I32, 0)), function()
-                local p = done_of(v)
-                if handlers then S.ret(call_handler(handlers.done, "the handler for 'done'", p))
-                else S.ret(sumv(sum, 'done', p)) end
-            end, function()
-                if handlers then S.ret(call_handler(handlers.failed, "the handler for 'failed'", types.I32(v)))
-                else S.ret(sumv(sum, 'failed', types.I32(v))) end
-            end)
-        end }
-        return b:run_frame(desc, {}, {})
+        local result = require('slc.completion').io(sum, done_of)(st, v)
+        if handlers then return match(result, handlers) end
+        return result
     end
 
     io.pipe = function(handlers)
         local b = cur()
         local r, w = hinted(b, types.I32, 'reader'), hinted(b, types.I32, 'writer')
-        return immediate('pipe', 'slc_io_pipe($1, $2, $V)', { addr_of(r), addr_of(w) }, T.pipe, function()
+        return immediate('pipe', 'slc_io_pipe', { addr_of(r), addr_of(w) }, T.pipe, function()
             return agg(T.Pipe, { reader = agg(T.File, { fd = dyn(types.I32, read_expr(r)) }),
                                  writer = agg(T.File, { fd = dyn(types.I32, read_expr(w)) }) })
         end, handlers)
@@ -5322,13 +5508,13 @@ function S.io_vocabulary()
         local pos, _, handlers = io_args('listen', ...)
         local host = coerce(pos[1], types.U32, 'io.listen host')
         local port = coerce(pos[2], types.U32, 'io.listen port')
-        return immediate('listen', 'slc_io_listen($1, $2, $V)', { ex(host), ex(port) }, T.file, file_value, handlers)
+        return immediate('listen', 'slc_io_listen', { ex(host), ex(port) }, T.file, file_value, handlers)
     end
     S.arity[io.listen] = 3
 
     io.local_port = function(f)
         f = file_of(f, 'io.local_port')
-        return rt_value(types.U32, 'slc_io_local_port($1)', { ex(f.fd) }, 'io.local_port', nil, 'port')
+        return rt_value(types.U32, 'slc_io_local_port', { ex(f.fd) }, 'io.local_port', nil, 'port')
     end
     return io
 end

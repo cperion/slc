@@ -16,6 +16,16 @@ local function check(name, ok, detail)
     if not ok then fails = fails + 1; print('FAIL  native: ' .. name .. (detail and ('\n' .. tostring(detail)) or '')) end
 end
 
+-- Omitted annotations infer native places, on the same prepared IR as C.
+local inferred = slc.load(root .. '/examples/inferred_locals.slc')
+check('inferred branch true', inferred.inferred_branch(true, 10) == 29)
+check('inferred branch false', inferred.inferred_branch(false, 10) == 27)
+check('inferred nested loops', inferred.inferred_loops(10) == 103)
+check('inferred empty loops', inferred.inferred_loops(0) == 3)
+check('inferred snapshots and references', inferred.inferred_snapshot(7) == 25)
+check('inferred array and Text constructors', inferred.inferred_storage(8) == 14)
+check('mixed explicit and inferred locals', inferred.inferred_mixed(7) == 17)
+
 -- the guide's program
 local g = slc.load(root .. '/examples/guide.slc')
 check('outline_demo', g.outline_demo(5) == 10)
@@ -47,6 +57,22 @@ local h = ch.types.Holder()
 ok, err = pcall(ch.use_after_scope, h)
 check('stale handle', not ok and tostring(err):find('slc runtime check failed', 1, true), err)
 check('still running', ch.late_reply() == 42)
+
+-- Maps share the runtime table algorithm and generated semantic key adapters.
+local maps = slc.load(root .. '/examples/maps.slc')
+check('Map insertion and checked update', maps.map_tally(1000) == 1000)
+check('Map replace, ensure and find snapshots', maps.edit_counts(0xffffffff) == 20)
+local label = maps.types.Str { ptr = ffi.cast('uint8_t *', 'cat'), len = 3 }
+check('Map Chars key equality', maps.label_count(label) == 3)
+ok, err = pcall(maps.absent, 9)
+check('Map missing key traps', not ok and tostring(err):find('map-key', 1, true), err)
+check('Map after recovered trap', maps.map_tally(23) == 23)
+check('Map each snapshots and replacement', maps.map_each_sum(10) == 56)
+check('Map nested iteration and callback returns', maps.map_each_nested(10) == 291)
+ok, err = pcall(maps.map_each_mutation, 0)
+check('Map structural mutation through alias traps', not ok and tostring(err):find('structural mutation', 1, true), err)
+check('Map iteration after recovered trap', maps.map_each_sum(10) == 56)
+check('Map iteration across task suspension', maps.map_task_each(100) == 5051)
 
 -- stores and Grow arrays: helpers read from the same C the C backend prints
 local st = slc.load(root .. '/examples/stores.slc')
@@ -94,6 +120,19 @@ check('array/text task captures are independent copies', sv.stage_task_copy(0) =
 ok, err = pcall(sv.stage_dead_write, 2)
 check('dead array stores retain bounds checks', sv.stage_dead_write(1) == 1
     and not ok and tostring(err):find('index out of range', 1, true), err)
+
+-- Load the model harness's foreign probes rather than exempting its layouts.
+local support = root .. '/build/tmp/map-model-support.so'
+local command = ('cc -shared -fPIC -DSLC_MAP_MODEL_SUPPORT_ONLY -I%q %q -o %q')
+    :format(root .. '/runtime', root .. '/tests/map_models_main.c', support)
+local status = os.execute(command)
+check('build map model foreign probes', status == 0)
+local model_support = ffi.load(support, true)
+local models = slc.load(root .. '/examples/map_models.slc')
+check('SLC map models in process', models.map_model(20000, 80, 128)
+    and models.strmap_model(20000, 80, 128))
+check('SLC map relocation aliases in process', models.map_table_alias(6) == 10
+    and models.map_arena_alias(128, 96) == 1064)
 
 -- every record of every example: the layout this backend assumes is the C layout
 for f in io.popen('ls ' .. root .. '/examples/*.slc'):lines() do
