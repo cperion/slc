@@ -1,0 +1,247 @@
+-- Fixed arrays and Chars are values before they need addresses. These host
+-- checks also exercise their known-input paths; the harnesses use dynamic inputs.
+local constant = Chars(4)("abc")
+local empty = Chars(4)()
+assert(host(constant.length) == 3 and host(empty.length) == 0)
+
+local stage_filled = do(s: Str): U32
+    local c: Chars(4) = Chars(4)(s)
+    return c.length
+end
+assert(host(stage_filled("abc")) == 3)
+export stage_filled
+
+local stage_value = do(): Chars(4) = constant
+local result = host(stage_value())
+assert(result.len == 3 and result.bytes[1] == 97 and result.bytes[4] == 0)
+export stage_value
+
+local stage_binary_value = do(): Chars(4) = Chars(4)("a\0b")
+local binary = host(stage_binary_value())
+assert(binary.len == 3 and binary.bytes[1] == 97 and binary.bytes[2] == 0 and binary.bytes[3] == 98)
+export stage_binary_value
+
+local stage_empty = do(): Bool
+    local c: Chars(4) = Chars(4)()
+    return c.length == 0 and c:str():equals("")
+end
+assert(host(stage_empty()))
+export stage_empty
+
+local stage_live = do(n: U32): U32
+    local a: Chars(4) = constant
+    local view: Str = a:str()
+    local before: Chars(4) = a
+    a = Chars(4)("xyz")
+    if view:equals("xyz") and before:str():equals("abc") then return n + 1 end
+    return 0
+end
+assert(host(stage_live(U32(5))) == 6)
+export stage_live
+
+-- A view keeps its original length, but observes the owner's new bytes.
+local stage_shorter = do(): Bool
+    local a: Chars(4) = constant
+    local view = a:str()
+    a = Chars(4)("x")
+    return view.length == 3 and view:equals("x\0\0")
+end
+assert(host(stage_shorter()))
+export stage_shorter
+
+local Holder = struct { text: Chars(4), tag: U32 }
+local stage_nested = do(): Bool
+    local h: Holder = Holder { text = constant, tag = 9 }
+    local view: Str = h.text:str()
+    local before: Holder = h
+    h.text = Chars(4)("xyz")
+    return view:equals("xyz") and before.text:str():equals("abc") and h.tag == 9
+end
+assert(host(stage_nested()))
+export stage_nested
+
+local stage_branch = do(flag: Bool): Bool
+    local a: Chars(4) = constant
+    local view = a:str()
+    if flag then a = Chars(4)("xyz") else a = Chars(4)("pqr") end
+    return view:equals("xyz")
+end
+assert(host(stage_branch(true)) and not host(stage_branch(false)))
+export stage_branch
+
+local stage_choose_view = do(flag: Bool): Bool
+    local a: Chars(4) = constant
+    local b: Chars(4) = Chars(4)("pqr")
+    local view: Str = a:str()
+    if flag then
+        a = Chars(4)("xyz")
+        view = a:str()
+    else
+        b = Chars(4)("z")
+        view = b:str()
+    end
+    return view:equals("xyz")
+end
+assert(host(stage_choose_view(true)) and not host(stage_choose_view(false)))
+export stage_choose_view
+
+local stage_changed_byte = do(byte: U8): U8
+    local c: Chars(4) = constant
+    local view = c:str()
+    c.bytes[0] = byte
+    return view[0]
+end
+assert(host(stage_changed_byte(U8(90))) == 90)
+export stage_changed_byte
+
+local stage_snapshot = do(byte: U8): U32
+    local c: Chars(4) = constant
+    c.bytes[0] = byte
+    local before = c
+    c.bytes[0] = 90
+    return U32(before.bytes[0]) + U32(c.bytes[0])
+end
+assert(host(stage_snapshot(U8(20))) == 110)
+export stage_snapshot
+
+local stage_escape = do(byte: U8): U8
+    local c: Chars(4) = constant
+    local view = c:str()
+    local p = Ptr(c.bytes)
+    p[0][0] = byte
+    return view[0]
+end
+export stage_escape
+
+local stage_parse = do(): I32
+    local c: Chars(8) = Chars(8)(" -12 ")
+    return c:str():trim():parse(I32) { value(v) = v, bad() = I32(999) }
+end
+assert(host(stage_parse()) == -12)
+export stage_parse
+
+local stage_index = do(i: U32): U8
+    local c: Chars(4) = constant
+    return c:str()[i]
+end
+assert(host(stage_index(U32(0))) == 97)
+export stage_index
+
+local stage_array_copy = do(n: U32): U32
+    local a: Array(U32, 4) = Array(U32, 4) { 10, 20, 30, 40 }
+    a[0] = 3
+    local before = a
+    a[1] = n
+    return before[0] + before[1] + a[0] + a[1]
+end
+assert(host(stage_array_copy(U32(5))) == 31)
+export stage_array_copy
+
+local stage_array_view = do(): U32
+    local a: Array(U32, 2) = Array(U32, 2) { 7, 8 }
+    local view = a:slice()
+    local before = a
+    a[0] = 9
+    return view[0] + before[0]
+end
+assert(host(stage_array_view()) == 16)
+export stage_array_view
+
+local stage_array_nested = do(): U32
+    local a: Array(Array(U32, 2), 2) = Array(Array(U32, 2), 2)()
+    a[0][1] = 5
+    return a[0][1]
+end
+assert(host(stage_array_nested()) == 5)
+export stage_array_nested
+
+local stage_array_loop = do(n: U32): U32
+    local a: Array(U32, 2)
+    local i: U32 = 0
+    while i < n do
+        a[0] = a[0] + 1
+        a[1] = a[1] + i
+        i = i + 1
+    end
+    return a[0] + a[1]
+end
+assert(host(stage_array_loop(U32(4))) == 10)
+export stage_array_loop
+
+local stage_view_loop = do(n: U32): U8
+    local c: Chars(4) = constant
+    local view = c:str()
+    local i: U32 = 0
+    while i < n do
+        c.bytes[0] = U8(65 + i % 26)
+        i = i + 1
+    end
+    return view[0]
+end
+assert(host(stage_view_loop(U32(0))) == 97)
+assert(host(stage_view_loop(U32(3))) == 67)
+export stage_view_loop
+
+local stage_captured_length = do(s: Str): Bool
+    local c: Chars(4) = Chars(4)(s)
+    local view: Str = c:str()
+    c = Chars(4)("x")
+    if view.length ~= s.length then return false end
+    if view.length == 0 then return true end
+    return view[0] == 120
+end
+assert(host(stage_captured_length("abc")))
+export stage_captured_length
+
+local stage_signed_zero = do(flag: Bool): F64
+    local a: Array(F64, 1) = Array(F64, 1)()
+    if flag then a[0] = F64(-0.0) else a[0] = F64(0.0) end
+    return a[0]
+end
+assert(1 / host(stage_signed_zero(true)) == -math.huge)
+assert(1 / host(stage_signed_zero(false)) == math.huge)
+export stage_signed_zero
+
+local stage_partial = do(s: Str, byte: U8): U32
+    local c: Chars(4) = Chars(4)(s)
+    local before = c
+    local view = c:str()
+    c.bytes[0] = byte
+    if view.length == 0 then return 0 end
+    return U32(before.bytes[0]) + U32(view[0]) + c.length
+end
+assert(host(stage_partial("abc", U8(20))) == 120)
+export stage_partial
+local stage_split = do(byte: U8): U32 = stage_partial("abc", byte)
+assert(host(stage_split(U8(20))) == 120)
+export stage_split
+
+-- Task views address the task's copied storage, not the parent's later value.
+local stage_task_copy = do(byte: U8): U32
+    local fixed: Chars(4) = constant
+    local c: Chars(4) = constant
+    c.bytes[0] = byte
+    local a: Array(U32, 2) = Array(U32, 2) { U32(byte), 2 }
+    local result: U32 = 0
+    tasks do(scope...)
+        local out = channel(U32, 1)
+        spawn do
+            out:send(U32(c:str()[0]) + a[0] + U32(fixed:str()[0]) - 97)
+            out:close()
+        end
+        c.bytes[0] = 99
+        a[0] = 100
+        out:each(do(value) result = value end)
+    end
+    return result
+end
+export stage_task_copy
+
+-- Dropping an unobserved array store must not drop its bounds check.
+local stage_dead_write = do(i: U32): U32
+    local a: Array(U32, 2)
+    a[i] = 3
+    return 1
+end
+assert(host(stage_dead_write(U32(1))) == 1)
+export stage_dead_write

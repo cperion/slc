@@ -75,6 +75,19 @@ Programs needing data stacks link `runtime/slc_rt.c`. Tasks also need
 `runtime/slc_tasks.c`, `runtime/slc_io_posix.c`, one I/O backend and `-pthread`.
 See the specification for io_uring/kqueue support and validation limits.
 
+## Fixed-size values at compile time
+
+Known arrays and `Chars(n)` can remain immutable compiler data until they need
+storage. Known-index updates and text reads can fold; dynamic operations and raw
+address escape materialize conservatively. Value copies are snapshots, while
+`:str()`/`:slice()` views retain their owner and observe later changes (with the
+view's original length).
+
+See the [staged-values example](examples/staged_values.slc) and
+[the text contract](docs/staged-lua-c-v0.5.md#393-charsn). Its harnesses compare known,
+split, C and in-process execution, including copies, live views and task captures.
+This adds neither a compile-time heap nor a new borrowing policy.
+
 ## Source layout
 
 | Part | Source |
@@ -86,6 +99,7 @@ See the specification for io_uring/kqueue support and validation limits.
 | Native types and exact folding | `slc/types.lua`, `slc/fold.lua` |
 | Specialization, state, words and control | `slc/stage.lua`, `slc/syntax.lua` |
 | Goose storage | `slc/memory.lua` |
+| Immutable fixed-array contents | `slc/array_value.lua` |
 | Text types and library | `slc/strings.lua`, `lib/str.slc` |
 | Differential fuzzing | `tests/fuzz/gen.lua`, `tests/fuzz/fuzz.lua` |
 | C / libgccjit backends | `slc/cgen.lua`, `slc/jitgen.lua` |

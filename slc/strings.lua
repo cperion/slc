@@ -44,6 +44,7 @@ end
 function Str.known_text(x)
     local ptr, len = S.slice_parts(x)
     if not (S.is_value(len) and len.k == 'known') then return nil end
+    if ptr.k == 'array_ptr' then return S.array_pointer_text(ptr, len) end
     local t, o = lit_of(S.ex(ptr))
     if not t then return nil end
     return t:sub(o + 1, o + tonumber(len.v))
@@ -193,16 +194,19 @@ function Str.Chars(n)
         rawset(t, 'construct_text', true)
         -- Chars(n) "text" or Chars(n)(s): filled from text; Chars(n)() is empty
         rawset(t, 'construct', function(x)
-            local b = S.cur()
             if x == nil or (type(x) == 'table' and not S.is_staged(x) and next(x) == nil) then
-                return S.agg(t, { len = S.known(U32, 0), bytes = types.array(U8, n).construct() })
+                return S.zero_value(t)
             end
             local s = as_str(x, t.display)
             local kt = Str.known_text(s)
             if kt and #kt > n then
                 fail(('%s holds %d bytes; this text has %d'):format(t.display, n, #kt), 3)
             end
-            if not b.fn then fail(t.display .. ' from text is built where it runs', 3) end
+            if kt then
+                return S.agg(t, { len = S.known(U32, #kt), bytes = S.array_from_bytes(types.array(U8, n), kt) })
+            end
+            local b = S.cur()
+            if not b.fn then fail(t.display .. ' from unknown text needs runtime storage', 3) end
             b.fn.uses_rt = true
             local tmp = b:new_temp(t)
             b:emit { op = 'let', place = tmp, e = { op = 'rt', text = '(' .. require('slc.cgen').ctype(t)
@@ -222,13 +226,15 @@ function S.member_chars(x, key)
     local t = S.value_of(x, nil, 'Chars').T
     if key == 'length' then
         if S.is_place(x) then return S.cur():read(S.field_place(x, 'len')) end
-        return nil
+        local value = S.value_of(x, t, 'Chars.length')
+        if value.k == 'agg' then return value.f.len end
+        return S.dyn(U32, { op = 'field', a = S.ex(value), name = 'len', T = U32 })
     end
     if key == 'str' then
         return function(self)
             if not S.is_place(self) then fail(t.display .. ':str() views storage: call it on a typed local or a field', 2) end
-            local ptr = S.bytes(S.field_place(self, 'bytes'))
-            local len = S.cur():read(S.field_place(self, 'len'))
+            local ptr = S.array_pointer(S.field_place(self, 'bytes'))
+            local len = S.cur():bind(S.cur():read(S.field_place(self, 'len')))
             return S.make_slice(T, ptr, len)
         end
     end

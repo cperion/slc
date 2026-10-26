@@ -52,6 +52,49 @@ check('still running', ch.late_reply() == 42)
 local st = slc.load(root .. '/examples/stores.slc')
 check('stores run', type(st.churn) == 'function')
 
+-- Fixed-array values and owner-backed text views at both binding times.
+local sv = slc.load(root .. '/examples/staged_values.slc')
+local function text(s)
+    return sv.types.Str { ptr = ffi.cast('uint8_t *', s), len = #s }
+end
+check('known Chars empty and exact-capacity construction', sv.stage_empty() and sv.stage_filled(text('abcd')) == 4)
+local value = sv.stage_value()
+check('known Chars returned by value', value.len == 3 and value.bytes.e[0] == 97 and value.bytes.e[3] == 0)
+local binary = sv.stage_binary_value()
+check('embedded NUL survives known construction and native return', binary.len == 3
+    and binary.bytes.e[0] == 97 and binary.bytes.e[1] == 0 and binary.bytes.e[2] == 98 and binary.bytes.e[3] == 0)
+check('live view versus value copy', sv.stage_live(5) == 6 and sv.stage_shorter() and sv.stage_nested())
+check('view joins retain branch owners', sv.stage_branch(true) and not sv.stage_branch(false)
+    and sv.stage_choose_view(true) and not sv.stage_choose_view(false))
+local bytes_ok = true
+for byte = 0, 255 do
+    bytes_ok = bytes_ok and sv.stage_changed_byte(byte) == byte
+        and sv.stage_snapshot(byte) == byte + 90 and sv.stage_escape(byte) == byte
+        and sv.stage_partial(text('abc'), byte) == byte + 100 and sv.stage_split(byte) == byte + 100
+end
+check('all byte values, snapshots and raw address escape', bytes_ok)
+check('known text parsing and checked indexing', sv.stage_parse() == -12 and sv.stage_index(2) == 99)
+local arrays_ok = sv.stage_array_copy(5) == 31 and sv.stage_array_view() == 16 and sv.stage_array_nested() == 5
+for i = 0, 19 do
+    arrays_ok = arrays_ok and sv.stage_array_loop(i) == i * (i + 1) / 2
+        and sv.stage_view_loop(i) == (i == 0 and 97 or 65 + (i - 1) % 26)
+end
+check('array copies, views, nested writes and loop widening', arrays_ok)
+check('view length is captured independently of live bytes', sv.stage_captured_length(text(''))
+    and sv.stage_captured_length(text('abcd')))
+check('array joins distinguish signed floating zero', 1 / sv.stage_signed_zero(true) == -math.huge
+    and 1 / sv.stage_signed_zero(false) == math.huge)
+ok, err = pcall(sv.stage_filled, text('abcde'))
+check('dynamic Chars overflow traps', not ok and tostring(err):find('text longer', 1, true), err)
+ok, err = pcall(sv.stage_index, 3)
+check('dynamic owner-backed view bounds trap', not ok and tostring(err):find('index out of range', 1, true), err)
+check('successful call after view trap', sv.stage_live(5) == 6)
+check('array/text task captures are independent copies', sv.stage_task_copy(0) == 0
+    and sv.stage_task_copy(20) == 40 and sv.stage_task_copy(255) == 510)
+ok, err = pcall(sv.stage_dead_write, 2)
+check('dead array stores retain bounds checks', sv.stage_dead_write(1) == 1
+    and not ok and tostring(err):find('index out of range', 1, true), err)
+
 -- every record of every example: the layout this backend assumes is the C layout
 for f in io.popen('ls ' .. root .. '/examples/*.slc'):lines() do
     local okl, e = pcall(slc.load, f, { check_layouts = true })

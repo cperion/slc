@@ -284,6 +284,19 @@ function Fn:expr(e)
     elseif op == 'field' then
         local member = e.a.T and not rawget(e.a.T, 'foreign') and G.cfield(e.a.T, e.name) or e.name
         return member_path(ctx, self:expr(e.a), member)
+    elseif op == 'zero' then
+        return ctx:zero(u:ct(e.T))
+    elseif op == 'array' then
+        local t = u:ct(e.T)
+        local tmp = self.fb:var(t, 'array')
+        self.fb:assign(tmp, ctx:zero(t))
+        local data, indices = member_path(ctx, tmp, 'e'), {}
+        for i in pairs(e.fields) do indices[#indices + 1] = i end
+        table.sort(indices)
+        for _, i in ipairs(indices) do
+            self.fb:assign(ctx:index(data, ctx:int_const(C.SIZE, i)), self:expr(e.fields[i]))
+        end
+        return tmp
     elseif op == 'agg' then
         local t = u:ct(e.T)
         if rawget(e.T, 'cpath') and next(rawget(e.T, 'cpath')) or t.foreign then

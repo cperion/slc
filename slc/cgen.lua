@@ -279,12 +279,26 @@ local function dead_stores(body)
     while changed do
         changed = false
         local readers = {}
-        walk_block(body, nil, function(e)
+        local function mark(e)
             if (e.op == 'read' or e.op == 'addr' or e.op == 'rt') and e.place then
                 readers[root(e.place)] = true
             end
+        end
+        walk_block(body, function(s)
+            for _, key in ipairs(STMT_EXPRS) do if s[key] then walk_expr(s[key], mark) end end
+            for _, e in ipairs(s.args or {}) do walk_expr(e, mark) end
+            local p = s.place
+            while p do
+                local ptr, base, idx = rawp(p, 'ptr'), rawp(p, 'base'), rawp(p, 'idx')
+                if ptr then walk_expr(ptr, mark) end
+                -- A local array's LHS base names its storage; it does not read
+                -- its contents. Index expressions still can read that array.
+                if base and not rawp(p, 'array_owner') then walk_expr(base, mark) end
+                if idx then walk_expr(idx, mark) end
+                p = rawp(p, 'parent')
+            end
         end)
-        -- a read of a place inside the place path of a store is a read too
+        -- Reads used to compute an address/index count; naming its owner does not.
         local function rm(blk)
             for i = #blk, 1, -1 do
                 local s = blk[i]
@@ -404,7 +418,7 @@ end
 local function same_expr(a, b)
     if a == b then return true end
     if type(a) ~= 'table' or type(b) ~= 'table' or a.op ~= b.op then return false end
-    if a.op == 'const' then return a.T == b.T and a.v == b.v end
+    if a.op == 'const' then return a.T == b.T and fold.identical(a.T, a.v, b.v) end
     if a.op == 'param' then return a.name == b.name end
     if a.op == 'read' or a.op == 'addr' then return a.place == b.place end
     for _, k in ipairs { 'o', 'name', 'T', 'fn', 'ext', 'text', 'alt', 'sum' } do
@@ -574,6 +588,9 @@ end
 
 -- place -> C lvalue text and its precedence
 function Fn:place(p)
+    if p.pk == 'param' then
+        return self.task_mode and ('f->' .. p.name) or p.name, self.task_mode and PREC.postfix or PREC.atom
+    end
     if p.pk == 'index' then
         return self:expr(rawp(p, 'base'), PREC.postfix) .. '[' .. self:expr(rawp(p, 'idx'), 0) .. ']', PREC.postfix
     end
@@ -684,6 +701,15 @@ function Fn:expr(e, need)
     elseif op == 'field' then
         local member = e.a.T and G.cfield(e.a.T, e.name) or e.name
         return paren(self:expr(e.a, PREC.postfix) .. '.' .. member, PREC.postfix, need)
+    elseif op == 'zero' then
+        return '(' .. ctype(e.T) .. '){ 0 }'
+    elseif op == 'array' then
+        local indices, parts = {}, {}
+        for i in pairs(e.fields) do indices[#indices + 1] = i end
+        table.sort(indices)
+        for _, i in ipairs(indices) do parts[#parts + 1] = '[' .. i .. '] = ' .. self:expr(e.fields[i], 2) end
+        if #parts == 0 then parts[1] = '0' end
+        return paren('(' .. ctype(e.T) .. '){ .e = { ' .. table.concat(parts, ', ') .. ' } }', PREC.postfix, need)
     elseif op == 'agg' then
         local parts = {}
         for _, f in ipairs(e.T.fields) do

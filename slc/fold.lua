@@ -373,6 +373,14 @@ function F.show(t, v)
     return tostring(v)
 end
 
+-- Provable identity for constant folding/joins, not the language's == operator.
+-- Equal floating zeros have different observable reciprocals. NaNs conservatively
+-- remain distinct, including when their payloads have not been inspected.
+function F.identical(t, a, b)
+    if t.kind == 'float' and a == 0 and b == 0 then return 1 / a == 1 / b end
+    return a == b
+end
+
 -- convert a Known scalar back to a host value (for Lua code that inspects results)
 function F.to_host(t, v)
     if t.kind == 'int' and is_cdata(v) then return v end

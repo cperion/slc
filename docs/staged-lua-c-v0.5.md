@@ -2324,7 +2324,7 @@ end
 
 ```c
 Packet parse(U8Slice buf) {
-    SLC_RANGE(0u, 8u, buf.len);
+    if (8u > buf.len) slc_trap("slice range out of bounds");
     uint32_t v = (uint32_t)buf.ptr[0u];
     uint32_t v2 = (uint32_t)buf.ptr[1u];
     uint32_t v3 = (uint32_t)buf.ptr[2u];
@@ -3083,7 +3083,7 @@ uint32_t timeout_then_data(void) {
     int64_t io5;
     int64_t io6;
     if (slc_io_pipe(&reader, &writer, &io) == 0) {
-        buf = (U8x8){ { 0 } };
+        buf = (U8x8){ .e = { 0 } };
         if (slc_io_read(slc_tk, slc_ops, reader, &buf.e[0u], 8u, -1ll, 20000000ull, &io2, "io.slc:72: read") == SLC_PENDING) slc_block(slc_tk);
         r = slc_tk->result;
         if (r == 0) {
@@ -3214,18 +3214,16 @@ typedef struct U32x4 { uint32_t e[4]; } U32x4;
 
 ```c
 uint32_t fixed(void) {
-    U32x4 a = (U32x4){ { 10u, 20u, 30u, 40u } };
-    U32x4 b = (U32x4){ { 0 } };
-    b.e[0u] = a.e[3u];
-    b.e[1u] = a.e[0u] + a.e[1u];
-    return b.e[0u] + b.e[1u] + 4u;
+    return 74u;
 }
 ```
 
 * `a[i]` is checked like a slice's element (§32.2): at compile time when the index is known (`index-range: index 4 is outside an array of length 4`), otherwise when it runs.
 * `a.length` is known. `a:slice()` views the elements as a read-only `Slice T`.
 * `Array(T, n)()` is zeroed, `Array(T, n) { ... }` lists every element, and a typed local declared without a value starts zeroed.
-* Arrays are not tracked element by element (as atomics are not tracked); an element is a place in memory.
+* Fully known array contents are immutable aggregate values in the evaluator. A typed local keeps its whole pending value; known-index reads and known writes can fold. Copies keep independent snapshots, including nested arrays and structs. Compact zero contents do not require one compiler cell per element.
+* A dynamic write or a read requiring runtime indexing materializes the array conservatively; the prototype does not maintain a partly known element map afterward. Different branch results materialize on their respective paths, and loops widen as other tracked values do. Equal known contents may stay known.
+* `a:slice()` is a live read-only view of the owner, not a snapshot of its contents. It can read known elements without creating an address. Once a raw address or foreign boundary requires memory, pending values are written and affected knowledge is invalidated. Explicit `Ptr(...)` remains the runtime boundary of §32.1; this is not a compile-time heap.
 * Elements are fixed-size: scalars, structs, sums, arrays and channels; never references or slices. An array is sendable when its elements are.
 
 ---
@@ -3354,6 +3352,12 @@ There are no bounds checks: when an arm of an `if` cannot fall through, what fol
 
 `Chars(n)` holds up to `n` bytes inline, with a length: a value like any struct, so it can be a field, a message, a pool slot and (later) a map key. `Chars(16)(s)` fills one from text: longer known text is rejected while compiling (`Chars(2) holds 2 bytes; this text has 3`), longer runtime text traps. `c:str()` views it and `c.length` is its length.
 
+Known construction is a value operation: `Chars(n)("abc")` and `Chars(n)()` need no runtime frame, and unused capacity is zero-filled. A typed local initialized from known text can be inspected through `:str()`, compared or parsed while compiling, just like the text operations on literal `Str`. If input bytes are dynamic, the constructor copies and checks capacity at run time. The C layout and copy ABI are the same at both binding times.
+
+A `c:str()` view records an owner, offset and the length at creation. It reads the owner's current bytes: reassigning `c` changes what the view sees, but does not change that captured length. A copied `Chars(n)` is independent. The evaluator therefore must not replace a view with a cached string snapshot; taking an address materializes its actual owner, not an unrelated static literal. This does not extend the owner's lifetime or introduce stronger raw-pointer lifetime guarantees than §32.
+
+[The staged-values example](../examples/staged_values.slc) exercises these distinctions across known, split and dynamic inputs, nested fields, joins, loops, raw address escape and task captures. A task's view addresses its own captured value, never the parent's later contents.
+
 A struct field cannot be a `Str` (`field 's' is a Str, a view of someone else's bytes; store text as Chars(n), or keep it in a Text`).
 
 ## 39.4 What the prototype implements
@@ -3384,6 +3388,7 @@ luajit tests/run.lua                  compile, check and run every example, on b
 | C-exact folding | `slc/fold.lua` |
 | Values, places, lazy stores, branches, loops, words, materialization | `slc/stage.lua` |
 | Stores, IDs, Grow, data-stack indices | `slc/memory.lua` |
+| Immutable fixed-array contents | `slc/array_value.lua` |
 | Typed-body parser and translation | `slc/syntax.lua` |
 | Application, lambdas (extended) | `macro/let.lua` |
 | `struct`, `export`, typed `function` | `macro/slc.lua` |

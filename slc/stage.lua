@@ -11,6 +11,7 @@
 local ffi = require 'ffi'
 local types = require 'slc.types'
 local fold = require 'slc.fold'
+local Arrays = require 'slc.array_value'
 
 local S = {}
 
@@ -106,6 +107,10 @@ local function ref(place) return setmetatable({ T = types.ref(place.T), k = 'ref
 local function sumv(t, tag, p) return setmetatable({ T = t, k = 'sumv', tag = tag, p = p }, V) end
 S.sumv = sumv
 S.known, S.dyn, S.agg, S.ref = known, dyn, agg, ref
+local function array_value(t, contents)
+    return setmetatable({ T = t, k = 'array', contents = contents }, V)
+end
+S.array_value = array_value
 
 local function is_known(v)
     if not is_value(v) then return false end
@@ -118,10 +123,26 @@ local function is_known(v)
         end
         return true
     end
+    if v.k == 'array' then return Arrays.all(v.contents, is_known) end
     if v.k == 'sumv' then local q = rawget(v, 'p'); return q == nil or is_known(q) end
     return false
 end
 S.is_known = is_known
+
+local function same_value(a, b)
+    if a == b then return true end
+    if not a or not b or a.T ~= b.T or a.k ~= b.k then return false end
+    if a.k == 'known' then return fold.identical(a.T, a.v, b.v) end
+    if a.k == 'array' then return Arrays.equal(a.contents, b.contents, same_value) end
+    if a.k == 'agg' then
+        for _, f in ipairs(a.T.fields) do if not same_value(a.f[f.name], b.f[f.name]) then return false end end
+        return true
+    end
+    if a.k == 'sumv' then return a.tag == b.tag and same_value(rawget(a, 'p'), rawget(b, 'p')) end
+    if a.k == 'dyn' then return a.e == b.e end
+    return false
+end
+S.same_value = same_value
 
 local function const(t, v) return { op = 'const', T = t, v = v } end
 
@@ -310,7 +331,14 @@ end
 
 local function tracked(p)
     if p.pk == 'temp' or p.pk == 'iv' or p.pk == 'rvar' or p.pk == 'lv' then return false end
-    if p.T.kind == 'atomic' or p.T.kind == 'array' then return false end
+    if p.T.kind == 'atomic' then return false end
+    -- Indexed children are projections of the whole array state, not separate
+    -- tracked cells. Their reads/writes are handled before ordinary storage.
+    local q = p
+    while q do
+        if rawget(q, 'array_owner') then return false end
+        q = rawget(q, 'parent')
+    end
     if p.T.resizable then return false end
     local r = root_of(p)
     return r.pk == 'local' and not rawget(r, 'escaped')
@@ -330,6 +358,55 @@ local function field_place(p, name)
     return c
 end
 S.field_place = field_place
+
+-- A fixed-index projection can be evaluated against an immutable array value.
+-- Keep the actual C place too, for the point where storage becomes observable.
+local function array_path(p)
+    local owner = rawget(p, 'array_owner')
+    if owner then
+        local root, path = array_path(owner)
+        root, path = root or owner, path or {}
+        path[#path + 1] = { index = rawget(p, 'array_index'), kind = 'index' }
+        return root, path
+    end
+    local parent = rawget(p, 'parent')
+    if p.pk == 'field' and parent then
+        local root, path = array_path(parent)
+        if root then
+            path[#path + 1] = { name = p.fname, kind = 'field' }
+            return root, path
+        end
+    end
+end
+
+local function array_project(value, path, at)
+    at = at or 1
+    if at > #path then return value end
+    local part = path[at]
+    if part.kind == 'index' and part.index ~= nil and value.k == 'array' then
+        return array_project(Arrays.get(value.contents, part.index), path, at + 1)
+    end
+    if part.kind == 'field' and value.k == 'agg' then
+        return array_project(value.f[part.name], path, at + 1)
+    end
+end
+
+local function array_replace(value, path, replacement, at)
+    at = at or 1
+    if at > #path then return replacement end
+    local part = path[at]
+    if part.kind == 'index' and part.index ~= nil and value.k == 'array' then
+        local child = array_replace(Arrays.get(value.contents, part.index), path, replacement, at + 1)
+        if child then return array_value(value.T, Arrays.set(value.contents, part.index, child)) end
+    elseif part.kind == 'field' and value.k == 'agg' then
+        local child = array_replace(value.f[part.name], path, replacement, at + 1)
+        if child then
+            local fields = copy(value.f)
+            fields[part.name] = child
+            return agg(value.T, fields)
+        end
+    end
+end
 
 -- every scalar leaf under a place
 local function leaves(p, out)
@@ -450,6 +527,12 @@ end
 function Builder:read(p)
     if checked_root(p) then p = self:resolve_checked(p) end
     if foreign_place(self, p) then return S.capture_read(self, p) end
+    local array_root, path = array_path(p)
+    if array_root then
+        local projected = array_project(self:read(array_root), path)
+        if projected then return projected end
+        self:materialize(array_root)
+    end
     if p.T.kind == 'struct' then
         local f = {}
         for _, fd in ipairs(p.T.fields) do f[fd.name] = self:read(field_place(p, fd.name)) end
@@ -477,7 +560,8 @@ end
 local PENDING_LIMIT = 24
 
 local function pendable(v)
-    if v.k == 'known' then return true end
+    if v.k == 'known' or v.k == 'array_ptr' then return true end
+    if v.k == 'array' then return is_known(v) end
     if v.k == 'sumv' then local q = rawget(v, 'p'); return q == nil or pendable(q) end
     if v.k == 'dyn' then return free(v.e) and size(v.e) <= PENDING_LIMIT end
     return false
@@ -510,6 +594,21 @@ function Builder:store(p, v)
     end
     if is_value(v) and rawget(v, 'view') then
         fail("a view of a Grow cannot be stored; use it inside its view", 3)
+    end
+    local array_root, path = array_path(p)
+    if array_root then
+        if self.dead then return end
+        local old = self:read(array_root)
+        if is_known(v) then
+            local updated = array_replace(old, path, v)
+            if updated and is_known(updated) then return self:store(array_root, updated) end
+        end
+        -- Snapshot the RHS before any overlapping array fields are changed.
+        v = self:bind(v)
+        self:materialize(array_root)
+        self:loop_write(array_root)
+        self:invalidate(array_root)
+        if tracked(array_root) then self.state[array_root] = { mat = true, ver = new_version() } end
     end
     if p.T.kind == 'struct' and v.k == 'agg' and tracked(p) and not p.T.resizable then
         -- a new value computed from the old one: assign it whole, so every field
@@ -605,7 +704,14 @@ function Builder:materialize(p, block, state)
             state[p] = { mat = true, ver = new_version() }
             return
         end
-        local stmt = { op = 'store', place = p, e = ex(v) }
+        -- Converting an abstract owner address can flush its owner too. Those
+        -- writes belong to the same path as this materialization, not the join.
+        local saved_block, saved_state = self.block, self.state
+        self.block, self.state = block or self.block, state
+        local ok, expression = pcall(ex, v)
+        self.block, self.state = saved_block, saved_state
+        if not ok then error(expression, 0) end
+        local stmt = { op = 'store', place = p, e = expression }
         if block then block[#block + 1] = stmt else self:emit(stmt) end
         state[p] = { mat = true, ver = new_version() }
     end
@@ -711,6 +817,19 @@ end
 function ex(v)
     if v.k == 'known' then return const(v.T, v.v) end
     if v.k == 'dyn' then return v.e end
+    if v.k == 'array_ptr' then
+        if foreign_place(cur(), v.place) then fail('a task cannot capture a view of another frame\'s array', 3) end
+        v.builder:escape(v.place)
+        local base = { op = 'field', a = read_expr(v.place), name = 'e', T = v.place.T }
+        local element = new_place { pk = 'index', T = v.place.T.elem, base = base,
+                                    idx = ex(v.offset), name = 'element', id = uid() }
+        return { op = 'addr', place = element, T = v.T }
+    end
+    if v.k == 'array' then
+        local fields = {}
+        for i, value in pairs(v.contents.items) do fields[i] = ex(value) end
+        return { op = 'array', T = v.T, fields = fields }
+    end
     if v.k == 'agg' then
         local p = whole_place(v)
         if p and not tracked(p) then return read_expr(p) end
@@ -1212,6 +1331,7 @@ function S.dynamic(x)
     local v = value_of(x, nil, 'dynamic(...)')
     if v.k == 'sumv' then local q = rawget(v, 'p'); return sumv(v.T, v.tag, q ~= nil and S.dynamic(q) or nil) end
     if v.k == 'known' then return dyn(v.T, const(v.T, v.v)) end
+    if v.k == 'array' then return dyn(v.T, ex(v)) end
     if v.k == 'agg' then
         local f = {}
         for k, fv in pairs(v.f) do f[k] = S.dynamic(fv) end
@@ -1222,7 +1342,13 @@ end
 
 -- the host value of a Known result (for Lua code inspecting compile-time results)
 function S.host(x)
+    if is_place(x) then x = cur():read(x) end
     if is_value(x) and x.k == 'known' then return fold.to_host(x.T, x.v) end
+    if is_value(x) and x.k == 'array' then
+        local r = {}
+        for i = 0, x.T.length - 1 do r[i + 1] = S.host(Arrays.get(x.contents, i)) end
+        return r
+    end
     if is_value(x) and x.k == 'agg' then
         local r = {}
         for k, fv in pairs(x.f) do r[k] = S.host(fv) end
@@ -1386,8 +1512,9 @@ local function same_entry(a, b)
     if a.mat and b.mat then return a.ver == b.ver end
     if not a.mat and not b.mat then
         local va, vb = a.val, b.val
-        if va.k == 'known' and vb.k == 'known' then return va.v == vb.v end
+        if va.k == 'known' and vb.k == 'known' then return fold.identical(va.T, va.v, vb.v) end
         if va.k == 'dyn' and vb.k == 'dyn' then return va.e == vb.e end
+        if va.k == 'array' and vb.k == 'array' then return same_value(va, vb) end
     end
     return false
 end
@@ -1413,7 +1540,7 @@ function Builder:join(paths, base)
             for _, p in ipairs(live) do
                 local en = p.state[place]
                 if en and not en.mat and not en.uninit then
-                    p.block[#p.block + 1] = { op = 'store', place = place, e = ex(en.val) }
+                    self:materialize(place, p.block, p.state)
                 end
             end
             goto continue
@@ -1842,7 +1969,7 @@ local function static(v)
     if is_host(v) then return true end
     if not is_value(v) then return false end
     if v.k == 'known' then return true end
-    if v.k == 'agg' or v.k == 'sumv' then return is_known(v) end
+    if v.k == 'agg' or v.k == 'sumv' or v.k == 'array' then return is_known(v) end
     return false
 end
 S.static = static
@@ -1866,6 +1993,13 @@ local function arg_key(v)
         local parts = {}
         for _, f in ipairs(v.T.fields) do parts[#parts + 1] = arg_key(v.f[f.name]) end
         return v.T.display .. '{' .. table.concat(parts, ',') .. '}'
+    end
+    if v.k == 'array' and is_known(v) then
+        local parts = { arg_key(v.contents.zero) }
+        for _, i in ipairs(Arrays.indices(v.contents)) do
+            parts[#parts + 1] = i .. ':' .. arg_key(v.contents.items[i])
+        end
+        return v.T.display .. '[' .. table.concat(parts, ',') .. ']'
     end
     if v.k == 'ref' then return '&' .. v.T.elem.display end
     return '?' .. v.T.display
@@ -3098,7 +3232,7 @@ function X:__call(...)
         local v = args[i]
         if is_place(v) then v = b:read(v) end
         if type(v) == 'string' then v = known(types.CString, v) end
-        if not is_value(v) or v.k == 'ref' or v.k == 'agg' or v.k == 'sumv' then
+        if not is_value(v) or v.k == 'ref' or v.k == 'agg' or v.k == 'sumv' or v.k == 'array' then
             fail(('variadic argument %d of %s must be a native scalar, a CString or a pointer, got %s'):format(
                 i, self.cname, describe(v)), 2)
         end
@@ -3714,6 +3848,43 @@ local function bound_check(i, n, what, thing)
     b.fn.uses_rt = true
 end
 
+-- A read-only view can retain an abstract address while its owner is tracked.
+-- The address is materialized only by ex(), never by a content query.
+function S.array_pointer(place, offset, builder)
+    assert(is_place(place) and place.T.kind == 'array')
+    place = S.resolve_checked(place)
+    if foreign_place(cur(), place) then
+        place = S.capture_place(cur(), place)
+        builder = cur()
+    end
+    return setmetatable({ T = types.ptr(place.T.elem), k = 'array_ptr', place = place,
+                          offset = cur():bind(offset or known(types.U32, 0)), builder = builder or cur() }, V)
+end
+
+local function array_pointer_read(ptr, index)
+    if ptr.k ~= 'array_ptr' or ptr.offset.k ~= 'known' or index.k ~= 'known' then return nil end
+    local value = ptr.builder:read(ptr.place)
+    if value.k ~= 'array' then return nil end
+    local i = tonumber(ptr.offset.v) + tonumber(index.v)
+    if i < 0 or i >= value.T.length then return nil end
+    return Arrays.get(value.contents, i)
+end
+
+function S.array_pointer_text(ptr, len)
+    if ptr.k ~= 'array_ptr' or ptr.T.elem ~= types.U8 or len.k ~= 'known' or ptr.offset.k ~= 'known' then return nil end
+    local value = ptr.builder:read(ptr.place)
+    if value.k ~= 'array' then return nil end
+    local start, count = tonumber(ptr.offset.v), tonumber(len.v)
+    if start < 0 or start + count > value.T.length then return nil end
+    local bytes = {}
+    for i = start, start + count - 1 do
+        local byte = Arrays.get(value.contents, i)
+        if byte.k ~= 'known' then return nil end
+        bytes[#bytes + 1] = string.char(tonumber(byte.v))
+    end
+    return table.concat(bytes)
+end
+
 local function make_slice(t, ptr, len, view)
     local v = agg(t, { ptr = ptr, len = len })
     if view then rawset(v, 'view', view) end
@@ -3726,6 +3897,8 @@ local function slice_get(s, key)
     local iv = index_value(key)
     if iv.T ~= types.U32 then iv = types.U32(iv) end
     bound_check(iv, len, 'index')
+    local value = array_pointer_read(ptr, iv)
+    if value then return value end
     return cur():read(index_place(ptr, iv, ptr.T.elem))
 end
 
@@ -3744,16 +3917,28 @@ local function slice_sub(s, a, b_)
         fail(('index-range: sub(%s, %s) is empty backwards'):format(fold.show(av.T, av.v), fold.show(bv.T, bv.v)), 3)
     else
         local bld = cur()
-        bld:emit { op = 'rt', text = 'SLC_RANGE($1, $2, $3);', args = { ex(av), ex(bv), ex(len) },
-                   what = 'a range check' }
+        if av.k == 'known' and av.v == 0 then
+            -- All indices are unsigned: 0 <= b is already true. Keeping it in
+            -- SLC_RANGE would make newly propagated constants fail strict C.
+            bld:emit { op = 'rt', text = 'if ($1 > $2) slc_trap("slice range out of bounds");',
+                       args = { ex(bv), ex(len) }, what = 'a range check' }
+        elseif bv.k == 'known' and bv.v == 0 then
+            bld:emit { op = 'rt', text = 'if ($1 > 0u) slc_trap("slice range out of bounds");',
+                       args = { ex(av) }, what = 'a range check' }
+        else
+            bld:emit { op = 'rt', text = 'SLC_RANGE($1, $2, $3);', args = { ex(av), ex(bv), ex(len) },
+                       what = 'a range check' }
+        end
         bld.fn.uses_rt = true
     end
     local p2 = ptr
-    if not (av.k == 'known' and av.v == 0) then
+    if ptr.k == 'array_ptr' then
+        p2 = S.array_pointer(ptr.place, binary('add', ptr.offset, av), ptr.builder)
+    elseif not (av.k == 'known' and av.v == 0) then
         local pt = ptr.T
         p2 = dyn(pt, { op = 'addr', place = index_place(ptr, av, pt.elem), T = pt })
     end
-    return make_slice(t, p2, bv - av, view)
+    return make_slice(t, p2, cur():bind(bv - av), view)
 end
 
 function member_slice(x, key)
@@ -3791,16 +3976,18 @@ S.slice_parts, S.member_slice, S.bound_check = slice_parts, member_slice, bound_
 -- a[i] is checked like a slice's (at compile time when the index is known),
 -- a.length is known, a:slice() views the elements read-only.
 
-local function array_storage(x)
+local function array_storage(x, defer)
     -- the C array inside the wrapping struct, as an expression
     local t = struct_of(x)
     if is_place(x) then x = S.resolve_checked(x) end
     if is_value(x) and x.k == 'ref' and checked_root(x.place) then x = S.resolve_checked(x.place) end
-    if is_place(x) then
-        return { op = 'field', a = read_expr(x), name = 'e', T = t }, x
-    end
-    if x.k == 'ref' then
-        return { op = 'field', a = read_expr(x.place), name = 'e', T = t }, x.place
+    local place = is_place(x) and x or x.k == 'ref' and x.place
+    if place then
+        if not defer then
+            local root = array_path(place)
+            cur():materialize(root or place)
+        end
+        return { op = 'field', a = read_expr(place), name = 'e', T = t }, place
     end
     return nil
 end
@@ -3811,23 +3998,27 @@ function S.array_member(x, key, want_place)
     if key == 'length' then return n end
     if key == 'slice' then
         return function(self)
-            local base, place = array_storage(self)
-            if not base then fail('a:slice() needs the array itself (a typed local, a field), not a copy', 2) end
-            if place.pk ~= 'deref' and place.pk ~= 'index' then cur():escape(root_of(place)) end
-            local elem_place = new_place { pk = 'index', T = t.elem, base = base, idx = ex(known(types.U32, 0)),
-                                           name = 'element', id = uid() }
-            local pt = types.ptr(t.elem)
-            return make_slice(types.slice(t.elem), dyn(pt, { op = 'addr', place = elem_place, T = pt }), n)
+            local place = is_place(self) and self or self.k == 'ref' and self.place
+            if not place then fail('a:slice() needs the array itself (a typed local, a field), not a copy', 2) end
+            return make_slice(types.slice(t.elem), S.array_pointer(place), n)
         end
     end
     if type(key) == 'number' or is_staged(key) then
         local iv = index_value(key)
         if iv.T ~= types.U32 then iv = types.U32(iv) end
         bound_check(iv, n, 'index', 'an array')
-        local base = array_storage(x)
+        local aggregate_place = (is_place(x) or x.k == 'ref')
+            and (t.elem.kind == 'struct' or t.elem.kind == 'array')
+        if not want_place and not aggregate_place and iv.k == 'known' then
+            local value = value_of(x, t, 'array')
+            if value.k == 'array' then return Arrays.get(value.contents, tonumber(iv.v)) end
+        end
+        local base, owner = array_storage(x, aggregate_place or want_place and iv.k == 'known')
         if base then
-            local p = new_place { pk = 'index', T = t.elem, base = base, idx = ex(iv), name = 'element', id = uid() }
-            if want_place then return p end
+            local p = new_place { pk = 'index', T = t.elem, base = base, idx = ex(iv), name = 'element', id = uid(),
+                                  parent = owner, array_owner = owner,
+                                  array_index = iv.k == 'known' and tonumber(iv.v) or nil }
+            if want_place or aggregate_place then return p end
             return cur():read(p)
         end
         if want_place then fail('cannot assign to an element of an array value; store it in a typed local first', 3) end
@@ -3835,6 +4026,35 @@ function S.array_member(x, key, want_place)
         return dyn(t.elem, { op = 'rt', text = '$1.e[$2]', args = { ex(xv), ex(iv) }, T = t.elem, pure = true })
     end
     fail(("%s offers a[i], a.length and a:slice(), not '%s'"):format(t.display, tostring(key)), 3)
+end
+
+-- Zero values remain data, including nested aggregates. Unsupported scalar
+-- handles stay residual rather than inventing a host representation for them.
+local function zero_value(t)
+    if t.kind == 'int' or t.kind == 'float' then return known(t, 0) end
+    if t.kind == 'bool' then return known(t, false) end
+    if t.kind == 'struct' then
+        local fields = {}
+        for _, f in ipairs(t.fields) do fields[f.name] = S.zero_value(f.type) end
+        return agg(t, fields)
+    end
+    if t.kind == 'array' then return array_value(t, Arrays.new(t, S.zero_value(t.elem))) end
+    if t.kind == 'sum' then
+        local a = t.alts[1]
+        return sumv(t, a.name, a.type.kind ~= 'unit' and S.zero_value(a.type) or nil)
+    end
+    return dyn(t, { op = 'zero', T = t })
+end
+S.zero_value = zero_value
+
+function S.array_from_bytes(t, text)
+    assert(t.kind == 'array' and t.elem == types.U8 and #text <= t.length)
+    local items = {}
+    for i = 1, #text do
+        local byte = text:byte(i)
+        if byte ~= 0 then items[i - 1] = known(types.U8, byte) end
+    end
+    return array_value(t, Arrays.new(t, known(types.U8, 0), items))
 end
 
 function S.Array(elem, n)
@@ -3845,6 +4065,8 @@ function S.Array(elem, n)
         rawset(t, 'construct', function(x)
             local ct = require('slc.cgen').ctype(t)
             if x == nil or (type(x) == 'table' and not is_staged(x) and next(x) == nil) then
+                local value = zero_value(t)
+                if is_known(value) then return value end
                 return dyn(t, { op = 'rt', text = '(' .. ct .. '){ { 0 } }', T = t, pure = true })
             end
             if type(x) ~= 'table' or is_staged(x) then
@@ -3853,11 +4075,15 @@ function S.Array(elem, n)
             if #x ~= t.length then
                 fail(('%s { ... } lists %d elements, got %d'):format(t.display, t.length, #x), 3)
             end
-            local args, slots = {}, {}
+            local args, slots, items, all_known = {}, {}, {}, true
             for i = 1, t.length do
-                args[i] = ex(coerce(x[i], t.elem, ('element %d of %s'):format(i, t.display)))
+                local value = coerce(x[i], t.elem, ('element %d of %s'):format(i, t.display))
+                items[i - 1] = value
+                all_known = all_known and is_known(value)
+                args[i] = ex(value)
                 slots[i] = '$' .. i
             end
+            if all_known then return array_value(t, Arrays.new(t, zero_value(t.elem), items)) end
             return dyn(t, { op = 'rt', text = '(' .. ct .. '){ { ' .. table.concat(slots, ', ') .. ' } }', args = args,
                             T = t, pure = true })
         end)
@@ -4552,9 +4778,48 @@ function S.capture_read(b, p)
         cap.places[r] = v
     end
     local path, q = {}, p
-    while q ~= r do path[#path + 1] = rawget(q, 'fname'); q = rawget(q, 'parent') end
+    while q ~= r do
+        if rawget(q, 'array_owner') then
+            local idx = rawget(q, 'idx')
+            path[#path + 1] = idx.op == 'const' and known(idx.T, idx.v) or dyn(idx.T, idx)
+        else
+            path[#path + 1] = rawget(q, 'fname')
+        end
+        q = rawget(q, 'parent')
+    end
     for i = #path, 1, -1 do v = member(v, path[i]) end
     return v
+end
+
+-- Views of captured arrays address the task's by-value parameter, never the
+-- parent's local. Even a baked-in value needs owned storage once it is viewed.
+function S.capture_place(b, p)
+    local fn, root = b.fn, root_of(p)
+    local cap = fn.capture
+    local value = cap.places[root]
+    if not (value and value.k == 'dyn' and value.e.op == 'param' and value.e.fn == fn) then
+        local copied = value or cap.parent:read(root)
+        sendable(root.T, root.name, 'the outside name')
+        value = new_capture(fn, root.name, root.T, copied)
+        cap.places[root] = value
+    end
+    cap.owned_roots = cap.owned_roots or {}
+    local owned = cap.owned_roots[root]
+    if not owned then
+        owned = new_place { pk = 'param', T = root.T, name = value.e.name, owner = fn, id = uid() }
+        cap.owned_roots[root] = owned
+    end
+    local function rebase(q)
+        if q == root then return owned end
+        if rawget(q, 'array_owner') then
+            local idx = rawget(q, 'idx')
+            local key = idx.op == 'const' and known(idx.T, idx.v) or dyn(idx.T, idx)
+            return S.array_member(rebase(q.array_owner), key, true)
+        end
+        if q.pk == 'field' then return field_place(rebase(q.parent), q.fname) end
+        fail('a captured array view requires a field or indexed place', 3)
+    end
+    return rebase(p)
 end
 
 -- expressions from outside held in Lua values (a call's result, a parameter)

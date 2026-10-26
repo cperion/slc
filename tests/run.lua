@@ -35,6 +35,34 @@ for _, f in ipairs(examples) do
                 .. root .. '/runtime/slc_io_poll.c'
             local okl, outl = sh(('%s %s %s %s -pthread -o %s.bin && %s.bin'):format(CC, c, main, rt, c, c))
             check(name .. ': run', okl, outl)
+            if okl and name == 'staged_values' then
+                local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
+                local sources = { q(c), q(main) }
+                for _, file in ipairs { 'slc_rt.c', 'slc_tasks.c', 'slc_io_posix.c', 'slc_io_poll.c' } do
+                    sources[#sources + 1] = q(root .. '/runtime/' .. file)
+                end
+                for _, opt in ipairs { 'O0', 'O2' } do
+                    local exe = c .. '.' .. opt
+                    local oks, outs = sh(('cc -std=c99 -Wall -Wextra -Werror -%s -I%s %s -pthread -o %s && %s')
+                        :format(opt, q(root .. '/runtime'), table.concat(sources, ' '), q(exe), q(exe)))
+                    check(name .. ': ' .. opt .. ' binding-time equivalence', oks, outs)
+                end
+                if sh('command -v clang') then
+                    local exe = c .. '.asan'
+                    local oks, outs = sh(('clang -std=c99 -O1 -g -fsanitize=address,undefined '
+                        .. '-fno-sanitize-recover=all -I%s %s -pthread -o %s && ASAN_OPTIONS=detect_leaks=1 %s')
+                        :format(q(root .. '/runtime'), table.concat(sources, ' '), q(exe), q(exe)))
+                    check(name .. ': ASan/UBSan', oks, outs)
+                else
+                    print('skip  staged values ASan/UBSan: clang not found')
+                end
+                local generated = assert(io.open(c))
+                local source = generated:read('*a'); generated:close()
+                for _, word in ipairs { 'stage_empty', 'stage_value', 'stage_binary_value', 'stage_live', 'stage_shorter', 'stage_nested', 'stage_parse', 'stage_split' } do
+                    local body = source:match(word .. '%b()%s*(%b{})')
+                    check(word .. ': known data needs no runtime fill', body and not body:find('slc_chars_fill', 1, true))
+                end
+            end
             -- I/O runs on every backend, each also under ThreadSanitizer
             if okl and name == 'io' then
                 local base = root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c ' .. root .. '/runtime/slc_io_posix.c '
@@ -75,6 +103,9 @@ for _, f in ipairs(examples) do
         end
     end
 end
+
+local oka, erra = pcall(dofile, root .. '/tests/array_value.lua')
+check('immutable array contents: persistence and sparse zeros', oka, erra)
 
 -- Text's C helper accepts unrelated buffers and self-aliases across growth.
 -- Keep pointer comparisons separate from UBSan's pointer-overflow instrumentation.

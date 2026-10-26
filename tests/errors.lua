@@ -719,4 +719,19 @@ export f
     { name = 'a Str stored in a struct', expect = "field 's' is a Str, a view of someone else's bytes",
       src = [[local Holder = struct { s: Str }
 ]] },
+    { name = 'Chars overflow on the known word path', expect = 'Chars(4) holds 4 bytes; this text has 5',
+      src = [[local f = do(s: Str): U32
+    local c: Chars(4) = Chars(4)(s)
+    return c.length
+end
+assert(host(f("abcde")) == 5)
+]] },
+    { name = 'raw array address is still a runtime boundary', expect = 'cannot evaluate at compile time',
+      src = [[local f = do(): U8
+    local c: Chars(4) = Chars(4)("abc")
+    local p = Ptr(c.bytes)
+    return p[0][0]
+end
+host(f())
+]] },
 }
