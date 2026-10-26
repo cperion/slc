@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: the interface between the scheduler and an I/O backend.
  *
  * A backend file (slc_io_poll.c, slc_io_uring.c or slc_io_kqueue.c) is linked

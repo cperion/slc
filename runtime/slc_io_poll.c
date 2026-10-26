@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: the poll(2) backend, for any POSIX system.
  *
  * One poller thread waits on every pending operation's descriptor and on a

@@ -1,0 +1,2 @@
+# Preserve the verbatim upstream exception text, including its final blank line.
+COPYING.RUNTIME whitespace=-blank-at-eof

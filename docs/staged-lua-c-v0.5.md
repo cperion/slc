@@ -37,6 +37,7 @@ The resolutions, in the order they matter:
 22. **Fixed-length arrays (§37)**: `Array(T, n)`, a value checked like a slice, viewed as one, and the buffer type of pools and I/O.
 23. **§25 curried the wrong parameter**: `populate(g, scale, n)` partially applied to `2` bound `g`. The parameter order is now `(scale, g, n)`.
 24. **A second backend, in process (§38)**: the same prepared IR built with libgccjit, which mirrors the C emitter call for call and reads the C the compiler contains (runtime header, helpers, templates) instead of copying it. `native(word)` compiles a word into executable memory now and returns it as a Lua function, so values that exist only at start-up can be specialized on; `slc run` runs a program that way.
+25. **Text (§39)**: `Str` views, `Text` built in place with formatting decided while compiling, `Chars(n)` values; the text words are slc, so known text folds and known needles unroll. Range facts now include lower bounds by constants, and an arm that cannot fall through lends its facts to what follows. Field and method access in typed bodies no longer collides with the evaluator's own keys (a struct field named `name` used to read the local's name).
 
 ---
 
@@ -2350,7 +2351,7 @@ end
 
 ## 32.5 What is not checked
 
-A loop guarded by `i < xs.length` still checks `xs[i]`: the evaluator has no range facts (the C compiler often removes the repeated test). Taking a known-length sub-slice first is the way to state that the bound holds.
+A check stays when no recorded fact proves it: facts are kept per path, over values that cannot change behind the compiler's back (above), and are not carried through a `Bool` that stored a comparison (`ok = i < n; if ok then ... xs[i]`), nor across loop rounds once a variable changes. Taking a known-length sub-slice first is a way to state a bound the compiler cannot see.
 
 ---
 
@@ -3284,6 +3285,83 @@ Everything above, with libgccjit 13 or later on 64-bit targets. Compiling a modu
 
 ---
 
+# 39. Text
+
+Three types, one per role, each fitting the memory model as it is: views never outlive what they view, resizable storage lives on data stacks, and values are copied.
+
+| Type | Role | Storage | Store in a struct | Send to a task |
+|---|---|---|---|---|
+| `Str` | a view of text | someone else's bytes | no | no |
+| `Text` | text being built | its own data stack (it is `Grow U8`) | as a field created in place | no |
+| `Chars(n)` | short text as a value | inline: a length and `n` bytes | yes | yes |
+
+## 39.1 Str
+
+`Str` is to text what `Slice U8` is to bytes: `{ptr, len}` in C, `s.length`, a checked `s[i]` (a `U8`), `s:sub(a, b)`, and the same lifetime rules. A Lua string where a `Str` is expected is a literal, known while compiling, and so are its bytes and its length. Text is compared with words, not operators.
+
+| Word | Gives |
+|---|---|
+| `s:equals(t)`, `s:starts_with(t)`, `s:ends_with(t)` | `Bool` |
+| `s:find(t)` | `oneof { at: U32, missing: Unit }` |
+| `s:compare(t)` | `oneof { less, same, greater }` (bytes, then length) |
+| `s:trim()` | `Str` without leading and trailing spaces, tabs, CR, LF |
+| `s:split(",") do(part) ... end` | each part between one-byte separators |
+| `s:lines() do(line) ... end` | each line, without a last empty one |
+| `s:parse(T)` | `oneof { value: T, bad: Unit }` for any integer `T`; overflow is `bad` |
+| `Str.of(x)` | a view of a `Slice U8` or a `CString` (`strlen` once) |
+
+These words are written in slc (`lib/str.slc`), so they specialize like any other. Over text known while compiling they run while compiling (`assert(host(word_count("the quick  brown fox")) == 4)`). With a known needle, the method picks a variant that takes the needle as a Lua string, a compile-time parameter, so the loop over it is Lua's and unrolls:
+
+```lua
+local is_world = do(name: Str): Bool = name:equals("world")
+```
+
+```c
+bool is_world(Str name) {
+    if (name.len != 5u) {
+        return false;
+    }
+    bool same = name.ptr[0u] == 119u;
+    same = same && name.ptr[1u] == 111u;
+    same = same && name.ptr[2u] == 114u;
+    same = same && name.ptr[3u] == 108u;
+    same = same && name.ptr[4u] == 100u;
+    return same;
+}
+```
+
+There are no bounds checks: when an arm of an `if` cannot fall through, what follows is reached only through the other arm, so the facts of that arm hold for the rest of the block. `name.len != 5u` returning makes `name.len >= 5` known, and a constant index below a known lower bound needs no check (the range facts of §32.2, extended to `==`, `>=` and `>` against constants).
+
+## 39.2 Text
+
+`Text` is `Grow U8` with text words, created in place like any `Grow`: `local out: Text = Text {}`.
+
+* `out:write(a, b, ...)` appends each value as text. Known pieces (Lua strings and numbers, known values, known `Str`) are joined while compiling into one literal; each runtime value gets the conversion its type needs: integers in decimal, `Bool` as `true`/`false`, floats as the shortest text that reads back as the same value, `Str` and `CString` as their bytes. No format string exists at run time.
+* `out:str() do(s) ... end` lends the text as a `Str`, while it cannot grow (like `Grow:view`).
+* `out:clear()`, `out:push(byte)`, `out.length`, `out[i]`.
+
+```c
+    slc_grow_write_bytes(&out, (uint8_t *)"n = ", 4u);
+    slc_grow_write_u64(&out, n);
+    slc_grow_write_bytes(&out, (uint8_t *)", ok = ", 7u);
+    slc_grow_write_bool(&out, ok);
+    slc_grow_write_bytes(&out, (uint8_t *)", unit = 1.5", 12u);
+```
+
+(from `out:write("n = ", n, ", ok = ", ok, ", unit = ", 1.5)` in `examples/strings.slc`.)
+
+## 39.3 Chars(n)
+
+`Chars(n)` holds up to `n` bytes inline, with a length: a value like any struct, so it can be a field, a message, a pool slot and (later) a map key. `Chars(16)(s)` fills one from text: longer known text is rejected while compiling (`Chars(2) holds 2 bytes; this text has 3`), longer runtime text traps. `c:str()` views it and `c.length` is its length.
+
+A struct field cannot be a `Str` (`field 's' is a Str, a view of someone else's bytes; store text as Chars(n), or keep it in a Text`).
+
+## 39.4 What the prototype implements
+
+Everything above, on both backends (`examples/strings.slc`, `tests/strings_main.c`). Not yet: UTF-8 words (`s:runes()`, `utf8.valid`), `s:cstring()` for runtime text, `Map` and `StrMap` (designed in `docs/alpha-design.md`, §2.3), and `find` faster than the obvious algorithm.
+
+---
+
 # Appendix A. The prototype
 
 The prototype (`slc`) implements this document except where marked. It needs LuaJIT, LPeg and a C99 compiler; the second backend (§38) also needs libgccjit.
@@ -3314,6 +3392,7 @@ luajit tests/run.lua                  compile, check and run every example, on b
 | C rules over libgccjit; the reader for the compiler's own C | `slc/cjit.lua`, `slc/gccjit_h.lua` |
 | What only a header knows: constants, layouts, variables | `slc/probe.lua` |
 | Run it now: runtime library, `native`, `slc.load` | `slc/native.lua` |
+| Text: `Str`, `Text`, `Chars(n)`; the text words | `slc/strings.lua`, `lib/str.slc` |
 | Runtime: data stacks, traps, tokens, slice checks | `runtime/slc_rt.h`, `runtime/slc_rt.c` |
 | Runtime: scheduler, tasks, channels, pools, timers | `runtime/slc_tasks.c` |
 | Runtime: I/O backends (link one) | `runtime/slc_io_poll.c`, `runtime/slc_io_uring.c`, `runtime/slc_io_kqueue.c`, over `runtime/slc_io_posix.c` |

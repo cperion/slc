@@ -20,6 +20,8 @@ uint32_t entry(uint32_t x) {
 
 Start with [Designing and writing SLC](docs/designing-and-writing-slc.md).
 [The specification](docs/staged-lua-c-v0.5.md) owns the language and ABI rules.
+[The alpha roadmap](docs/alpha-design.md) separates the current text/fuzzing prototype
+from planned maps, broader fuzzing and the embedded distribution.
 
 ## Requirements
 
@@ -84,6 +86,8 @@ See the specification for io_uring/kqueue support and validation limits.
 | Native types and exact folding | `slc/types.lua`, `slc/fold.lua` |
 | Specialization, state, words and control | `slc/stage.lua`, `slc/syntax.lua` |
 | Goose storage | `slc/memory.lua` |
+| Text types and library | `slc/strings.lua`, `lib/str.slc` |
+| Differential fuzzing | `tests/fuzz/gen.lua`, `tests/fuzz/fuzz.lua` |
 | C / libgccjit backends | `slc/cgen.lua`, `slc/jitgen.lua` |
 | Shared C rules / compiler-owned C reader | `slc/cjit.lua`, `slc/gccjit_h.lua` |
 | Header probes / in-process execution | `slc/probe.lua`, `slc/native.lua` |
@@ -92,5 +96,27 @@ See the specification for io_uring/kqueue support and validation limits.
 
 The macro layer is project source, **not a runtime bundle**. See
 [its integration notes](docs/luamacro/INTEGRATION.md) and
-[third-party attribution](THIRD_PARTY.md). No new project-wide license is assigned
-by this repository bootstrap.
+[third-party attribution](THIRD_PARTY.md).
+
+## Licence
+
+SLC is free software under the GNU General Public License, version 3 or later
+([COPYING](COPYING)). The runtime library (`runtime/`) and compiler-generated
+runtime/header helpers additionally carry the GCC Runtime Library Exception,
+version 3.1 ([COPYING.RUNTIME](COPYING.RUNTIME)), as specified by the incoming
+prototype and alpha design. Third-party notices retain their own terms.
+
+## Differential fuzzing
+
+With LuaJIT/LPeg and libgccjit configured as above:
+
+```sh
+luajit tests/fuzz/fuzz.lua --regressions
+luajit tests/fuzz/fuzz.lua --seed 424242 --count 10 --no-shrink --keep
+```
+
+The fuzzer compares known/native/split runs with C at `-O0` and `-O2`; every tenth
+program also needs the C compiler's UBSan runtime. A failed compiler/link command
+is not evidence of a value mismatch: inspect its diagnostic and keep the seed and
+scratch output. The alpha roadmap specifies the broader planned campaign; these
+commands do not establish that its nightly qualification gate has been met.

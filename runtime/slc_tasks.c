@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: tasks, channels, timers. See slc_rt.h and §36.
  *
  * Tasks are compiled state machines. Workers run them from one run queue; a

@@ -52,6 +52,9 @@ end
 local function wrap(t, x)
     if t.bits == 64 then
         if t.signed then return ffi.cast(i64, x) end
+        -- a negative Lua number goes through int64_t: converting a negative double
+        -- straight to uint64_t is not modular (it gives 2^63 on x86-64)
+        if type(x) == 'number' and x < 0 then return ffi.cast(u64, ffi.cast(i64, x)) end
         return ffi.cast(u64, x)
     end
     if is_cdata(x) then

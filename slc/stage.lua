@@ -111,6 +111,8 @@ local function is_known(v)
     if not is_value(v) then return false end
     if v.k == 'known' then return true end
     if v.k == 'agg' then
+        -- text known while compiling: a literal or a part of one
+        if rawget(v.T, 'is_str') then return S.known_text(v) ~= nil end
         for _, f in ipairs(v.T.fields) do
             if not is_known(v.f[f.name]) then return false end
         end
@@ -750,6 +752,8 @@ end
 
 -- the value of anything usable as an operand of type t (t may be nil: infer)
 local function value_of(x, t, what)
+    -- a Lua string where text is expected: a Str literal
+    if type(x) == 'string' and t and rawget(t, 'is_str') then return S.str_literal(x) end
     if is_place(x) then
         x = cur():read(x)
     end
@@ -804,6 +808,7 @@ local function coerce(x, t, what)
 end
 S.coerce = coerce
 S.value_of = value_of
+S.describe = describe
 
 -- smart constructors -----------------------------------------------------------------------
 
@@ -917,6 +922,7 @@ local function compare(op, a, b)
         return dyn(types.Bool, { op = 'cmp', o = op, a = ex(av), b = ex(bv), T = types.Bool })
     end
     if t.kind == 'ptr' then fail('pointers are compared only with == and ~=; ordering is not offered', 3) end
+    if rawget(t, 'is_str') then fail('text is compared with words, not operators: s:equals(t), s:compare(t)', 3) end
     if rawget(t, 'slice_elem') then fail('slices cannot be compared: two views may name overlapping storage', 3) end
     if not types.is_scalar(t) then fail('cannot compare ' .. t.display .. ' values', 3) end
     local av = value_of(a, t, 'comparison')
@@ -1020,6 +1026,11 @@ local function member(x, key)
     end
     local ip = rawget(t, 'index_place')
     if ip and (type(key) == 'number' or is_staged(key)) then return ip(x, key) end
+    if rawget(t, 'is_str') then return S.member_str(x, key) end
+    if rawget(t, 'chars_cap') then
+        local m = S.member_chars(x, key)
+        if m ~= nil then return m end
+    end
     if rawget(t, 'slice_elem') then return member_slice(x, key) end
     if t.kind == 'sum' then
         fail(("%s is a sum: its payload is reached by matching (s { %s = do(p) ... end, ... }), "
@@ -1044,6 +1055,18 @@ local function member(x, key)
     local bm = rawget(t, 'builtin_methods')
     if bm and bm[key] then return bm[key] end
     fail(("%s has no field or method '%s'"):format(t.display, tostring(key)), 3)
+end
+
+-- obj.key and obj:key(...) in typed bodies: a native value's members (whatever
+-- their names), or an ordinary Lua index
+function S.dot(obj, key)
+    if is_staged(obj) then return member(obj, key) end
+    return obj[key]
+end
+function S.mcall(obj, key, ...)
+    local f = S.dot(obj, key)
+    if f == nil then fail(("no method '%s' on %s"):format(tostring(key), describe(obj)), 2) end
+    return f(obj, ...)
 end
 
 V.__index = function(x, key) return member(x, key) end
@@ -1110,6 +1133,11 @@ Type.__call = function(t, x)
     end
     if t.kind == 'opaque' then
         fail(('%s is an opaque C type: it exists only behind a Ptr'):format(t.display), 2)
+    end
+    if t.kind == 'struct' and rawget(t, 'chars_cap') and (x == nil or type(x) == 'string' or is_staged(x)
+        or (type(x) == 'table' and next(x) == nil)) then
+        -- Chars(n) from text (slc.strings)
+        return rawget(t, 'construct')(x)
     end
     if t.kind == 'struct' then
         if getmetatable(x) == S.Keyed then
@@ -1456,6 +1484,18 @@ local function facts_of(e, positive, out)
             local kl, kh = stable_key(lo), stable_key(hi)
             if kl and kh then out[#out + 1] = { lo = kl, hi = kh } end
         end
+        -- a lower bound by a constant: x == c, x >= c, x > c (either way round)
+        local x, c, rel = nil, nil, o
+        if e.b.op == 'const' and type(e.b.v) == 'number' then x, c = e.a, e.b.v
+        elseif e.a.op == 'const' and type(e.a.v) == 'number' then
+            x, c = e.b, e.a.v
+            rel = ({ lt = 'gt', gt = 'lt', le = 'ge', ge = 'le', eq = 'eq', ne = 'ne' })[o]
+        end
+        if x then
+            local min = (rel == 'eq' or rel == 'ge') and c or (rel == 'gt' and c + 1) or nil
+            local kx = min and stable_key(x)
+            if kx then out[#out + 1] = { hi = kx, min = min } end
+        end
     elseif e.op == 'un' and e.o == 'not' then
         facts_of(e.a, not positive, out)
     elseif (e.op == 'and' and positive) or (e.op == 'or' and not positive) then
@@ -1468,15 +1508,24 @@ end
 function Builder:add_facts(fs)
     self.facts = self.facts or {}
     for _, f in ipairs(fs) do
-        self.facts[#self.facts + 1] = { lo = f.lo, hi = f.hi, path = self.path or '' }
+        self.facts[#self.facts + 1] = { lo = f.lo, hi = f.hi, min = f.min, path = self.path or '' }
     end
 end
 
 -- is lo < hi known on this path?
 function Builder:proves_less(lo, hi)
-    local kl, kh = stable_key(lo), stable_key(hi)
-    if not (kl and kh) then return false end
+    local kh = stable_key(hi)
+    if not kh then return false end
     local here = self.path or ''
+    -- a constant below a known lower bound
+    if lo.op == 'const' and type(lo.v) == 'number' then
+        for i = #(self.facts or {}), 1, -1 do
+            local f = self.facts[i]
+            if f.min and f.hi == kh and lo.v < f.min and here:sub(1, #f.path) == f.path then return true end
+        end
+    end
+    local kl = stable_key(lo)
+    if not kl then return false end
     for i = #(self.facts or {}), 1, -1 do
         local f = self.facts[i]
         if f.lo == kl and f.hi == kh and here:sub(1, #f.path) == f.path then return true end
@@ -1515,6 +1564,9 @@ function S.if_(c, tf, ef)
     b:emit(stmt)
     b.state = b:join({ { state = ast, dead = adead, block = ablk },
                        { state = bst, dead = bdead, block = bblk } }, s0)
+    -- when one arm cannot fall through, what follows is reached only through the
+    -- other: its facts hold for the rest of this block (`if n ~= 5 then return end`)
+    if adead and not bdead then b:add_facts(fb) elseif bdead and not adead then b:add_facts(fa) end
     if #ablk == 0 and #bblk == 0 then
         -- nothing residual: drop the empty conditional
         for i = #b.block, 1, -1 do
@@ -1809,6 +1861,7 @@ local function arg_key(v)
         return v.T.display .. '.' .. v.tag .. '(' .. (q ~= nil and arg_key(q) or '') .. ')'
     end
     if v.k == 'known' then return v.T.display .. '=' .. fold.show(v.T, v.v) end
+    if v.k == 'agg' and rawget(v.T, 'is_str') and is_known(v) then return 'Str' .. ('%q'):format(S.known_text(v)) end
     if v.k == 'agg' and is_known(v) then
         local parts = {}
         for _, f in ipairs(v.T.fields) do parts[#parts + 1] = arg_key(v.f[f.name]) end
@@ -3732,6 +3785,7 @@ function S.Slice(x, n)
     fail('Slice(T) is a type; Slice(p, n) views n elements at pointer p (a view of a Grow is g:view() do(xs) ... end)', 2)
 end
 S.make_slice = make_slice
+S.slice_parts, S.member_slice, S.bound_check = slice_parts, member_slice, bound_check
 
 -- fixed-length arrays ------------------------------------------------------------------------------
 -- a[i] is checked like a slice's (at compile time when the index is known),

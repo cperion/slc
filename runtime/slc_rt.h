@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: Goose-style data stacks, managed stores, generational IDs.
  *
  * A data stack is a growable byte buffer. Every resizable value (a store, a
@@ -129,6 +130,19 @@ static inline void slc_release(size_t stack, size_t base) {
 /* checked slice access */
 #define SLC_BOUND(i, n) do { if ((size_t)(i) >= (size_t)(n)) slc_trap("slice index out of range"); } while (0)
 #define SLC_RANGE(a, b, n) do { if ((size_t)(a) > (size_t)(b) || (size_t)(b) > (size_t)(n)) slc_trap("slice range out of bounds"); } while (0)
+
+/* text (slc.strings): Text is a Grow of bytes; these append to one, and
+ * Chars(n) is filled from a view. Each traps on misuse as Grow's push does. */
+void slc_grow_write_bytes(slc_grow *g, const uint8_t *p, uint32_t n);
+void slc_grow_write_u64(slc_grow *g, uint64_t v);
+void slc_grow_write_i64(slc_grow *g, int64_t v);
+void slc_grow_write_bool(slc_grow *g, bool v);
+void slc_grow_write_f64(slc_grow *g, double v);
+void slc_grow_clear(slc_grow *g);
+uint32_t slc_chars_fill(uint8_t *dst, uint32_t cap, const uint8_t *p, uint32_t n);
+uint32_t slc_strlen(const char *s);
+/* the shortest text that reads back as v: buf holds 32 bytes; returns the length */
+uint32_t slc_format_f64(char *buf, double v);
 
 static inline bool slc_id_eq(slc_id a, slc_id b) {
     return a.token == b.token && a.slot == b.slot && a.gen == b.gen;

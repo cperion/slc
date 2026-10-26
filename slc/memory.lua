@@ -408,6 +408,9 @@ local function checked(make, what)
     end
 end
 
+-- for slc.strings: Text is Grow U8 with text methods
+Mem.receiver, Mem.check_structural, Mem.effect, Mem.addr = receiver, check_structural, effect, addr
+
 Mem.Store = checked(types.store, 'Store')
 Mem.Grow = checked(types.grow, 'Grow')
 Mem.Id = checked(types.id, 'Id')

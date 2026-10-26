@@ -692,4 +692,31 @@ export f
 end
 export f
 ]] },
+    { name = 'text compared with ==', expect = 'text is compared with words, not operators',
+      src = [[local f = do(a: Str): Bool = a == "x"
+export f
+]] },
+    { name = 'a known index outside known text', expect = 'index-range: index 3 is outside text of length 3',
+      src = [[local f = do(): U8
+    local s: Str = "abc"
+    return s[3]
+end
+export f
+]] },
+    { name = 'known text longer than its Chars(n)', expect = 'Chars(2) holds 2 bytes; this text has 3',
+      src = [[local f = do(): U32
+    local c: Chars(2) = Chars(2)("abc")
+    return c.length
+end
+export f
+]] },
+    { name = 'a separator of two bytes', expect = 'split: the separator is one byte',
+      src = [[local f = do(s: Str): Unit
+    s:split(", ") do(p) end
+end
+export f
+]] },
+    { name = 'a Str stored in a struct', expect = "field 's' is a Str, a view of someone else's bytes",
+      src = [[local Holder = struct { s: Str }
+]] },
 }

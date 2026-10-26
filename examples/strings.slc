@@ -1,0 +1,92 @@
+-- Text (§39): Str views, Text built in place, Chars(n) as values. The text
+-- words are slc (lib/str.slc): over known text they run while compiling, and a
+-- known needle unrolls into byte comparisons.
+
+-- a known needle unrolls: one comparison per byte, no loop, no bounds checks
+local is_world = do(name: Str): Bool = name:equals("world")
+export is_world
+
+-- words separated by spaces
+local word_count = do(text: Str): U32
+    local n: U32 = 0
+    text:split(" ") do(part)
+        if part.length > 0 then
+            n = n + 1
+        end
+    end
+    return n
+end
+export word_count
+assert(host(word_count("the quick  brown fox")) == 4)
+
+-- the sum of a line of integers; fields that are not numbers count as 0
+local line_sum = do(line: Str): I64
+    local total: I64 = 0
+    line:split(",") do(field)
+        field:trim():parse(I64) {
+            value = do(v) total = total + v end,
+            bad = do() end,
+        }
+    end
+    return total
+end
+export line_sum
+assert(host(line_sum("1, 2,-3, x, 40")) == 40)
+
+-- a setting from a config text: the line that starts with "port="
+local port_of = do(config: Str): U32
+    local port: U32 = 0
+    config:lines() do(line)
+        if line:starts_with("port=") then
+            line:sub(5, line.length):parse(U32) {
+                value = do(v) port = v end,
+                bad = do() end,
+            }
+        end
+    end
+    return port
+end
+export port_of
+
+-- where a word is, or 99
+local where = do(s: Str): U32
+    return s:find("fox") {
+        at(i) = i,
+        missing() = 99,
+    }
+end
+export where
+
+-- building text: known pieces join while compiling, values are formatted
+local render_matches = do(n: U32, ok: Bool, expected: Str): Bool
+    local out: Text = Text {}
+    out:write("n = ", n, ", ok = ", ok, ", unit = ", 1.5)
+    local same: Bool = false
+    out:str() do(s)
+        same = s:equals(expected)
+    end
+    return same
+end
+export render_matches
+
+-- short text as a value: copied, stored, compared
+local Person = struct { name: Chars(16), age: U32 }
+local remember = do(name: Str, age: U32): U32
+    local p: Person = Person { name = Chars(16)(name), age = age }
+    local back: U32 = 0
+    if p.name:str():equals(name) then
+        back = p.name.length
+    end
+    return back + p.age
+end
+export remember
+
+-- ordering
+local order = do(a: Str, b: Str): I32
+    return a:compare(b) {
+        less() = I32(-1),
+        same() = 0,
+        greater() = 1,
+    }
+end
+export order

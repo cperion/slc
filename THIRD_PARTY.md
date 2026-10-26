@@ -45,6 +45,9 @@ of SLC. See `docs/luamacro/INTEGRATION.md` for the active layout.
 
 ## Project licensing
 
-This bootstrap does not assign a new project-wide license. Third-party notices
-continue to apply to their respective source files; historical statements about
-the importing repository's license do not choose a license for this whole project.
+The incoming prototype declares SLC GPL version 3 or later (`COPYING`). Its runtime
+and generated runtime/header helpers additionally carry GCC Runtime Library
+Exception 3.1 (`COPYING.RUNTIME`), reflected in the runtime's SPDX notices and the
+alpha design. This does not relicense the LuaMacro/lexer sources above: their
+original notices and permissions remain in force. Historical statements about the
+previous importing repository's license are not SLC's licensing authority.

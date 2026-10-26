@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: the io_uring backend (Linux), on raw system calls.
  *
  * Submitting writes a submission entry and enters the kernel at once; one

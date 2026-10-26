@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: the kqueue backend (macOS, the BSDs; on Linux through libkqueue).
  *
  * Submitters queue operations and trigger a user event; the poller thread

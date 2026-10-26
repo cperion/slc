@@ -76,6 +76,30 @@ for _, f in ipairs(examples) do
     end
 end
 
+-- Text's C helper accepts unrelated buffers and self-aliases across growth.
+-- Keep pointer comparisons separate from UBSan's pointer-overflow instrumentation.
+-- Pointer-subtract instrumentation also flags intentional uintptr_t address math.
+do
+    local rt = root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c '
+        .. root .. '/runtime/slc_io_posix.c ' .. root .. '/runtime/slc_io_poll.c'
+    local main = root .. '/tests/text_runtime_main.c'
+    local bin = build .. '/slc_text_runtime'
+    local ok, out = sh(('%s %s %s -pthread -o %s && %s'):format(CC, main, rt, bin, bin))
+    check('Text runtime: aliases and buffer growth', ok, out)
+    local clang = sh('command -v clang')
+    if clang then
+        for i, flags in ipairs { 'address,undefined', 'address,pointer-compare' } do
+            local exe = bin .. '.san' .. i
+            local oks, outs = sh(('clang -std=c99 -Wall -Wextra -Werror -O1 -g -fsanitize=%s '
+                .. '-fno-sanitize-recover=all -fno-omit-frame-pointer -I%s/runtime %s %s -pthread -o %s '
+                .. '&& ASAN_OPTIONS=detect_leaks=1:detect_invalid_pointer_pairs=2 %s'):format(flags, root, main, rt, exe, exe))
+            check('Text runtime: ' .. flags, oks, outs)
+        end
+    else
+        print('skip  Text runtime sanitizers: clang not found')
+    end
+end
+
 -- the gccjit backend: the same harnesses, linked against libgccjit's object
 -- files, and the in-process backend
 local have_jit = sh(('luajit -e "package.path=[[%s/?.lua;]]..package.path; require([[slc.cjit]]).lib()"'):format(root))
@@ -108,6 +132,14 @@ if have_jit then
     check('in-process backend', okn, outn)
 else
     print('skip  gccjit backend: libgccjit not found')
+end
+
+-- the differential fuzzer: its saved findings, and a few new programs
+if have_jit then
+    local okr, outr = sh(('luajit %s/tests/fuzz/fuzz.lua --regressions'):format(root))
+    check('fuzz regressions agree on every run', okr, outr)
+    local okf, outf = sh(('luajit %s/tests/fuzz/fuzz.lua --seed 424242 --count 5 --no-shrink'):format(root))
+    check('fuzz: 5 programs agree on every run', okf, outf)
 end
 
 -- programs that must be rejected, with a fragment of the expected message

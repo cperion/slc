@@ -88,6 +88,7 @@ function slc.prelude()
     env.band, env.bor, env.bxor, env.shl, env.shr, env.bnot = S.band, S.bor, S.bxor, S.shl, S.shr, S.bnot
     local mem = package.loaded['slc.memory'] or (pcall(require, 'slc.memory') and require 'slc.memory')
     if mem then mem.prelude(env) end
+    require('slc.strings').prelude(env)
     return env
 end
 
@@ -118,6 +119,9 @@ local function locate(path)
         return msg
     end
 end
+
+-- The text methods load their SLC vocabulary lazily through this driver.
+S.import = function(name) return slc.import(name) end
 
 -- import "name": load lib/name.slc (next to slc.lua, or next to the program) once,
 -- and return what it returns, typically a vocabulary table

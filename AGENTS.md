@@ -36,8 +36,10 @@ authorship or published history.
 - The macro engine is ordinary source in `macro.lua` and `macro/`, with SLC's
   extensions in `macro/let.lua` and `macro/slc.lua`. Do not restore a runtime bundle
   bootstrap or edit generated bundles as the source of truth.
-- Preserve LuaMacro/lexer attribution and notices. No project-wide license has been
-  chosen here; do not invent one.
+- Preserve LuaMacro/lexer attribution and notices. Follow the incoming prototype's
+  GPL-3.0-or-later terms and the runtime's GCC Runtime Library Exception 3.1;
+  `COPYING`, `COPYING.RUNTIME` and `THIRD_PARTY.md` record them. Do not invent or
+  silently change licensing terms.
 
 ## Checks and artifacts
 

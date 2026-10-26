@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1 */
 /* slc runtime: POSIX helpers shared by the I/O backends. */
 #ifndef SLC_IO_POSIX_H
 #define SLC_IO_POSIX_H

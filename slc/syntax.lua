@@ -853,7 +853,9 @@ function G:expr(e)
     elseif k == 'nil' or k == 'true' or k == 'false' then return k
     elseif k == 'vararg' then return '...'
     elseif k == 'paren' then return '(' .. self:expr(e.e) .. ')'
-    elseif k == 'field' then return self:prefix(e.obj) .. '.' .. e.name
+    elseif k == 'field' then
+        -- through __S.dot: a native value's fields never meet the evaluator's own keys
+        return '__S.dot(' .. self:expr(e.obj) .. ', ' .. str(e.name) .. ')'
     elseif k == 'index' then return self:prefix(e.obj) .. '[' .. self:expr(e.key) .. ']'
     elseif k == 'call' and (e.fn.k == 'call' or e.fn.k == 'method') then
         -- a saturating chain: f(a)(b) do ... end accumulates arguments until f is saturated
@@ -883,7 +885,8 @@ function G:expr(e)
         end
         return self:prefix(e.fn) .. '(' .. self:list(e.args) .. ')'
     elseif k == 'method' then
-        return self:prefix(e.obj) .. ':' .. e.name .. '(' .. self:list(e.args) .. ')'
+        local args = self:list(e.args)
+        return '__S.mcall(' .. self:expr(e.obj) .. ', ' .. str(e.name) .. (args ~= '' and (', ' .. args) or '') .. ')'
     elseif k == 'table' then
         local spread = false
         for _, it in ipairs(e.items) do if it.kind == 'spread' then spread = true end end

@@ -1,0 +1,272 @@
+-- The text words: what Str's methods do, written in slc. Over text known while
+-- compiling they run while compiling; over text known in part (a literal
+-- needle, a dynamic haystack) what is known unrolls.
+--
+-- Methods call these (s:find(t) is str.find(s, t)); import "str" names them
+-- and their result types directly.
+
+local str = {}
+
+str.Found = oneof { at: U32, missing: Unit }
+str.Order = oneof { less: Unit, same: Unit, greater: Unit }
+
+-- equal bytes; the loop runs over b, so a known b unrolls
+str.equals = do(a: Str, b: Str): Bool
+    if a.length ~= b.length then
+        return false
+    end
+    local i: U32 = 0
+    while i < b.length do
+        if a[i] ~= b[i] then
+            return false
+        end
+        i = i + 1
+    end
+    return true
+end
+
+-- the same, with b known while compiling: b is a Lua string here (a compile-time
+-- parameter), so the loop over it is Lua's and unrolls into one comparison per byte
+str.equals_known = do(a: Str, b): Bool
+    if a.length ~= #b then
+        return false
+    end
+    local same: Bool = true
+    for k = 1, #b do
+        same = same and a[k - 1] == b:byte(k)
+    end
+    return same
+end
+
+str.starts_with_known = do(s: Str, prefix): Bool
+    if s.length < #prefix then
+        return false
+    end
+    local same: Bool = true
+    for k = 1, #prefix do
+        same = same and s[k - 1] == prefix:byte(k)
+    end
+    return same
+end
+
+str.ends_with_known = do(s: Str, suffix): Bool
+    if s.length < #suffix then
+        return false
+    end
+    local same: Bool = true
+    for k = 1, #suffix do
+        same = same and s[s.length - (#suffix - k + 1)] == suffix:byte(k)
+    end
+    return same
+end
+
+-- find with a needle known while compiling: each position is tested by an
+-- unrolled comparison
+str.find_known = do(s: Str, t): str.Found
+    if #t > s.length then
+        return str.Found.missing()
+    end
+    local last: U32 = s.length - #t
+    local i: U32 = 0
+    while i <= last do
+        local hit: Bool = true
+        for k = 1, #t do
+            hit = hit and s[i + (k - 1)] == t:byte(k)
+        end
+        if hit then
+            return str.Found.at(i)
+        end
+        i = i + 1
+    end
+    return str.Found.missing()
+end
+
+str.starts_with = do(s: Str, prefix: Str): Bool
+    if prefix.length > s.length then
+        return false
+    end
+    local i: U32 = 0
+    while i < prefix.length do
+        if s[i] ~= prefix[i] then
+            return false
+        end
+        i = i + 1
+    end
+    return true
+end
+
+str.ends_with = do(s: Str, suffix: Str): Bool
+    if suffix.length > s.length then
+        return false
+    end
+    local at: U32 = s.length - suffix.length
+    local i: U32 = 0
+    while i < suffix.length do
+        if s[at + i] ~= suffix[i] then
+            return false
+        end
+        i = i + 1
+    end
+    return true
+end
+
+-- the first position of t in s
+str.find = do(s: Str, t: Str): str.Found
+    if t.length > s.length then
+        return str.Found.missing()
+    end
+    local last: U32 = s.length - t.length
+    local i: U32 = 0
+    while i <= last do
+        local j: U32 = 0
+        while j < t.length and s[i + j] == t[j] do
+            j = j + 1
+        end
+        if j == t.length then
+            return str.Found.at(i)
+        end
+        i = i + 1
+    end
+    return str.Found.missing()
+end
+
+-- byte order, then length
+str.compare = do(a: Str, b: Str): str.Order
+    local i: U32 = 0
+    while i < a.length and i < b.length do
+        if a[i] < b[i] then
+            return str.Order.less()
+        end
+        if a[i] > b[i] then
+            return str.Order.greater()
+        end
+        i = i + 1
+    end
+    if a.length < b.length then
+        return str.Order.less()
+    end
+    if a.length > b.length then
+        return str.Order.greater()
+    end
+    return str.Order.same()
+end
+
+local space = do(c: U8): Bool = c == 32 or c == 9 or c == 10 or c == 13
+
+str.trim = do(s: Str): Str
+    local a: U32 = 0
+    local b: U32 = s.length
+    while a < b and space(s[a]) do
+        a = a + 1
+    end
+    while b > a and space(s[b - 1]) do
+        b = b - 1
+    end
+    return s:sub(a, b)
+end
+
+-- the parts between separator bytes, each given to body
+str.split = do(s: Str, sep: U8, body): Unit
+    local start: U32 = 0
+    local i: U32 = 0
+    while i < s.length do
+        if s[i] == sep then
+            body(s:sub(start, i))
+            start = i + 1
+        end
+        i = i + 1
+    end
+    body(s:sub(start, s.length))
+end
+
+-- the lines: the parts between newlines, without a last empty one
+str.lines = do(s: Str, body): Unit
+    local start: U32 = 0
+    local i: U32 = 0
+    while i < s.length do
+        if s[i] == 10 then
+            body(s:sub(start, i))
+            start = i + 1
+        end
+        i = i + 1
+    end
+    if start < s.length then
+        body(s:sub(start, s.length))
+    end
+end
+
+-- numbers: s:parse(T) gives oneof { value: T, bad: Unit }
+local parsed = {}
+function str.parsed(t)
+    if not parsed[t] then
+        local Parsed = oneof { value: t, bad: Unit }
+        Parsed.name, Parsed.display = 'Parsed' .. t.name, 'Parsed' .. t.name
+        parsed[t] = Parsed
+    end
+    return parsed[t]
+end
+
+for _, T in ipairs { U8, U16, U32, U64 } do
+    local P = str.parsed(T)
+    str['parse_' .. T.name] = do(s: Str): P
+        if s.length == 0 then
+            return P.bad()
+        end
+        local max: T = bnot(T(0))
+        local v: T = 0
+        local i: U32 = 0
+        while i < s.length do
+            local c: U8 = s[i]
+            if c < 48 or c > 57 then
+                return P.bad()
+            end
+            local d: T = T(c - 48)
+            if v > (max - d) / 10 then
+                return P.bad()
+            end
+            v = v * 10 + d
+            i = i + 1
+        end
+        return P.value(v)
+    end
+end
+
+for _, pair in ipairs { { I8, U8 }, { I16, U16 }, { I32, U32 }, { I64, U64 } } do
+    local T, U = pair[1], pair[2]
+    local P = str.parsed(T)
+    str['parse_' .. T.name] = do(s: Str): P
+        local i: U32 = 0
+        local negative: Bool = false
+        if s.length > 0 and (s[0] == 45 or s[0] == 43) then
+            negative = s[0] == 45
+            i = 1
+        end
+        if i == s.length then
+            return P.bad()
+        end
+        -- the magnitude, up to 2^(bits-1) - 1, or 2^(bits-1) when negative
+        local limit: U = shr(bnot(U(0)), 1)
+        if negative then
+            limit = limit + 1
+        end
+        local m: U = 0
+        while i < s.length do
+            local c: U8 = s[i]
+            if c < 48 or c > 57 then
+                return P.bad()
+            end
+            local d: U = U(c - 48)
+            if m > (limit - d) / 10 then
+                return P.bad()
+            end
+            m = m * 10 + d
+            i = i + 1
+        end
+        if negative then
+            return P.value(T(U(0) - m))
+        end
+        return P.value(T(m))
+    end
+end
+
+return str
