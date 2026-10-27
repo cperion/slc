@@ -2,7 +2,7 @@
 local Point = struct { x: U32, y: U32 }
 
 local inferred_branch = do(flag: Bool, x: U32): U32
-    local p = Point { x = x, y = 2 }
+    local p = Point { .x, y = 2 }
     local n = x
     if flag then
         n = n + 3

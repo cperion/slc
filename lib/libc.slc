@@ -98,14 +98,14 @@ local with_buffer = do(size: U32, body): Bool
     if p == null U8 then
         return false
     end
-    local buffer = Buffer { data = p, size = size }
+    local buffer = Buffer { data = p, .size }
     body(Ref buffer)
     free p
     return true
 end
 
 return {
-    FILE = FILE, File = File, Buffer = Buffer,
-    say = say, with_file = with_file, each_byte = each_byte, with_buffer = with_buffer,
-    printf = printf, fopen = fopen, fclose = fclose, malloc = malloc, free = free,
+    .FILE, .File, .Buffer,
+    .say, .with_file, .each_byte, .with_buffer,
+    .printf, .fopen, .fclose, .malloc, .free,
 }

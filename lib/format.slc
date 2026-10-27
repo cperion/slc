@@ -62,7 +62,7 @@ local function trial(value: F64, precision: I32): Trial
     local p = CP(Ptr text.bytes)
     local n = snprintf(p, U64 32, "%.*g", precision, value)
     text.len = U32 n
-    return Trial { text = text, parsed = strtod(p, null CP) }
+    return Trial { .text, parsed = strtod(p, null CP) }
 end
 format.f64 = do(value: F64): FloatDigits
     if value ~= value then return FloatDigits "nan" end

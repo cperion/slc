@@ -104,7 +104,7 @@ export roundtrip
 local Point = struct { x: I32, y: I32 }
 local moved_x = do(p: Point, dx: I32): Point = Point { ...p, x = p.x + dx }
 local shift = do(x: I32, y: I32): I32
-    local q: Point = moved_x(Point { x = x, y = y }, 5)
+    local q: Point = moved_x(Point { .x, .y }, 5)
     return q.x * 100 + q.y
 end
 export shift

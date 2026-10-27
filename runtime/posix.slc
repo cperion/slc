@@ -204,7 +204,7 @@ return function(types)
     export slc_io_pipe
     export slc_io_listen
     export slc_io_local_port
-    return { ReadOp = ReadOp, Address = Address, address = address,
+    return { .ReadOp, .Address, .address,
         prepare = slc_io_prepare, offload = slc_io_offload_file, try = slc_io_try,
         abandon = slc_io_abandon, wants_write = slc_io_wants_write,
         nonblocking = slc_io_nonblocking, pipe = slc_io_pipe }

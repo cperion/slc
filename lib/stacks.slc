@@ -15,7 +15,7 @@ local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.
 local move = extern("memmove", { Ptr U8, Ptr U8, U64 }, Ptr U8, { header = "<string.h>" })
 local trap = extern("slc_trap", { CString }, Unit, { header = h })
 local maximum = U64 0xffffffffffffffffULL
-local stacks = { Stack = Stack, Set = Set }
+local stacks = { .Stack, .Set }
 stacks.get = do(index: U64): Ptr Stack
     local context = current()
     if index >= context.n then

@@ -11,7 +11,7 @@ return function(t)
     local Void = opaque "void"
     local BytePtr, SlotPtr = Ptr U8, Ptr Slot
     local header = '"slc_scheduler.h"'
-    local options = { header = header }
+    local options = { .header }
     local lock = extern("pthread_mutex_lock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
     local unlock = extern("pthread_mutex_unlock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
     local trap = extern("slc_trap", { CString }, Unit, options)

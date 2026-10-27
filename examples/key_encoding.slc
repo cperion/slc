@@ -13,7 +13,7 @@ end
 local check_known = do(): Bool
     local text = Chars 4 "a\0b"
     text.bytes[3] = 255  -- unused capacity is not part of the key
-    local key = Key { n = -1, flag = true, text = text, choice = Choice.empty() }
+    local key = Key { n = -1, flag = true, .text, choice = Choice.empty() }
     local actual = digest key
     local encoded = string.rep("\255", 8) .. "\1" .. string.rep("\0", 7)
     .. "\3" .. string.rep("\0", 7) .. "a\0b" .. string.rep("\0", 8)
@@ -24,6 +24,6 @@ assert(host(check_known()))
 local semantic_key_hash = do(n: I64, flag: Bool, text: Str, number: Bool): U64
     local choice = Choice.empty()
     if number then choice = Choice.number(U32 7) end
-    return digest Key { n = n, flag = flag, text = Chars 4 text, choice = choice }
+    return digest Key { .n, .flag, text = Chars 4 text, .choice }
 end
 export semantic_key_hash

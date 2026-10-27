@@ -82,7 +82,7 @@ if path and wanted and native then
     for x in (first .. ','):gmatch '([^,]*),' do field[#field + 1] = x end
     local decimals = #(field[index]:match '%.(%d+)$' or '')
 
-    local decode = native(field_stats { index = index, decimals = decimals })
+    local decode = native(field_stats { .index, .decimals })
 
     local ffi = require 'ffi'
     local body = text:sub(#header + 2)

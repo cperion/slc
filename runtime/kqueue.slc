@@ -40,7 +40,7 @@ return function(t)
     local ReadOpPtr = Ptr t.posix.ReadOp
     local event = do(fd: U64, filter: I16, flags: U16, fflags: U32): Event
         return Event { ident = fd,
-            filter = filter, flags = flags, fflags = fflags, data = 0, udata = null Void }
+            .filter, .flags, .fflags, data = 0, udata = null Void }
     end
     local slc_kqueue_prepare = do(s: Ptr State): Unit
         s.kq = kqueue()

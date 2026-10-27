@@ -72,7 +72,7 @@ export render_matches
 -- short text as a value: copied, stored, compared
 local Person = struct { name: Chars 16, age: U32 }
 local remember = do(name: Str, age: U32): U32
-    local p = Person { name = Chars 16 name, age = age }
+    local p = Person { name = Chars 16 name, .age }
     local back: U32 = 0
     if p.name:str():equals name then
         back = p.name.length

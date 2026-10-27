@@ -108,7 +108,7 @@ local with_fd = do(path: CString, flags: I32, body): Outcome
     if fd < 0 then
         return Outcome.failed errno()
     end
-    local file = Fd { fd = fd, error = 0 }
+    local file = Fd { .fd, error = 0 }
     body(Ref file)
     c_close fd
     if file.error ~= 0 then
@@ -125,7 +125,7 @@ local with_eventfd = do(body): Outcome
     if fd < 0 then
         return Outcome.failed errno()
     end
-    local file = Fd { fd = fd, error = 0 }
+    local file = Fd { .fd, error = 0 }
     body(Ref file)
     c_close fd
     if file.error ~= 0 then
@@ -138,7 +138,7 @@ end
 local Poll = struct { epfd: I32 }
 
 function Poll:watch(fd: I32): I32
-    local ev = Event { events = EPOLLIN, fd = fd }
+    local ev = Event { events = EPOLLIN, .fd }
     return c_epoll_ctl(self.epfd, EPOLL_CTL_ADD, fd, Ptr ev)
 end
 
@@ -156,14 +156,14 @@ local with_epoll = do(body): Outcome
     if epfd < 0 then
         return Outcome.failed errno()
     end
-    local poll = Poll { epfd = epfd }
+    local poll = Poll { .epfd }
     body(Ref poll)
     c_close epfd
     return Outcome.done()
 end
 
 return {
-    O_RDONLY = O_RDONLY, O_WRONLY = O_WRONLY, O_RDWR = O_RDWR, O_CREAT = O_CREAT, O_TRUNC = O_TRUNC,
-    ENOENT = ENOENT, Outcome = Outcome, Fd = Fd, Poll = Poll, Stat = Stat, Event = Event,
-    with_fd = with_fd, with_eventfd = with_eventfd, with_epoll = with_epoll,
+    .O_RDONLY, .O_WRONLY, .O_RDWR, .O_CREAT, .O_TRUNC,
+    .ENOENT, .Outcome, .Fd, .Poll, .Stat, .Event,
+    .with_fd, .with_eventfd, .with_epoll,
 }

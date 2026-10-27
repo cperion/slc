@@ -62,7 +62,7 @@ local Heap = cstruct("slc_timer_heap", header, {
         { "data", Ptr(Ptr Op) }, { "len", U64 }, { "cap", U64 },
     })
 local resize = extern("realloc", { Ptr(Ptr Op), U64 }, Ptr(Ptr Op), { header = "<stdlib.h>" })
-local trap = extern("slc_trap", { CString }, Unit, { header = header })
+local trap = extern("slc_trap", { CString }, Unit, { .header })
 
 local random = do(state: Ptr U64): U64
     local value = state[0]
@@ -324,29 +324,29 @@ local recycle = do(r: Ptr Pool, index: U32): Unit
 end
 
 local bookkeeping = require "runtime.bookkeeping"
-bookkeeping { Task = Task,
-    Op = Op, Heap = Heap, claim = claim, remove = remove, result = done_result }
+bookkeeping { .Task,
+    .Op, .Heap, .claim, .remove, result = done_result }
 
 local lifecycle = require "runtime.lifecycle"
-local lifetime = lifecycle { Scope = Scope, Task = Task, Op = Op, Channel = Channel, Pool = Pool,
-    SlotMeta = SlotMeta, PoolMeta = PoolMeta, Mutex = Mutex,
-    claim_waiter = claim_waiter, Waiters = Waiters }
+local lifetime = lifecycle { .Scope, .Task, .Op, .Channel, .Pool,
+    .SlotMeta, .PoolMeta, .Mutex,
+    .claim_waiter, .Waiters }
 
 local protocol = require "runtime.protocol"
-protocol { Task = Task, Op = Op, Channel = Channel, Pool = Pool, Slot = Slot, lifetime = lifetime,
-    Handle = Handle, Mutex = Mutex, Scope = Scope, receive = receive, send = send,
-    take = take, enqueue = enqueue, unlink = unlink, claim = claim, has_waiter = has_waiter,
-    claim_waiter = claim_waiter, recycle = recycle, done_result = done_result }
+protocol { .Task, .Op, .Channel, .Pool, .Slot, .lifetime,
+    .Handle, .Mutex, .Scope, .receive, .send,
+    .take, .enqueue, .unlink, .claim, .has_waiter,
+    .claim_waiter, .recycle, .done_result }
 
 local io_policy = require "runtime.io"
-local io = io_policy { Op = Op, Task = Task, claim = claim }
+local io = io_policy { .Op, .Task, .claim }
 
 local posix_policy = require "runtime.posix"
-local posix = posix_policy { Op = Op, complete = io.complete }
+local posix = posix_policy { .Op, complete = io.complete }
 
 local backend = os.getenv 'SLC_IO' or 'poll'
 local backend_policy = require('runtime.' .. backend)
-backend_policy { Op = Op, Mutex = Mutex, posix = posix, complete = io.complete }
+backend_policy { .Op, .Mutex, .posix, complete = io.complete }
 
 local slc_op_result = done_result
 export slc_op_result

@@ -10,7 +10,7 @@ local Graph = struct {
 
 function Graph:add(value: U32): Id Node
     return self.nodes:add Node {
-        value = value,
+        .value,
     }
 end
 
