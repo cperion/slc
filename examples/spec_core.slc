@@ -147,6 +147,22 @@ end
 assert(host(count3(1, 2, 3)) == 6)
 export count3
 
+-- syntax §16 a type's own equality: `==` and `~=` run the hook while compiling.
+-- A type with one cannot be a map key (syntax §15.2): `m:has` compares the
+-- semantic encoding, and a second equality could answer differently.
+local Money = struct {
+    cents: I64,
+}
+
+function Money.__eq(a: Money, b: Money): Bool
+    return a.cents == b.cents
+end
+
+local same_money = do(a: Money, b: Money): Bool return a == b end
+local differs_money = do(a: Money, b: Money): Bool return a ~= b end
+assert(host(same_money(Money { cents = 250 }, Money { cents = 250 })) == true)
+assert(host(differs_money(Money { cents = 250 }, Money { cents = 251 })) == true)
+
 -- A `call` in one arm takes the local's address, so it is storage on every path.
 -- A path that still holds a pending value writes it out before its own stores,
 -- not after them at the join.

@@ -1,0 +1,131 @@
+-- DSL exploration: ordinary Lua descriptions and ordinary SLC words, no macros.
+
+-- 1. One formula, multiple interpretations. Lua constructs; SLC computes.
+local formula = do(vocabulary, x)
+    local add = vocabulary.add
+    local multiply = vocabulary.multiply
+    return add(multiply(x, 3), 7)
+end
+local arithmetic = {
+    add = do(a: U32, b: U32): U32 = a + b,
+    multiply = do(a: U32, b: U32): U32 = a * b,
+}
+local printing = {
+    add = do(a, b) = "(" .. a .. " + " .. b .. ")",
+    multiply = do(a, b) = "(" .. a .. " * " .. b .. ")",
+}
+assert(formula(printing, "x") == "((x * 3) + 7)")
+assert(host(formula(arithmetic, U32 5)) == 22)
+local formula_native = do(x: U32): U32 = formula(arithmetic, x)
+export formula_native
+
+-- 2. Push streams. Producers are known words, elements/counts can be runtime.
+local range = do(n: U32, emit): Unit
+    for i: U32 = 1, n do
+        emit i
+    end
+end
+local mapped = do(source, transform, n: U32, emit): Unit
+    source n do(x)
+        emit(transform x)
+    end
+end
+local filtered = do(source, predicate, n: U32, emit): Unit
+    source n do(x)
+        if predicate x then
+            emit x
+        end
+    end
+end
+local doubled = do(x: U32): U32 = x * 2
+local divisible_by_three = do(x: U32): Bool = x % 3 == 0
+local pipeline = filtered(mapped(range, doubled), divisible_by_three)
+local summed = do(source, n: U32): U32
+    local total: U32 = 0
+    source n do(x)
+        total = total + x
+    end
+    return total
+end
+local stream_sum = summed pipeline
+local stream_known = do(): U32 = stream_sum 10
+assert(host(stream_sum(U32 10)) == 36)
+export stream_sum
+export stream_known
+
+-- Composition order matters, even though both compositions fuse.
+local above_five = do(x: U32): Bool = x > 5
+local filter_first = summed(mapped(filtered(range, above_five), doubled))
+local map_first = summed(filtered(mapped(range, doubled), above_five))
+assert(host(filter_first(U32 4)) == 0)
+assert(host(map_first(U32 4)) == 14)
+export filter_first
+export map_first
+-- Known callback identity does not imply known captured data.
+local threshold_sum = do(n: U32, threshold: U32): U32
+    local total: U32 = 0
+    filtered(range, do(x) = x > threshold, n) do(x)
+        total = total + x
+    end
+    return total
+end
+export threshold_sum
+
+-- 3. A data DSL: the very same evaluator accepts static and dynamic instructions.
+local Instruction = oneof { add: U32, multiply: U32, ceiling: U32 }
+local execute = do(instruction: Instruction, x: U32): U32 = instruction {
+    add(n) = x + n,
+    multiply(n) = x * n,
+    ceiling = do(n)
+        if x > n then return n end
+        return x
+    end,
+}
+local script = { Instruction.multiply 3, Instruction.add 7, Instruction.ceiling 100 }
+local scripted = do(x: U32): U32
+    local result = x
+    for i = 1, #script do
+        result = execute(script[i], result)
+    end
+    return result
+end
+local runtime_instruction = do(tag: U32, amount: U32, x: U32): U32
+    if tag == 0 then return execute(Instruction.add amount, x) end
+    if tag == 1 then return execute(Instruction.multiply amount, x) end
+    return execute(Instruction.ceiling amount, x)
+end
+-- A runtime native sum forces the evaluator itself to dispatch at runtime.
+local runtime_sum = do(instruction: Instruction, x: U32): U32 = execute instruction x
+assert(host(scripted(U32 5)) == 22)
+assert(host(scripted(U32 50)) == 100)
+export scripted
+export runtime_instruction
+export runtime_sum
+
+-- 4. An activity DSL: lexical vocabulary plus a completion policy.
+-- Rollback here covers only this private draft, NOT arbitrary external effects.
+local Balance = struct { amount: U32 }
+function Balance:credit(n: U32): Unit
+    self.amount = self.amount + n
+end
+function Balance:debit(n: U32): Unit
+    self.amount = self.amount - n
+end
+local bounded = do(account: Ref Balance, maximum: U32, body): Bool
+    local draft = Balance { ...account }
+    body(Ref draft)
+    if draft.amount > maximum then return false end
+    account = Balance { ...draft }
+    return true
+end
+local activity = do(initial: U32, incoming: U32, maximum: U32): U32
+    local account = Balance { amount = initial }
+    bounded(Ref account, maximum) do(editing...)
+        credit incoming
+        debit 2
+    end
+    return account.amount
+end
+assert(host(activity(U32 10, U32 5, U32 20)) == 13)
+assert(host(activity(U32 10, U32 5, U32 12)) == 10)
+export activity

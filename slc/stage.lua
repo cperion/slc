@@ -963,17 +963,24 @@ S.family_hooks = family_hooks
 -- hooks whose first argument is the receiver may also be written as methods
 local receiver_hooks = { __index = true, __newindex = true }
 S.receiver_hooks = receiver_hooks
+-- the hook a type registers under a `__` name, or nil
+function S.hook_of(t, name)
+    if not t then return nil end
+    local h = rawget(t, name)
+    if not h and receiver_hooks[name] then
+        local m = rawget(t, 'methods')
+        h = m and m[name]
+    end
+    return h
+end
+
 local function type_hook(x, name)
     local t = type_of(x)
     if t and t.kind == 'ref' then t = t.elem end
     if is_value(x) and x.k == 'ref' then t = x.T.elem end
     if not t then return end
     if not in_hook[t] then
-        local h = rawget(t, name)
-        if not h and receiver_hooks[name] then
-            local m = rawget(t, 'methods')
-            h = m and m[name]
-        end
+        local h = S.hook_of(t, name)
         if h then return h, t end
     end
     local fh = family_hooks[rawget(t, 'slice_elem') and 'slice' or t.kind]

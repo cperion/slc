@@ -1917,7 +1917,8 @@ field of a struct. Scope exit and trap recovery release its owned stacks.
 
 Keys of `Map` are integers (including Duration), Bool, Id, Chars, or recursive
 structs and sums of these. General arrays, floating keys, pointers and borrowed
-views are not keys. Values are fixed owned data: numeric scalars, Bool, Id, Chars,
+views are not keys. A key type, or a type its encoding walks through, may not
+define `__eq` (§15.2). Values are fixed owned data: numeric scalars, Bool, Id, Chars,
 arrays, and recursive structs/sums. Standalone Unit, views, pointers, channels,
 atomics and resizable values are not map values. Unit remains valid as a sum
 alternative. `StrMap` accepts Str and ordinary text-to-Str coercions, including
@@ -1960,6 +1961,27 @@ Equality/hash observe typed values, not object bytes: Id's token/slot/generation
 Chars length and used bytes, declared struct fields, and sum tag/active payload.
 Padding, unused Chars capacity and inactive payload do not affect identity.
 
+**One identity per type.** A type with `__eq` (§16) has a second notion of identity:
+`a == b` runs that hook, while a map hashes and compares the encoding above. For
+the same pair the two can disagree, and then `m:has(a)` and `a == b` answer
+differently about values a program treats as equal. The compiler therefore refuses
+a key type that defines `__eq`, and refuses a key type that contains one, however
+deep — `field 'amount' of Pair is Money, which defines __eq`. The fix is structural:
+key the map by the fields that compare structurally, or wrap the type in an `Id`,
+which is identity by token, slot and generation.
+
+```lua
+local Money = struct { cents: I64 }        -- a map value, not a key
+function Money.__eq(a: Money, b: Money): Bool
+    return a.cents == b.cents
+end
+
+local Prices = Map(U32, Money)             -- fine: the key is the U32
+```
+
+The rule is a diagnostic rather than a silent choice between the two equalities,
+and it is the same reason `Str` has no `==` (§14): one operation, one meaning.
+
 A checked place captures a fixed key by value and resolves again after mutation,
 calls and control-flow boundaries. Remove/reinsert of an equal key addresses the
 new entry; it is not Store's generational identity. A StrMap place instead captures
@@ -1991,7 +2013,9 @@ for keys such as `"length"`.
 ### 15.4 Implementation boundary
 
 [Map algorithms](../lib/map.slc), [semantic key operations](../lib/key.slc), and
-[SipHash-2-4](../lib/hash.slc) are ordinary SLC words shared by both backends.
+[SipHash-2-4](../lib/hash.slc) are ordinary SLC words shared by both backends. The
+`__eq` rule of §15.2 is `keys.check_key`, which walks a key type the way the encoding
+does; it runs when a map type is built and again when a key encoding begins.
 Mutable tables use Robin Hood probing, backward-shift deletion, growth at 7/8
 load, and offset-based string arenas with bounded dead-byte compaction. Pending
 keys are copied before table movement, and arena aliases are rebased after
@@ -2078,6 +2102,9 @@ caller. No runtime dispatch, inheritance or object model is involved (§22).
 | `__cast(v, T)` | a host value or other-typed value where a `T` is expected, and `T(v)` | a `T`, or `nil` to refuse |
 | `__add` `__sub` `__mul` `__div` `__mod` `__unm` | arithmetic | a `T`; the other operand is first converted through `__cast` |
 | `__eq` `__lt` `__le` | comparisons; `~=`, `>` and `>=` derive from them | a `Bool` |
+
+`__eq` is the one hook with a restriction outside its own type: a type that
+defines it, or a type a key encoding walks through, cannot be a map key (§15.2).
 
 A hook is stored on the type, so it is written with a dot:
 `function Fixed.__add(a, b)`. The hooks whose first argument is the receiver,

@@ -1,0 +1,14 @@
+-- Expected rejection: the decoder's payload is a borrow of this Grow view.
+local schema = require "schema"
+local bad = do(n: U32): U32
+    local storage = Grow(U8) {}
+    for i: U32 = 1, n do
+        storage:push(U8 i)
+    end
+    return storage:view() do(input)
+        return schema.binary.decode(schema.packet, input) do(record, payload)
+            storage:push 0
+        end
+    end
+end
+export bad

@@ -1,0 +1,2 @@
+-- A borrowed payload cannot become a stored member of an owned value.
+local Saved = struct { payload: Slice U8 }

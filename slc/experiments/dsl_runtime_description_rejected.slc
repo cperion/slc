@@ -1,0 +1,4 @@
+-- Deliberate boundary probe: untyped requirements must be known.
+local configure = do(factor, x: U32): U32 = x * factor
+local bad = do(factor: U32, x: U32): U32 = configure factor x
+export bad

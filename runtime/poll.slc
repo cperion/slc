@@ -52,8 +52,9 @@ return function(t)
         state.count = state.count + 1
         unlock(Ptr state.mu)
         local byte = U8 1
-        -- A full wake pipe already means "look again".
-        write(state.writer, Ptr byte, 1)
+        -- A full wake pipe already means "look again". Preserve the existing
+        -- best-effort wake, but consume the result for fortified C builds.
+        if write(state.writer, Ptr byte, 1) < 0 then return end
     end
     local slc_poll_run = do(state: Ptr State): Unit
         local fds = null Fd

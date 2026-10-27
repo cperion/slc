@@ -1,0 +1,64 @@
+local schema = require "schema"
+local binary, Message = schema.binary, schema.Message
+local packet, compact = schema.packet, schema.compact
+local packet_size = binary.size packet
+local packet_encode = binary.encode packet
+local compact_size = binary.size compact
+local compact_encode = binary.encode compact
+export packet_size
+export packet_encode
+export compact_size
+export compact_encode
+
+local assign = do(target: Ref Message, value: Message): Unit
+    target = value
+end
+local packet_decode = do(input: Slice U8, output: Ref Message): U32
+    return binary.decode(packet, input) do(record, payload)
+        assign output record
+    end
+end
+local compact_decode = do(input: Slice U8, output: Ref Message): U32
+    return binary.decode(compact, input) do(record, payload)
+        assign output record
+    end
+end
+export packet_decode
+export compact_decode
+
+-- Consumer runs inside the borrow, with no payload allocation or raw escape.
+-- High 32 bits distinguish successful empty input from rejection (zero).
+local packet_visit = do(input: Slice U8): U64
+    local checksum: U32 = 0
+    local consumed = binary.decode(packet, input) do(record, payload)
+        checksum = record.sequence
+        local i: U32 = 0
+        while i < payload.length do
+            checksum = checksum + U32 payload[i]
+            i = i + 1
+        end
+    end
+    return U64 consumed * U64 4294967296 + U64 checksum
+end
+export packet_visit
+
+-- The callback path also works with owned local storage; no raw pointer required.
+local owned_roundtrip = do(sequence: U32): U64
+    local wire = Array(U8, 11) { 1, 2, 0, 0, 0, 0, 0, 3, 10, 20, 30 }
+    wire[2] = U8 shr(sequence, 24)
+    wire[3] = U8 shr(sequence, 16)
+    wire[4] = U8 shr(sequence, 8)
+    wire[5] = U8 sequence
+    return packet_visit wire:slice()
+end
+export owned_roundtrip
+assert(host(packet_size(Message { version = 1, flags = 0, sequence = 42, length = 3 }, U32 3)) == 11)
+assert(host(owned_roundtrip(U32 42)) == 11 * 4294967296 + 102)
+
+local document = os.getenv "SLC_DSL_DOC"
+if document then
+    local out = assert(io.open(document, "w"))
+    out:write("# Wire layouts\n\nGenerated from the executable descriptions.\n\n## Packet\n\n",
+        binary.describe packet, "\n\n## Compact\n\n", binary.describe compact, "\n")
+    out:close()
+end

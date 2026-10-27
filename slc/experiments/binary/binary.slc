@@ -1,0 +1,150 @@
+-- A small binary-format vocabulary. Lua constructs layouts; ordinary SLC words
+-- validate, encode and decode them. No compiler internals or foreign algorithms.
+local binary = {}
+
+local field = do(width, endian)
+    return do(name)
+        return do(options)
+            return { .name, .width, .endian,
+                maximum = options.max or (256 ^ width - 1), equals = options.equals }
+        end
+    end
+end
+binary.u8 = field(1, "be")
+binary.u16be = field(2, "be")
+binary.u32be = field(4, "be")
+binary.u32le = field(4, "le")
+binary.bytes = do(name)
+    return do(options)
+        return { .name, width = options.prefix, endian = "be",
+            maximum = options.max, payload = true }
+    end
+end
+
+binary.format = do(Record)
+    return do(fields)
+        local offset, names, payload = 0, {}, nil
+        local prepared = {}
+        for index, description in ipairs fields do
+            -- Reusing a field in another layout must not change this layout.
+            local f = {}
+            for key, value in pairs description do f[key] = value end
+            prepared[index] = f
+            assert(type f.name == "string" and not names[f.name], "duplicate/invalid field name")
+            assert(f.width == 1 or f.width == 2 or f.width == 4, "width must be 1, 2 or 4")
+            assert(f.endian == "be" or f.endian == "le", "invalid byte order")
+            assert(type f.maximum == "number" and f.maximum >= 0
+                and f.maximum <= 256 ^ f.width - 1 and f.maximum % 1 == 0, "invalid field maximum")
+            assert(f.equals == nil or (f.equals >= 0 and f.equals <= f.maximum
+                    and f.equals % 1 == 0), "invalid field constant")
+            names[f.name] = true
+            f.offset = offset
+            offset = offset + f.width
+            if f.payload then
+                assert(index == #fields, "payload must be last")
+                payload = f
+            end
+        end
+        assert(payload, "one trailing length-prefixed payload is required")
+        assert(offset + payload.maximum <= 4294967295, "encoded size exceeds U32")
+        for _, f in ipairs Record.fields do
+            assert(names[f.name] and f.type == U32, "record fields must match layout and use U32")
+            names[f.name] = nil
+        end
+        assert(next names == nil, "layout field is missing from record")
+        return { .Record, fields = prepared, header_size = offset, .payload }
+    end
+end
+
+local validator = do(layout)
+    local Record = layout.Record
+    return do(record: Record): Bool
+        for _, f in ipairs layout.fields do
+            local value = rawmember(record, f.name)
+            if value > f.maximum then return false end
+            if f.equals ~= nil then
+                if value ~= f.equals then return false end
+            end
+        end
+        return true
+    end
+end
+
+local read_integer = do(bytes: Slice U8, f): U32
+    local value: U32 = 0
+    for k = 0, f.width - 1 do
+        local at = f.offset + k
+        if f.endian == "le" then at = f.offset + f.width - 1 - k end
+        value = bor(shl(value, 8), U32 bytes[at])
+    end
+    return value
+end
+local write_integer = do(output: Ptr U8, f, value: U32): Unit
+    for k = 0, f.width - 1 do
+        local shift = 8 * (f.width - 1 - k)
+        if f.endian == "le" then shift = 8 * k end
+        output[f.offset + k] = U8 shr(value, shift)
+    end
+end
+
+-- Zero means invalid; even an empty packet has a nonempty header.
+binary.size = do(layout)
+    local Record = layout.Record
+    local valid = validator layout
+    return do(record: Record, payload_length: U32): U32
+        if not valid record then return 0 end
+        if rawmember(record, layout.payload.name) ~= payload_length then return 0 end
+        return layout.header_size + payload_length
+    end
+end
+binary.encode = do(layout)
+    local Record = layout.Record
+    local encoded_size = binary.size layout
+    return do(record: Record, payload: Slice U8, output: Ptr U8, capacity: U32): U32
+        local size = encoded_size(record, payload.length)
+        if size == 0 then return 0 end
+        if capacity < size then return 0 end
+        for _, f in ipairs layout.fields do
+            write_integer(output, f, rawmember(record, f.name))
+        end
+        local i: U32 = 0
+        while i < payload.length do
+            output[layout.header_size + i] = payload[i]
+            i = i + 1
+        end
+        return size
+    end
+end
+binary.decode = do(layout, input: Slice U8, body): U32
+    if input.length < layout.header_size then return 0 end
+    local header = input:sub(0, layout.header_size)
+    local fields = {}
+    for _, f in ipairs layout.fields do
+        fields[f.name] = read_integer(header, f)
+    end
+    local record = layout.Record fields
+    local valid = validator layout
+    if not valid record then return 0 end
+    local length = rawmember(record, layout.payload.name)
+    local consumed = layout.header_size + length
+    if input.length < consumed then return 0 end
+    body(record, input:sub(layout.header_size, consumed))
+    return consumed
+end
+
+-- Another interpretation of precisely the same description; no offsets repeated.
+binary.describe = do(layout)
+    local lines = { "| Offset | Field | Bytes | Byte order | Constraint |",
+        "| ---: | --- | ---: | --- | --- |" }
+    for _, f in ipairs layout.fields do
+        local constraint = "0.." .. tostring f.maximum
+        if f.equals ~= nil then constraint = "must equal " .. tostring f.equals end
+        if f.payload then constraint = constraint .. "; payload byte count" end
+        lines[#lines + 1] = string.format("| %d | %s | %d | %s | %s |",
+            f.offset, f.name, f.width, f.endian, constraint)
+    end
+    lines[#lines + 1] = string.format("| %d | payload | variable | bytes | exactly the declared count |",
+        layout.header_size)
+    return table.concat(lines, "\n")
+end
+return binary

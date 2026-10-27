@@ -9,6 +9,8 @@ local function fail(s) S.fail(s, 2) end
 -- Map types are interned across compilations; their methods and entry structs
 -- belong to one, so decorate again for each compilation.
 local function decorate(t)
+    -- the key's identity is the map's: a type with `__eq` has a second one (§15.2)
+    require('slc.key').check_key(t.key)
     if rawget(t, 'map_decorated_for') == S.module then return t end
     t.map_decorated_for = S.module
     t.map_decorated = true

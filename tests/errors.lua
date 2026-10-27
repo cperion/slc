@@ -24,6 +24,39 @@ export f
 local f = do(): Unit m:put(1, 2) end
 export f
 ]] },
+    { name = 'a map key may not define __eq', expect = 'the map key Money, which defines __eq',
+      src = [[local Money = struct { cents: I64 }
+function Money.__eq(a: Money, b: Money): Bool return a.cents == b.cents end
+local M = Map(Money, U32)
+local f = do(): U32
+    local m = M {}
+    m:put(Money { cents = 5 }, 1)
+    return m.length
+end
+export f
+]] },
+    { name = 'a map key may not contain a type that defines __eq', expect = "field 'amount' of Pair is Money",
+      src = [[local Money = struct { cents: I64 }
+function Money.__eq(a: Money, b: Money): Bool return a.cents == b.cents end
+local Pair = struct { label: U32, amount: Money }
+local M = Map(Pair, U32)
+local f = do(): U32
+    local m = M {}
+    return m.length
+end
+export f
+]] },
+    { name = 'a sum key may not carry a type that defines __eq', expect = "alternative 'some' of Choice is Money",
+      src = [[local Money = struct { cents: I64 }
+function Money.__eq(a: Money, b: Money): Bool return a.cents == b.cents end
+local Choice = oneof { none: Unit, some: Money }
+local M = Map(Choice, U32)
+local f = do(): U32
+    local m = M {}
+    return m.length
+end
+export f
+]] },
     { name = 'inferred local keeps its native type', expect = 'expected U32',
       src = [[local f = do(x: U32): U32
     local y = x

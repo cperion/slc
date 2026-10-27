@@ -8,6 +8,36 @@ local State = hash.State
 local trap = extern("slc_trap", { CString }, Unit)
 local id_components, field_value = __S.id_components, __S.dot
 
+-- One identity per type. `__eq` gives `a == b` a meaning of its own, while a map
+-- hashes and compares the semantic encoding below; for some pair the two would
+-- answer differently, so a key type -- or any type the encoding walks through --
+-- may not have one. The walk is the encoding's own, so it refuses exactly the
+-- types a map would reach.
+function keys.check_key(T, where)
+    if __S.hook_of(T, "__eq") then
+        local what = where and (where .. " is " .. T.display) or ("the map key " .. T.display)
+        error(what .. ", which defines __eq: a map compares keys by their semantic encoding "
+            .. "(lib/key.slc), so `a == b` and `m:has(a)` could disagree for the same pair; "
+            .. "key the map by fields that compare structurally instead", 0)
+    end
+    if T == Str or T.chars_cap or T.kind == "int" or T.kind == "bool" or T.kind == "id"
+    or T.kind == "unit" then
+        return
+    end
+    if T.kind == "struct" then
+        for _, field in ipairs T.fields do
+            keys.check_key(field.type, "field '" .. field.name .. "' of " .. (where or T.display))
+        end
+    elseif T.kind == "sum" then
+        for _, alt in ipairs T.alts do
+            if alt.type ~= Unit then
+                keys.check_key(alt.type,
+                    "alternative '" .. alt.name .. "' of " .. (where or T.display))
+            end
+        end
+    end
+end
+
 function keys.encoder(T)
     if encoders[T] then return encoders[T] end
     local encode
@@ -74,6 +104,7 @@ end
 
 function keys.hash(T)
     if hashers[T] then return hashers[T] end
+    keys.check_key T
     local encode = keys.encoder T
     local hashed = do(key: T): U64
         local h = hash.process()
@@ -90,6 +121,7 @@ local equalities = {}
 local strings = require "slc.str"
 function keys.equal(T)
     if equalities[T] then return equalities[T] end
+    keys.check_key T
     local equal
     if T == Str then
         equal = strings.equals

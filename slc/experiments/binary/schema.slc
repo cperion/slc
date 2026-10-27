@@ -1,0 +1,33 @@
+local binary = require "binary"
+-- The native record is independent of its wire layout. All scalar input values
+-- are U32 so the encoder must validate, not silently truncate narrow fields.
+local Message = struct { version: U32, flags: U32, sequence: U32, length: U32 }
+local packet = binary.format(Message) {
+    binary.u8 "version" { equals = 1 },
+    binary.u8 "flags" { max = 3 },
+    binary.u32be "sequence" {},
+    binary.bytes "length" { prefix = 2, max = 4096 },
+}
+-- Same vocabulary, different ordering, byte order, widths and validation rules.
+local compact = binary.format(Message) {
+    binary.u32le "sequence" {},
+    binary.u8 "version" { equals = 2 },
+    binary.u8 "flags" { max = 15 },
+    binary.bytes "length" { prefix = 1, max = 255 },
+}
+-- Descriptions are reusable values, not mutable offset-bearing builder state.
+local shared = binary.u32be "sequence" {}
+local other = binary.format(Message) {
+    shared,
+    binary.u8 "version" { equals = 1 },
+    binary.u8 "flags" { max = 3 },
+    binary.bytes "length" { prefix = 2, max = 4096 },
+}
+local reordered = binary.format(Message) {
+    binary.u8 "version" { equals = 1 },
+    binary.u8 "flags" { max = 3 },
+    shared,
+    binary.bytes "length" { prefix = 2, max = 4096 },
+}
+assert(shared.offset == nil and other.fields[1].offset == 0 and reordered.fields[3].offset == 2)
+return { .binary, .Message, .packet, .compact }

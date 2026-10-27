@@ -922,6 +922,8 @@ A type's layout is a `struct`; what the language's operations mean on it is a ho
 
 **A hook gives an operation the meaning the reader already expects.** If the meaning needs explaining, it is a named word.
 
+**One identity per type.** `__eq` is the one hook that can disagree with something else in the language: a map compares the *semantic encoding* of a key (declared fields, the active payload, the used bytes of a `Chars`), not the type's hook. So a type that defines `__eq` — or a type a key encoding walks through — cannot be a map key, and the compiler says so where the map type is built ([syntax §15.2](syntax.md#152-semantic-keys-and-checked-references)). Key the map by the fields that compare structurally, or by an `Id`, which is identity by token, slot and generation.
+
 | Hook | Use it for | Not for |
 |---|---|---|
 | `__index`, `__newindex` | a container's element: `ring[i]` returns a checked place, as `store[id]` does | a lookup that can miss: that is `find`, returning a sum |

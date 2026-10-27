@@ -291,6 +291,10 @@ do
     local harnesses = { 'map_hash', 'map_runtime', 'strmap_runtime', 'runtime_scheduler', 'runtime_channel', 'runtime_lifecycle' }
     local cmds, apply = {}, {}
     local function add(label, cmd) cmds[#cmds + 1] = cmd; apply[#apply + 1] = label end
+    -- glibc's fortified write() must have its result consumed, including in
+    -- runtime words specialized into their callers.
+    add('poll runtime: fortified C', ('%s -D_FORTIFY_SOURCE=2 -c %s -o %s')
+        :format(CC, sq(policy), sq(build .. '/slc_poll_fortified.o')))
     for _, harness in ipairs(harnesses) do
         local sources_text = { sq(policy) }
         for _, f in ipairs { 'tests/' .. harness .. '_main.c', 'runtime/slc_rt.c' } do

@@ -1,0 +1,7 @@
+local binary = require "binary"
+local Record = struct { version: U32, length: U32 }
+local invalid = binary.format(Record) {
+    binary.u8 "version" {},
+    binary.u8 "version" {},
+    binary.bytes "length" { prefix = 2, max = 4096 },
+}
