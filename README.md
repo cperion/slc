@@ -25,6 +25,7 @@ are implemented in ordinary SLC, and [library-defined types](docs/staged-lua-c-v
 use the same hooks as the built-in ones. [The alpha roadmap](docs/alpha-design.md) covers
 broader fuzzing and the single-binary distribution; [the SLC-first inventory](docs/slc-first.md)
 tracks the remaining library migrations.
+[Tuning code size and compile time](docs/code-size.md) covers `call` and `slc size`.
 
 ## Requirements
 

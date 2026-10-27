@@ -61,7 +61,7 @@ local function decorate(t)
             -- Eager by-value capture, including ensure's unused replacement.
             local v = Mem.capture(S.coerce(value, t.elem, 'Map value'), 'capturing a map value')
             S.bump_checked()
-            return library().put(S.Ref(p), kv, v, method == 'ensure')
+            return S.boundary(library().put)(S.Ref(p), kv, v, method == 'ensure')
         end
     end
     storage.visit = function(self, slot, body)

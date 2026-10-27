@@ -675,6 +675,26 @@ function P:primary(hint, in_type)
 end
 
 function P:suffixed(hint, in_type)
+    local r = self.r
+    local tk = r:peek(1)
+    -- `call m:put(k, v)`: the application below is a real call (a function
+    -- boundary), not evaluated in place. `call` is a keyword only before a name
+    -- on the same line; `call(x)` stays an ordinary application.
+    if tk.t == 'iden' and tk.v == 'call' and not in_type then
+        local nt = r:peek(2)
+        if nt.t == 'iden' and not nt.nl and not KEYWORDS[nt.v] then
+            r:next()
+            local e = self:suffixed(hint, in_type)
+            if e.k ~= 'call' and e.k ~= 'method' then
+                r:error('call needs an application: call f(x), call m:put(k, v)', tk)
+            end
+            -- the boundary belongs to the application of the head function
+            local node = e
+            while node.k == 'call' and (node.fn.k == 'call' or node.fn.k == 'method') do node = node.fn end
+            node.boundary = true
+            return e
+        end
+    end
     local e, kind = self:primary(hint, in_type)
     return self:suffixed_from(e, kind, false, in_type)
 end
@@ -876,27 +896,35 @@ function G:expr(e)
             node = node.fn
         end
         if node.k == 'method' then
-            return ('__S.mchain(%s, %s, __S.args(%s), %s)'):format(self:prefix(node.obj), str(node.name),
-                self:list(node.args), table.concat(groups, ', '))
+            return ('__S.%s(%s, %s, __S.args(%s), %s)'):format(node.boundary and 'bmchain' or 'mchain',
+                self:prefix(node.obj), str(node.name), self:list(node.args), table.concat(groups, ', '))
+        end
+        if node.boundary and node.fn.k == 'name' and not self:lookup(node.fn.name) and #self:opens() > 0 then
+            self:err('call: a name from an opened region cannot be called across a boundary; qualify it', e.line)
         end
         if node.fn.k == 'name' and not self:lookup(node.fn.name) and #self:opens() > 0 then
             -- a chain headed by a free name in an opened region
             return ('__S.ochain(%s, %s, function() return %s end, __S.args(%s), %s)'):format(self:open_list(),
                 str(node.fn.name), node.fn.name, self:list(node.args), table.concat(groups, ', '))
         end
-        return ('__S.chain(%s, __S.args(%s), %s)'):format(self:prefix(node.fn), self:list(node.args),
-            table.concat(groups, ', '))
+        local head = self:prefix(node.fn)
+        if node.boundary then head = '__S.boundary(' .. head .. ')' end
+        return ('__S.chain(%s, __S.args(%s), %s)'):format(head, self:list(node.args), table.concat(groups, ', '))
     elseif k == 'call' then
+        if e.boundary and e.fn.k == 'name' and not self:lookup(e.fn.name) and #self:opens() > 0 then
+            self:err('call: a name from an opened region cannot be called across a boundary; qualify it', e.line)
+        end
         if e.fn.k == 'name' and not self:lookup(e.fn.name) and #self:opens() > 0 then
             -- a bare call inside an opened region: the receiver's member wins
             local args = self:list(e.args)
             return ('__S.ocall(%s, %s, function() return %s end%s)'):format(self:open_list(),
                 str(e.fn.name), e.fn.name, args ~= '' and (', ' .. args) or '')
         end
+        if e.boundary then return '__S.boundary(' .. self:prefix(e.fn) .. ')(' .. self:list(e.args) .. ')' end
         return self:prefix(e.fn) .. '(' .. self:list(e.args) .. ')'
     elseif k == 'method' then
         local args = self:list(e.args)
-        return '__S.mcall(' .. self:expr(e.obj) .. ', ' .. str(e.name) .. (args ~= '' and (', ' .. args) or '') .. ')'
+        return '__S.' .. (e.boundary and 'bmcall' or 'mcall') .. '(' .. self:expr(e.obj) .. ', ' .. str(e.name) .. (args ~= '' and (', ' .. args) or '') .. ')'
     elseif k == 'table' then
         local spread = false
         for _, it in ipairs(e.items) do if it.kind == 'spread' then spread = true end end
@@ -1462,12 +1490,12 @@ function G:stat(s)
                 self:emit(' do __S.ret_one(' .. self:list(s.exprs) .. ') return end')
             elseif #s.exprs == 0 then
                 self:emit(' do __S.ret() return end')
-            elseif e.k == 'call' and e.fn.k ~= 'call' and e.fn.k ~= 'method'
+            elseif e.k == 'call' and e.fn.k ~= 'call' and e.fn.k ~= 'method' and not e.boundary
                 and not (e.fn.k == 'name' and not self:lookup(e.fn.name) and #self:opens() > 0) then
                 -- a tail call
                 local args = self:list(e.args)
                 self:emit(' do __S.tail(' .. self:prefix(e.fn) .. (args ~= '' and (', ' .. args) or '') .. ') return end')
-            elseif e.k == 'method' then
+            elseif e.k == 'method' and not e.boundary then
                 local args = self:list(e.args)
                 self:emit(' do local __o = ' .. self:prefix(e.obj) .. '; __S.tail(__o.' .. e.name .. ', __o'
                     .. (args ~= '' and (', ' .. args) or '') .. ') return end')

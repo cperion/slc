@@ -103,7 +103,7 @@ hash.sip24 = do(text: Str, k0: U64, k1: U64): U64
     local h = hash.init k0 k1
     local state = Ref h
     hash.bytes state text
-    return hash.finish state
+    return call hash.finish state
 end
 
 -- Seed acquisition is platform state; every mix and encoding stays visible to
@@ -125,7 +125,7 @@ hash.text = do(text: Str): U64
     local length = U64 text.length
     hash.u64 state length
     hash.bytes state text
-    local result = hash.finish state
+    local result = call hash.finish state
     return bor result 1
 end
 

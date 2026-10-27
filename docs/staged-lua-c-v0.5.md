@@ -40,6 +40,7 @@ The resolutions, in the order they matter:
 25. **Text (§39)**: `Str` views, `Text` built in place with formatting decided while compiling, `Chars(n)` values; the text words are slc, so known text folds and known needles unroll. Range facts now include lower bounds by constants, and an arm that cannot fall through lends its facts to what follows. Field and method access in typed bodies no longer collides with the evaluator's own keys (a struct field named `name` used to read the local's name).
 
 26. **Library-defined types (§41)**: a type's layout is a `struct`; what `x.f`, `x[k]`, a conversion, an operator or a comparison means on it is a hook, a Lua function or native word run while specializing. The built-in kinds are served by the same hooks, so a library can define a fixed-point number, a ring buffer or a struct-of-arrays with no compiler change.
+29. **`call` (§12.7)**: a keyword before an application that makes it a function boundary, shared by specialization key; `slc size` reports where one would pay. The map and data-stack libraries use it at seven large steps.
 28. **Native globals and function values (§42)**: `global(T, opts)` is static (or thread-local) storage reached as a `Ptr T`; `Fn(params): ret` is a C function pointer and `fnptr(word)` materializes a word as one. With them the whole runtime is SLC: the scheduler, tasks, workers, registries, timers, blocking threads, entropy and the I/O bootstraps compile with the program's other SLC words; C keeps `setjmp` traps, address location in a data stack and the io_uring kernel ABI. The data-stack set and the hash key are read in place by programs.
 27. **Field shorthand (§3.3)**: `.name` in a table constructor is `name = name`.
 
@@ -1131,13 +1132,41 @@ After 400 nested applications the evaluator stops with an error listing the rece
 - **Materialized keys**: each key has at most one function; re-entry and later applications call it.
 - **Pure known calls**: within one evaluation, an application whose arguments are all static and which emitted nothing is memoized by key.
 
-Nothing else is shared: each call site gets the residual code of its own arguments. Code size is not a concern of the semantics; the C compiler handles it.
+Nothing else is shared: each call site gets the residual code of its own arguments. Code size is not a concern of the semantics, but it is a concern of programs: a large word applied at many sites is that many copies. `call` (§12.7) puts a function boundary at one site.
 
 ## 12.6 Consequences
 
 - Effect and memory summaries are needed only at boundaries: an inlined application needs none, because the caller's abstract state flows through the callee's body.
 - At a materialized call, a reference to a tracked local escapes: the local is written to storage and untracked from then on.
 - The data-stack recursion bound (§16) is checked only on cycles of materialized functions. A tail jump gives back the data stacks of the round it leaves.
+
+## 12.7 `call`: a function boundary at one site
+
+`call` before an application makes that application a real call: a residual function, specialized on the word, its compile-time parameters and the arguments known at the site (§12.1), shared by every `call` with the same key. A key with other known arguments is another function. It is always a call; the programmer asked for one. The exception is compile-time evaluation, which has no function to call from: there `call` is ignored and the application runs in place, so a word that uses `call` internally still runs on known inputs while compiling (`host(sip24(...))`).
+
+```lua
+local weigh = do(x: U32): U32
+    local y = x * 3
+    return y + y + x
+end
+
+local both = do(a: U32, b: U32): U32
+    return call weigh(a) + call weigh(b) + weigh(a)
+end
+```
+
+```c
+uint32_t both(uint32_t a, uint32_t b) {
+    uint32_t t = weigh(a);
+    return t + weigh(b) + (a * 3u + a * 3u + a);
+}
+```
+
+An application without `call` is unchanged: the word's body is evaluated in place with whatever is known. Meaning never changes, only the shape of the C.
+
+`call` takes the next application: `call f(x)`, `call m:put(k, v)`, `call f a b`, in a statement or an expression, and `return call f(x)` is a return of the call (not a tail jump). It needs a native word; a foreign function is already a call, and an untyped Lua function is an error. A known view of a caller's local array (a `Str` over a `Chars`) crosses as a runtime address and length, since the callee cannot name the caller's local. `call` is a keyword only before a name on the same line: `call(x)` is an ordinary application of a binding named `call`.
+
+The boundary is the programmer's, and `slc size program.slc` finds it. It reports the generated C per function and, for each word that is evaluated in place at several sites, the residual statements one `call` would share, with the heaviest sites and their source lines (`maps.slc:121  x3  3,600 statements  m:put(k, v + 100)`). Words too small to repay a call are left out. A large program also prints a one-line note pointing at it. A library puts `call` at the words the report names in its own code (`lib/map.slc` at the digest, probe, growth, insertion and key copy; `lib/hash.slc` and `lib/key.slc` at hash finalization; `slc/maps.lua` at `put`; `lib/stacks.slc` at two stack growth steps), so that a program with a hundred map operations contains one probe, not a hundred. The cost is a call where there was none (about 8% on a map loop that does nothing else); at a hot site, leave `call` out.
 
 ---
 

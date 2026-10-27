@@ -287,7 +287,12 @@ local function copy_expr(e, on_read)
 end
 S.copy_expr = copy_expr
 
+-- statements emitted so far (all builders): the measure `slc size` attributes
+local emitted_total = 0
+function S.emitted() return emitted_total end
+
 function Builder:emit(stmt)
+    emitted_total = emitted_total + 1
     if not self.fn then
         local what = stmt.what or 'a runtime effect'
         fail(('cannot evaluate at compile time: it performs %s'):format(what), 3)
@@ -1325,6 +1330,29 @@ function S.mcall(obj, key, ...)
     local f = S.dot(obj, key)
     if f == nil then fail(("no method '%s' on %s"):format(tostring(key), describe(obj)), 2) end
     return f(obj, ...)
+end
+
+-- `call f(x)`: the same word, marked so that applying it makes a function
+-- boundary (Builder:apply). It keeps the word's identity, so its specialization
+-- keys are the ones an ordinary application would use.
+function S.boundary(f)
+    if is_word(f) then
+        local w = setmetatable({}, W)
+        for k, v in pairs(f) do rawset(w, k, v) end
+        w.boundary = true
+        return w
+    end
+    if getmetatable(f) == X then return f end          -- a foreign call is always a call
+    if type(f) == 'function' then
+        fail('call needs a native word, got a Lua function (an untyped lambda is evaluated in place)', 2)
+    end
+    fail(('call needs a native word, got %s'):format(describe(f)), 2)
+end
+
+function S.bmcall(obj, key, ...)
+    local f = S.dot(obj, key)
+    if f == nil then fail(("no method '%s' on %s"):format(tostring(key), describe(obj)), 2) end
+    return S.boundary(f)(obj, ...)
 end
 
 V.__index = function(x, key) return member(x, key) end
@@ -2720,6 +2748,38 @@ function Builder:apply(w, args, opts)
     for _, a in ipairs(args) do if not static(a) then all_static = false break end end
     if all_static and self.memo[key] ~= nil then return self.memo[key] end
 
+    -- `call f(x)`: a function boundary here. The residual function is the word
+    -- specialized on this key (its compile-time parameters, the types of its
+    -- other arguments and the typed values known here), shared by every `call`
+    -- with the same key. It is always a call: the programmer asked for one.
+    -- (When evaluating at compile time there is no function to call from, and
+    -- the application runs in place, as every application does there.)
+    if rawget(w, 'boundary') and self.fn then
+        local crossing
+        for i, a in ipairs(args) do
+            -- A known view of a caller's local array (a Str over a Chars local)
+            -- reads that local, which the callee cannot name: it crosses as a
+            -- runtime address and length.
+            if is_value(a) and a.k == 'agg' and static(a) then
+                local fields, changed = {}, false
+                for name, fv in pairs(a.f) do
+                    if is_value(fv) and fv.k == 'array_ptr' then
+                        fields[name] = dyn(fv.T, ex(fv))
+                        changed = true
+                    else
+                        fields[name] = fv
+                    end
+                end
+                if changed then
+                    crossing = crossing or { unpack(args) }
+                    crossing[i] = agg(a.T, fields)
+                end
+            end
+        end
+        if crossing then args = crossing; key = spec_key(w, args) end
+        return self:call_materialized(w, args, key)
+    end
+
     if self.active[key] then
         -- re-entry with the same key: this key becomes a C function
         self.recursive[key] = true
@@ -2749,8 +2809,12 @@ function Builder:apply(w, args, opts)
             w.name, INLINE_FUEL, table.concat(trail, '  ')), 3)
     end
     local n_before = #self.block
+    -- `slc size`: what this application, evaluated in place, adds to the program
+    local profile = S.size_profile
+    local entry = profile and profile:enter(w, key)
     local result = self:run_frame({ kind = 'word', word = w, params = w.params, body = w.body, ret = w.ret },
         args, opts)
+    if entry then profile:leave(entry) end
     if all_static and #self.block == n_before and (result == nil or is_known(result)) then
         self.memo[key] = result
     end
@@ -3697,6 +3761,14 @@ function S.mchain(obj, name, first, ...)
     local g = { n = first.n + 1, obj }
     for i = 1, first.n do g[i + 1] = first[i] end
     return S.chain(f, g, ...)
+end
+
+function S.bmchain(obj, name, first, ...)
+    local f = obj[name]
+    if f == nil then fail(("%s has no method '%s'"):format(describe(obj), name), 2) end
+    local g = { n = first.n + 1, obj }
+    for i = 1, first.n do g[i + 1] = first[i] end
+    return S.chain(S.boundary(f), g, ...)
 end
 
 -- keyed spread: T { ...p, x = 5 } ---------------------------------------------------------------

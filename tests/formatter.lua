@@ -126,6 +126,8 @@ local t = { .x, .y }
 formatted('table_style preserve keeps name = name', 'local t = { x = x }\n', 'local t = { x = x }\n',
     { table_style = 'preserve' })
 formatted('shorthand is the default', 'local t = { x = x, y = 2 }\n', 'local t = { .x, y = 2 }\n')
+formatted('call keeps its boundary', 'local f = do(m: Ref M, k: U32): Unit\n    call m:put(k, 1)\n    local x = call hash(k)\n    local y = call lookup(m)(k)\nend\n',
+    'local f = do(m: Ref M, k: U32): Unit\n    call m:put(k, 1)\n    local x = call hash k\n    local y = call lookup m k\nend\n')
 formatted('type_style preserve keeps annotations', 'local f = do(): U32\n    local a: U32 = U32(0)\n    return a\nend\n',
     'local f = do(): U32\n    local a: U32 = U32 0\n    return a\nend\n', { type_style = 'preserve' })
 formatted('a host binding keeps its annotation-free form', 'local a = U32(0)\n', 'local a = U32 0\n')

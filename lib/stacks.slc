@@ -40,7 +40,7 @@ local extend = do(context: Ptr Set, index: U64): Unit
 end
 stacks.get = do(index: U64): Ptr Stack
     local context = current()
-    if index >= context.n then extend(context, index) end
+    if index >= context.n then call extend(context, index) end
     return Ptr context.stacks[index]
 end
 local expand = do(s: Ptr Stack, need: U64): Unit
@@ -57,7 +57,7 @@ local expand = do(s: Ptr Stack, need: U64): Unit
 end
 local reserve = do(s: Ptr Stack, need: U64): Unit
     if need <= s.cap then return end
-    expand(s, need)
+    call expand(s, need)
 end
 stacks.top = do(index: U64): U64 = stacks.get(index).top
 stacks.begin = do(index: U64): U64

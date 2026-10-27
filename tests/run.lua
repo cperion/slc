@@ -394,6 +394,10 @@ do
         { 'activities', 'at->value = at->value * 2u;\n    at->weight = at->weight + 1u;', true,
           'one checked lookup serves the whole stretch' },
         { 'activities', 'NodeStore_borrow', false, 'no C helper for a store lookup' },
+        { 'boundary', 'uint32_t t = weigh(a);\n    return t + weigh(b) + (a * 3u + a * 3u + a);', true,
+          'call makes a shared function, a plain application stays inline' },
+        { 'boundary', 'static uint32_t weigh_2(void) {\n    return 49u;\n}', true,
+          'a known argument under call specializes the function' },
     }
     local cmds = {}
     for i, x in ipairs(expectations) do
@@ -406,6 +410,14 @@ do
         local has = results[i].out:find(x[2], 1, true) ~= nil
         check(labels[i], results[i].ok and has == x[3], x[2])
     end
+end
+
+-- slc size names what the generated C is made of
+do
+    local r = par { ('%s size %s/examples/strmaps.slc --top 3'):format(SLC:gsub(' %-o .*$', ''), root) }[1]
+    check('size: reports the generated C and the words worth a call',
+        r.ok and r.out:find('lines of C from', 1, true) and r.out:find('largest functions', 1, true)
+        and r.out:find('words evaluated in place', 1, true) and r.out:find('lib/map.slc', 1, true), r.out)
 end
 
 local docs = par {

@@ -13,6 +13,8 @@
 ["for" "in" "while" "repeat" "until" "break" "continue"] @keyword.repeat
 "return" @keyword.return
 ["and" "or" "not"] @keyword.operator
+; `call f(x)` parses as an application of a name `call`; it is the keyword
+((call_expression function: (identifier) @keyword) (#eq? @keyword "call"))
 ["+" "-" "*" "/" "%" "^" "#" ".." "..." "==" "~=" "<" ">" "<=" ">=" "="] @operator
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 ["," ";" ":" "." "::"] @punctuation.delimiter

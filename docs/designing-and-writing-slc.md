@@ -177,7 +177,7 @@ uint32_t tab_stop_4(uint32_t column) {
 
 ### 4.5 Do not decide inlining
 
-Applying a word evaluates its body in place. There is no inlining decision to make, and no cost to small words. A C function appears for exactly two reasons: an export, or a word re-entered in non-tail position (recursion). A tail call is a loop. Write the words the domain needs, at the size the meaning wants.
+Applying a word evaluates its body in place. There is no inlining decision to make, and no cost to small words. A C function appears for exactly two reasons: an export, or a word re-entered in non-tail position (recursion). A tail call is a loop. Write the words the domain needs, at the size the meaning wants. Code size is the one thing evaluation in place does not manage: a large word applied at many sites is that many copies. Put `call` before an application (`call m:put(k, v)`) to make that site a call to a function shared by every site with the same specialization; a library does this at its own large or cold steps, and you rarely need to. The cost is a call where there was none. A program that generates far more C than its source suggests is read with `slc size`, which names the words worth a `call` and the sites to put it on.
 
 ## 5. Activities
 
@@ -477,6 +477,26 @@ L1:;
 * **Lookups are checked once per stretch.** `store[id]`, `g[i]` and `pool[slot]` look again after anything that could change the answer (a structural change, a slot moving, a call into C, a loop round), and not otherwise.
 * **Waits are calls.** Every channel operation, take, sleep and I/O operation is a visible call into the runtime.
 * **Allocation is in the runtime, and only there.** Task frames, channels and pools are allocated by the runtime. Stores and Grow arrays live on data stacks. Plain words allocate nothing.
+
+### 11.1 Tuning code size and compile time
+
+Evaluation in place is what makes slc programs small and fast when little is left to do. It makes the C large when a large word is applied at many sites, because each site gets its own copy. Code size and compile time (slc's and the C compiler's) both follow the amount of C. Tune it with a loop, and stop as soon as it is good enough.
+
+1. **Measure.** Count the C and time the compile: `luajit slc.lua program.slc | wc -l`, `time luajit slc.lua -o program.c program.slc` and `time cc -O1 -c program.c`. A program that prints more than 20,000 lines of C says so on stderr. Source lines are a poor yardstick: `m[k] = m[k] + 1` is two map operations. Judge by the largest functions and by the time.
+2. **Find.** `luajit slc.lua size program.slc` lists the largest functions and the words evaluated in place at several sites, ranked by what one shared copy would save, with the heaviest sites and their source lines. Read the first entry only: the figures count nested words inside the words that contain them, so one `call` on the top entry changes the rest.
+3. **Change one thing.** Put `call` before that application (`call m:put(k, v)`), or, when the word is yours and is applied everywhere, before its applications inside the library word that uses it. Every `call` of the same word and specialization key shares one function.
+4. **Measure again** and run the tests. The saving is the number to believe, not the estimate. Keep the change if the C got smaller by a useful amount, and revert it if it did not.
+5. **Repeat** until the program compiles in a time you accept. Stop there; a program with no problem needs no `call`.
+
+Rules of thumb:
+
+* **Large and repeated, not small.** A word of a few dozen statements costs as much to call as to copy; the report leaves those out. Words of hundreds of statements applied at ten sites or more are the ones.
+* **Leave `call` out of hot sites.** A call is a call: a map operation behind one runs a few percent slower than the same operation in place, and a known argument is no longer folded into it (it is part of the function's key, so a constant key makes a function of its own).
+* **A constant argument can multiply functions.** `call` on a word applied to many different constants builds one function per constant. If the report shows that, put the `call` one level down, on the part that does not depend on the constant.
+* **The library does its share.** The map and data-stack libraries already put `call` at their large steps. A program rarely needs more than a few of its own.
+* **It never changes what the program means.** `call` only moves the boundary. At compile time it is ignored, so a word that uses it still runs on known inputs while compiling.
+
+See [code-size.md](code-size.md) for a worked example.
 
 ---
 

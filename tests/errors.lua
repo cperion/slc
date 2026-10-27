@@ -778,6 +778,20 @@ end
 local f = do(a: N, b: N): N = a + b
 export f
 ]] },
+    { name = 'call before something that is not an application', expect = 'call needs an application',
+      src = [[local f = do(x: U32): U32
+    local y = call x
+    return y
+end
+export f
+]] },
+    { name = 'call on an untyped Lua function', expect = 'call needs a native word',
+      src = [[local twice = do(x) return x end
+local f = do(x: U32): U32
+    return call twice(x)
+end
+export f
+]] },
     { name = 'text compared with ==', expect = 'text is compared with words, not operators',
       src = [[local f = do(a: Str): Bool = a == "x"
 export f

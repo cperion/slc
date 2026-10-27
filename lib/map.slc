@@ -191,8 +191,8 @@ function map.library(T, storage, Entry, Result, string_keys)
         end
     end
     api.put = do(m: Ref T, key: K, value: V, only_missing): Unit
-        local hashed = digest key
-        local slot = api.slot m key hashed
+        local hashed = call digest key
+        local slot = call api.slot m key hashed
         local base = get(m, "base")
         if slot ~= none then
             if not only_missing then storage.replace m slot value end
@@ -204,14 +204,14 @@ function map.library(T, storage, Entry, Result, string_keys)
         entry.hash = hashed
         entry.value = value
         if string_keys then
-            entry.key.offset = append m key
+            entry.key.offset = call append m key
             entry.key.len = key.length
         else entry.key = key end
         local capacity = get(m, "cap")
         local length = get(m, "len")
-        if capacity == 0 or length >= capacity - capacity / 8 then grow m end
+        if capacity == 0 or length >= capacity - capacity / 8 then call grow m end
         capacity = get(m, "cap")
-        insert_raw m base capacity entry
+        call insert_raw m base capacity entry
         local new_length = length + 1
         set(m, "len", new_length)
         if string_keys then
@@ -222,27 +222,27 @@ function map.library(T, storage, Entry, Result, string_keys)
         end
     end
     api.has = do(m: Ref T, key: K): Bool
-        local hashed = digest key
-        local slot = api.slot m key hashed
+        local hashed = call digest key
+        local slot = call api.slot m key hashed
         return slot ~= none
     end
     api.find = do(m: Ref T, key: K): Result
-        local hashed = digest key
-        local slot = api.slot m key hashed
+        local hashed = call digest key
+        local slot = call api.slot m key hashed
         if slot == none then return Result.missing() end
         local base = get(m, "base")
         local entry = read m base slot
         return Result.found entry.value
     end
     api.borrow = do(m: Ref T, key: K): U32
-        local hashed = digest key
-        local slot = api.slot m key hashed
+        local hashed = call digest key
+        local slot = call api.slot m key hashed
         if slot == none then trap "map-key: missing key" end
         return slot
     end
     api.remove = do(m: Ref T, key: K): Bool
-        local hashed = digest key
-        local slot = api.slot m key hashed
+        local hashed = call digest key
+        local slot = call api.slot m key hashed
         if slot == none then return false end
         check_mutation m
         local base = get(m, "base")

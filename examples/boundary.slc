@@ -1,0 +1,32 @@
+-- `call` makes a function boundary at one application: a call to a function
+-- shared by every `call` with the same specialization key. Other applications
+-- still run in place.
+local weigh = do(x: U32): U32
+    local y = x * 3
+    return y + y + x
+end
+
+local both = do(a: U32, b: U32): U32
+    return call weigh a + call weigh b + weigh a
+end
+export both
+
+-- a known argument is part of the key: the function is specialized on it
+local known = do(): U32
+    return call weigh 7
+end
+export known
+
+local Counter = struct { total: U32 }
+function Counter:add(n: U32): U32
+    self.total = self.total + n
+    return self.total
+end
+
+-- a method across a boundary, and a chain
+local bump = do(a: U32, b: U32): U32
+    local c = Counter { total = 0 }
+    call c:add a
+    return call c:add b
+end
+export bump

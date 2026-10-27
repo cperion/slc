@@ -413,6 +413,7 @@ local function main(args)
         for i = 2, #args do rest[#rest + 1] = args[i] end
         return fuzz(rest)
     end
+    if sub == 'size' then return require('slc.size').run(rest(), slc, read) end
     if args[1] == 'fmt' then
         local rest = {}
         for i = 2, #args do rest[#rest + 1] = args[i] end
@@ -442,6 +443,7 @@ local function main(args)
        luajit slc.lua run program.slc [args...]
        luajit slc.lua build program.slc -o program [-O0..-O3] [-g]
        luajit slc.lua check program.slc
+       luajit slc.lua size program.slc [--top N]
        luajit slc.lua test program.slc
        luajit slc.lua fuzz [--tasks] [--seconds N] [--seed S] [--count N]
        luajit slc.lua cc file.c -o file.o
@@ -457,6 +459,7 @@ local function main(args)
         io.stderr:write(tostring(out), '\n')
         os.exit(1)
     end
+    if out and not opts.dump then require('slc.size').note(out, input) end
     if opts.gccjit then
         -- the same module through libgccjit: an object file
         if not opts.out then io.stderr:write('slc: --gccjit needs -o out.o\n'); os.exit(2) end

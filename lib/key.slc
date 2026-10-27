@@ -79,7 +79,7 @@ function keys.hash(T)
         local h = hash.process()
         local state = Ref h
         encode state key
-        local result = hash.finish state
+        local result = call hash.finish state
         return bor result 1
     end
     hashers[T] = hashed
