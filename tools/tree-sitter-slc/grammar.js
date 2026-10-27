@@ -21,7 +21,7 @@ module.exports = grammar({
     binding: $ => prec.right(seq(field('name', $.identifier), optional(choice($.type_annotation, '...')))),
     type_annotation: $ => seq(':', field('type', $._type)),
     _type: $ => choice($.identifier, $.type_call, $.type_member, $.type_application),
-    type_application: $ => prec.left(16, seq($._type, alias($.name_argument, $.identifier))),
+    type_application: $ => prec.left(16, seq($._type, choice(alias($.name_argument, $.identifier), $.number))),
     type_call: $ => prec.left(15, seq($._type, '(', optional(sep($._expression)), ')')),
     type_member: $ => prec.left(15, seq($._type, '.', $.identifier)),
     assignment_statement: $ => seq(sep($._expression), '=', sep($._expression)),
@@ -68,7 +68,11 @@ module.exports = grammar({
     index_expression: $ => prec.left(15, seq($._expression, '[', $._expression, ']')),
     spread_expression: $ => prec.left(15, seq($._expression, '...')),
     call_expression: $ => prec.left(14, seq(field('function', $._expression), optional(seq(':', field('method', $.identifier))), field('arguments', $.arguments))),
-    arguments: $ => choice(seq('(', optional(sep($._expression)), ')'), $.table_constructor, $.string, $.number, $.boolean, $.lambda, alias($.name_argument, $.identifier)),
+    arguments: $ => choice(seq('(', optional(sep($._expression)), ')'), $.table_constructor, $.string, $.number, $.boolean, $.lambda, alias($.name_argument, $.identifier), $.member_argument),
+    // `f a.b[i]` is f(a.b[i]): a juxtaposed name argument keeps its postfix chain
+    // (spec 3.3, rule 3), so the call is a complete statement.
+    member_argument: $ => prec.left(16, seq(choice(alias($.name_argument, $.identifier), $.member_argument),
+      choice(seq('.', field('member', $.identifier)), seq('[', $._expression, ']'), seq('(', optional(sep($._expression)), ')')))),
     unary_expression: $ => prec(11, seq(field('operator', choice('not', '-', '#')), $._expression)),
     binary_expression: $ => choice(...[
       ['or', 1], ['and', 2], [choice('<', '>', '<=', '>=', '~=', '=='), 3], ['..', 5, true],
