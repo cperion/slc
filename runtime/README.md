@@ -19,6 +19,9 @@ Runtime policy is ordinary SLC, built from [the runtime entry](scheduler.slc).
   under the scheduler lock, with the thread bodies passed to `pthread_create` as
   `fnptr` words. Its state is native globals (`global`, spec §42), thread-local
   where it belongs to a thread.
+- [Select](../lib/select.slc): `first_of` at its call site. The program fills the
+  operation records and a shared function per shape of select makes one attempt per
+  case through `slc_poll_recv`/`send`/`take`, then arms them all through `slc_select_arm`.
 - [Process](process.slc): the data-stack set a thread uses (thread-local
   `slc_own_stacks` and `slc_cur_stacks`), store tokens and the hash key.
 - [Backend](backend.slc): the poller thread and submission entry of the poll and
@@ -42,12 +45,17 @@ retains Linux setup/mmap and integer-address kernel ABI marshalling in
 conversion. Nothing else in the runtime is C: locks, parking, wake-ups, clock reads,
 thread creation and the deadlock report are SLC calling libc and pthreads.
 
-`make runtime` compiles the selected policy and prints its generated C path.
-`SLC_IO=poll` (default), `uring` or `kqueue` selects the backend. External C builds
-must link that generated unit with `runtime/slc_rt.c` (and `runtime/slc_io_uring.c` for
-io_uring) and `-Iruntime -pthread`, plus the selected platform's headers/libraries. Generated C enables
-POSIX feature declarations before system headers. It lives under `SLC_CACHE` or
-`build/runtime`, never as checked-in source.
+A program is built with the runtime: its words are made lazily, only those the
+program names (and what they name) are emitted, and `runtime/slc_rt.c` (plus
+`runtime/slc_io_uring.c` for io_uring) is all that links beside the program's C.
+`SLC_IO=poll` (default), `uring` or `kqueue` selects the backend when the program is
+built. C that calls runtime words the program never names asks for them with
+`--keep-runtime`. Generated C enables POSIX feature declarations before system headers.
+
+`make runtime` compiles the *shared* runtime unit and prints its generated C path. It is
+what the in-process backend and libgccjit objects link, because they need one copy of the
+scheduler's state; it lives under `SLC_CACHE` or `build/runtime`, never as checked-in
+source.
 
 [The shared builder](../slc/runtime_build.lua) also accepts `source(backend)`.
 It runs the frontend in a separate process, preserving an active compilation's

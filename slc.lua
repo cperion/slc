@@ -150,6 +150,64 @@ function slc.translate(src, path)
     return code
 end
 
+-- The runtime is SLC, so it is built with the program: its words are made lazily,
+-- and only those the program names (and what they name) are emitted. A program
+-- is one C file; the C beside it is runtime/slc_rt.c (and slc_io_uring.c).
+local RUNTIME_ROOTS = {
+    -- what runtime/slc_rt.c, which is C, calls
+    'slc_trap_recoverable', 'slc_stacks_unwind', 'slc_stacks_clear', 'slc_stacks_current',
+    'slc_next_token', 'slc_gs', 'slc_gs_write_bytes',
+}
+-- does anything in the program call into the runtime (or need it to)?
+local function calls_runtime(mod)
+    local named = false
+    for _, fn in ipairs(mod.functions) do
+        if fn.uses_rt or fn.waits or fn.task or fn.needs_self or (fn.gs_count or 0) > 0 then return true end
+        G.walk_block(fn.body, function(st)
+            if st.op == 'spawn' or st.op == 'wait' or st.op == 'trap' then named = true end
+        end, function(e)
+            local name = (e.op == 'call' and e.ext and e.ext.cname) or (e.op == 'rtcall' and e.cname)
+            if name and name:sub(1, 4) == 'slc_' then named = true end
+            if e.op == 'slot_at' then named = true end
+        end)
+        if named then return true end
+    end
+    return false
+end
+
+function slc.attach_runtime(mod, keep)
+    -- C beside the program may call runtime words the program never names: --keep-runtime
+    local extra = {}
+    for _, list in ipairs { keep or '', os.getenv('SLC_KEEP_RUNTIME') or '' } do
+        for name in list:gmatch('[%w_]+') do extra[#extra + 1] = name end
+    end
+    if #extra == 0 and not calls_runtime(mod) then return end
+    local path = here .. '/runtime/scheduler.slc'
+    local provider = rawget(_G, '__slc_embedded_source')
+    local text = (provider and provider(path)) or read(path)
+    local saved_path = package.path
+    package.path = here .. '/?.lua;' .. package.path
+    S.runtime_exports(true)
+    local ok, err = pcall(function()
+        local chunk, why = loadstring(slc.translate(text, path), '@' .. path)
+        if not chunk then error(why, 0) end
+        setfenv(chunk, slc.prelude())
+        local fine, e = xpcall(chunk, function(m) return m end)
+        if not fine then error(e, 0) end
+    end)
+    S.runtime_exports(false)
+    package.path = saved_path
+    if not ok then error(err, 0) end
+    mod.resolve = S.resolve_runtime
+    mod.runtime_roots = { unpack(RUNTIME_ROOTS) }
+    mod.runtime_keep = extra
+    if (os.getenv('SLC_IO') or 'poll') == 'uring' then
+        for _, n in ipairs { 'slc_uring_prepare', 'slc_uring_submit', 'slc_uring_run' } do
+            mod.runtime_roots[#mod.runtime_roots + 1] = n
+        end
+    end
+end
+
 -- compile a program; returns the C text and the module
 function slc.compile(src, path, opts)
     opts = opts or {}
@@ -176,6 +234,7 @@ function slc.compile(src, path, opts)
             local fine, e = xpcall(chunk, locate(path))
             if not fine then error(e, 0) end
             if opts.no_c then return nil, S.module, penv end
+            if opts.runtime ~= 'shared' then slc.attach_runtime(S.module, opts.keep) end
             return G.emit(S.module), S.module, penv
         end)
     end)
@@ -431,8 +490,10 @@ local function main(args)
         if a == '-o' then i = i + 1; opts.out = args[i]
         elseif a == '-H' then i = i + 1; opts.header = args[i]
         elseif a == '-d' then opts.dump = true
+        elseif a == '--shared-runtime' then opts.runtime = 'shared'
+        elseif a == '--keep-runtime' then i = i + 1; opts.keep = args[i]
         elseif a == '--cc' then opts.cc = true
-        elseif a == '--gccjit' then opts.gccjit = true
+        elseif a == '--gccjit' then opts.gccjit = true; opts.runtime = 'shared'   -- an object links the shared runtime unit
         elseif a:sub(1, 1) == '-' and a ~= '-' then
             io.stderr:write('slc: unknown option ', a, '\n'); os.exit(2)
         else input = a end
@@ -440,6 +501,7 @@ local function main(args)
     end
     if not input then
         io.stderr:write((([[usage: luajit slc.lua [-o out.c] [-H out.h] [-d] [--cc] program.slc
+       luajit slc.lua [--shared-runtime] [--keep-runtime name,...] ...
        luajit slc.lua run program.slc [args...]
        luajit slc.lua build program.slc -o program [-O0..-O3] [-g]
        luajit slc.lua check program.slc

@@ -25,9 +25,6 @@ return function(t)
     local read_kind = cconst("SLC_K_READ", I32, '"slc_io.h"')
     local none, closed, pending = I32(-100), I32(-2), I32 1
     local PoolHandle = cstruct("slc_pool", header, { { "idx", U32 }, { "gen", U32 } })
-    local Case = cstruct("const slc_case", header, {
-            { "kind", I32 }, { "chan", Handle }, { "buf", Ptr U8 }, { "ns", U64 },
-        })
     local channel_at = do(index: U32): Ptr Channel
         local chunks = channel_table[0]
         return Ptr chunks[index / 256][index % 256]
@@ -334,22 +331,35 @@ return function(t)
             end
         end
     end
-    local slc_first_of = do(task: Ptr Task,
-        ops: Ptr Op, cases: Ptr Case, n: I32, has_default: Bool, site: CString): I32
-        local time = now()
-        begin task ops n site
-        local i = I32 0
-        while i < n do
-            local op = Ptr ops[U32 i]
-            initialize(task, op, cases[U32 i].kind, cases[U32 i].chan, cases[U32 i].buf)
-            op.index = i
-            op.deadline = 0
-            if op.kind == 3 then op.deadline = time + cases[U32 i].ns end
-            i = i + 1
-        end
-        local r = scan task ops n
-        if r == none and has_default then r = -1 end
-        if r ~= none then task.result = r; task.nops = 0; return 0 end
+    -- first_of is sequenced at its call site (lib/select.slc), which knows the
+    -- cases: it makes one attempt per case through these, and arms the lot when
+    -- nothing is ready. An attempt is one locked transaction on one channel or pool.
+    local slc_poll_recv = do(task: Ptr Task, op: Ptr Op): I32
+        local r = lock_channel op.chan
+        local w = null Task
+        local got = recv(r, op.buf, task, Ptr w)
+        unlock(Ptr r.mu)
+        if w ~= null Task then wake w end
+        return got
+    end
+    local slc_poll_send = do(task: Ptr Task, op: Ptr Op): I32
+        local r = lock_channel op.chan
+        local w = null Task
+        local done = checked_send(r, op.buf, task, Ptr w)
+        unlock(Ptr r.mu)
+        if w ~= null Task then wake w end
+        if done ~= 0 then return 1 end
+        return 0
+    end
+    local slc_poll_take = do(task: Ptr Task, op: Ptr Op): I32
+        local r = lock_pool op.chan.idx op.chan.gen
+        local got = take(r, op.chan.idx, SlotPtr op.buf, task.id)
+        unlock(Ptr r.mu)
+        if got then return 1 end
+        return 0
+    end
+    local slc_select_arm = do(task: Ptr Task, ops: Ptr Op, n: I32, site: CString): I32
+        task.site = site
         claimable task
         if arm(task, ops, n) == 0 then task.nops = 0; return 0 end
         return pending
@@ -376,6 +386,9 @@ return function(t)
     export slc_slot_give
     export slc_slot_adopt
     export slc_slot_release
-    export slc_first_of
+    export slc_poll_recv
+    export slc_poll_send
+    export slc_poll_take
+    export slc_select_arm
     export slc_resume_wait
 end

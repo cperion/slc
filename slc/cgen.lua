@@ -68,13 +68,6 @@ local function walk_expr(e, f)
         if type(c) == 'table' and c.op then walk_expr(c, f) end
     end
     if e.args then for _, a in ipairs(e.args) do walk_expr(a, f) end end
-    if e.items then
-        for _, item in ipairs(e.items) do
-            for _, k in ipairs { 'kind', 'chan', 'buf', 'ns' } do
-                if type(item[k]) == 'table' then walk_expr(item[k], f) end
-            end
-        end
-    end
     -- an operation that takes the address of a place uses it, exactly like addr
     if e.expected_place then
         walk_expr({ op = 'addr', place = e.expected_place, T = e.T }, f)
@@ -822,18 +815,6 @@ function Fn:expr(e, need)
         local task = self.task_mode and '&f->task' or 'slc_tk'
         return paren('(' .. ctype(e.T) .. ')slc_slot_at(' .. task .. ', ' .. self:expr(e.slot, 2) .. ')',
             PREC.unary, need)
-    elseif op == 'case_array' then
-        -- the first_of case list: one compound literal, decayed to a pointer
-        local parts = {}
-        for i, c in ipairs(e.items) do
-            local function v(x) return x and self:expr(x, 2) or nil end
-            local kind = self:expr(c.kind, 2)
-            local chan = v(c.chan) or '{ 0, 0 }'
-            local buf = v(c.buf) or 'NULL'
-            local ns = v(c.ns) or '0ull'
-            parts[i] = ('{ %s, %s, %s, %s }'):format(kind, chan, buf, ns)
-        end
-        return paren('(slc_case[]){ ' .. table.concat(parts, ', ') .. ' }', PREC.postfix, need)
     elseif op == 'rtcall' then
         -- a runtime call: the name and its arguments, printed as C
         local args = {}
@@ -1489,17 +1470,56 @@ end
 -- the call graph from the exports: only what is reachable is emitted
 local function reachable(mod)
     local seen, order = {}, {}
-    local function visit(fn)
+    local visit
+    local touched = false          -- the program calls into the runtime at all
+    -- a name in the program (a runtime call) reaches the runtime word of that name
+    local function named(name)
+        if name and name:sub(1, 4) == 'slc_' then touched = true end
+        local lf = name and mod.resolve and mod.resolve(name)
+        if lf then visit(lf) end
+    end
+    function visit(fn)
         if seen[fn] then return end
         seen[fn] = true
         walk_block(fn.body, function(st)
             if st.task then visit(st.task) end
+            if st.op == 'wait' and st.callee then named(st.callee.cname) end
+            if st.op == 'trap' then touched = true end
         end, function(e)
             if (e.op == 'call' or e.op == 'fnaddr') and e.fn then visit(e.fn) end
+            if e.op == 'call' and e.ext then named(e.ext.cname) end
+            if e.op == 'rtcall' then named(e.cname) end
+            if e.op == 'slot_at' then named('slc_slot_fault') end
         end)
         order[#order + 1] = fn
     end
     for _, fn in ipairs(mod.exports) do visit(fn) end
+    if mod.resolve then
+        -- what the generated code itself calls: stack bookkeeping, tasks, plain waits, I/O
+        local function needs(pred)
+            for fn in pairs(seen) do
+                if pred(fn) then return true end
+            end
+            return false
+        end
+        local spawns, waits = false, false
+        for fn in pairs(seen) do
+            walk_block(fn.body, function(st)
+                if st.op == 'spawn' then spawns = true end
+                if st.op == 'wait' then waits = true end
+            end)
+        end
+        if needs(function(fn) return (fn.gs_count or 0) > 0 end) then
+            named('slc_gs_top'); named('slc_gs_reset')
+        end
+        -- runtime/slc_rt.c is linked as soon as anything is called, and it calls these
+        for _, name in ipairs(mod.runtime_keep or {}) do named(name) end
+        if touched or spawns or waits then
+            for _, name in ipairs(mod.runtime_roots or {}) do named(name) end
+        end
+        if spawns or needs(function(fn) return fn.task end) then named('slc_spawn'); named('slc_start') end
+        if waits or needs(function(fn) return fn.needs_self end) then named('slc_self'); named('slc_block') end
+    end
     return order, seen
 end
 G.reachable = reachable
@@ -1568,19 +1588,20 @@ function G.prepare(mod)
     local fns = reachable(mod)
     if mod.prepared and #fns == mod.prepared_n then return fns end
     -- A parameter hides a function of the same name in C. A function nobody
-    -- exports can be renamed, so no parameter ever hides one it could call.
-    local params = {}
+    -- exports can be renamed, so no parameter ever hides one its function calls.
     for _, fn in ipairs(fns) do
+        local params = {}
         for _, p in ipairs(fn.params) do params[p.name] = true end
-    end
-    for _, fn in ipairs(fns) do
-        if not fn.exported and params[fn.cname] then
-            local name = fn.cname .. '_fn'
-            local n = 1
-            while mod.names[name] or params[name] do n = n + 1; name = fn.cname .. '_fn' .. n end
-            mod.names[name] = true
-            fn.cname = name
-        end
+        walk_block(fn.body, nil, function(e)
+            local target = (e.op == 'call' or e.op == 'fnaddr') and e.fn
+            if target and not target.exported and params[target.cname] then
+                local name = target.cname .. '_fn'
+                local n = 1
+                while mod.names[name] do n = n + 1; name = target.cname .. '_fn' .. n end
+                mod.names[name] = true
+                target.cname = name
+            end
+        end)
     end
     -- cleanup first: it can only remove uses
     for _, fn in ipairs(fns) do G.cleanup(fn) end
@@ -1601,6 +1622,11 @@ function G.emit(mod, opts)
     local fns = G.prepare(mod)
     local out = {}
     out[#out + 1] = '/* Generated by slc (staged Lua -> C). Do not edit. */'
+    -- the runtime words use POSIX: feature selection comes before every system header
+    if mod.resolve then
+        out[#out + 1] = '#define _POSIX_C_SOURCE 200809L'
+        out[#out + 1] = '#define _DEFAULT_SOURCE 1'
+    end
     out[#out + 1] = '#include <stdint.h>'
     out[#out + 1] = '#include <stdbool.h>'
     out[#out + 1] = '#include <stddef.h>'

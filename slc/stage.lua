@@ -3415,8 +3415,48 @@ function invoke(w, args)
 end
 
 -- export a word as a C function; its remaining requirements become parameters
+-- The runtime's exports are lazy while a program is built with it: `export`
+-- only records the word, and the function is made when something in the program
+-- names it (S.resolve_runtime), so a program carries the runtime words it reaches.
+function S.runtime_exports(on) module.lazy_mode = on and true or nil end
+
+local function export_args(w, cname)
+    local args = {}
+    for i, p in ipairs(w.params) do
+        if w.supplied[i] then
+            args[i] = w.supplied[i]
+        elseif p.static then
+            fail(("export %s: compile-time parameter '%s' must be supplied first"):format(cname, p.name), 2)
+        elseif p.T.kind == 'ref' then
+            args[i] = setmetatable({ T = p.T, k = 'ref', place = { pk = 'deref' } }, V)
+        else
+            args[i] = dyn(p.T, { op = 'param', name = p.name, T = p.T })
+        end
+    end
+    return args
+end
+
+function S.resolve_runtime(cname)
+    local words = module.lazy
+    local w = words and words[cname]
+    if not w then return nil end
+    module.lazy_fns = module.lazy_fns or {}
+    local fn = module.lazy_fns[cname]
+    if fn then return fn end
+    local args = export_args(w, cname)
+    fn = build_function(w, args, spec_key(w, args) .. '@' .. cname, cname)
+    fn.export_name = cname
+    module.lazy_fns[cname] = fn
+    return fn
+end
+
 function S.export_word(w, cname)
     if not is_word(w) then fail(('export %s: not a native word (%s)'):format(cname, describe(w)), 2) end
+    if module.lazy_mode then
+        module.lazy = module.lazy or {}
+        module.lazy[cname] = w
+        return
+    end
     local args = {}
     for i, p in ipairs(w.params) do
         if w.supplied[i] then
@@ -4909,7 +4949,7 @@ local RT = {
     Take = rt_call('slc_take'), ScopeEnd = rt_call('slc_scope_end'),
     Read = rt_call('slc_io_read'), Write = rt_call('slc_io_write'),
     Open = rt_call('slc_io_open'), Close = rt_call('slc_io_close'),
-    Accept = rt_call('slc_io_accept'), Connect = rt_call('slc_io_connect'), FirstOf = rt_call('slc_first_of'),
+    Accept = rt_call('slc_io_accept'), Connect = rt_call('slc_io_connect'), Arm = rt_call('slc_select_arm'),
     Blocking = rt_call('slc_blocking'),
 }
 
@@ -5161,36 +5201,63 @@ function S.first_of(cases)
     if nrecv == 0 and cases.closed ~= nil then
         fail('first_of: `closed` runs when every received channel is closed, but no case receives', 2)
     end
-    local items, bufs = {}, {}
-    local ChanT = S.cstruct('slc_chan', '"slc_rt.h"', { { 'idx', types.U32 }, { 'gen', types.U32 } })
-    local CaseT = S.cstruct('slc_case', '"slc_rt.h"', { { 'kind', types.I32 }, { 'chan', ChanT },
-        { 'buf', types.ptr(types.Unit) }, { 'ns', types.U64 } })
+    -- The program fills the operation records itself and sequences the attempts
+    -- (lib/select.slc); nothing is built to be interpreted.
+    local sel = require 'slc.select'
+    local HandleT = sel.Handle
+    local bufs, kinds = {}, {}
+    local ops_v = dyn(types.ptr(sel.Op), OPS)
+    local task_v = dyn(types.ptr(sel.Task), TASK)
+    local U8P = types.ptr(types.U8)
     local function field(v, name, T) return { op = 'field', a = v, name = name, T = T } end
-    local function case_item(kind, chan, buf, ns)
-        items[#items + 1] = { kind = { op = 'cconst', cconst = kind, T = types.I32 }, chan = chan, buf = buf, ns = ns }
-    end
+    local function bytes_at(p) return dyn(U8P, { op = 'conv', a = addr_of(p), T = U8P }) end
+    local function i32(v) return known(types.I32, v) end
+    local has_after = false
+    for _, c in ipairs(list) do if c.kind == 'after' then has_after = true end end
+    local time = has_after and sel.now() or known(types.U64, 0)
+    S.set(member(task_v, 'ops'), ops_v)
+    S.set(member(task_v, 'nops'), i32(#list))
+    S.set(member(task_v, 'site'), known(types.CString, S.site('first_of')))
     for i, c in ipairs(list) do
+        local chan = dyn(HandleT, { op = 'agg', T = HandleT, fields = {
+            idx = ex(known(types.U32, 0)), gen = ex(known(types.U32, 0)) } })
+        local buf = dyn(U8P, { op = 'null', T = U8P })
+        local deadline = known(types.U64, 0)
+        kinds[i] = c.kind
+        local code
         if c.kind == 'recv' then
             bufs[i] = hinted(b, c.ch.T.elem, 'got')
-            case_item('SLC_CASE_RECV', ex(c.ch), addr_of(bufs[i]))
+            code, chan, buf = 1, dyn(HandleT, ex(c.ch)), bytes_at(bufs[i])
         elseif c.kind == 'send' then
-            local msg = send_value(c.ch, c.v, true)
-            c.msg = msg
-            case_item('SLC_CASE_SEND', ex(c.ch), addr_of(msg))
+            c.msg = send_value(c.ch, c.v, true)
+            code, chan, buf = 2, dyn(HandleT, ex(c.ch)), bytes_at(c.msg)
         elseif c.kind == 'take' then
             bufs[i] = hinted(b, types.slot(c.pool.T.elem), 'slot')
             -- a pool and a channel name the same pair: { idx, gen }
             local pool = ex(c.pool)
-            local chan = { op = 'agg', T = ChanT, fields = {
-                idx = field(pool, 'idx', types.U32), gen = field(pool, 'gen', types.U32) } }
-            case_item('SLC_CASE_TAKE', chan, addr_of(bufs[i]))
+            code, buf = 4, bytes_at(bufs[i])
+            chan = dyn(HandleT, { op = 'agg', T = HandleT, fields = {
+                idx = field(pool, 'idx', types.U32), gen = field(pool, 'gen', types.U32) } })
         else
-            case_item('SLC_CASE_AFTER', nil, nil, ex(c.d))
+            code = 3
+            deadline = dyn(types.U64, { op = 'bin', o = 'add', a = ex(time), b = ex(c.d), T = types.U64 })
         end
+        -- one function fills every record: its kind and index are arguments, not keys
+        S.boundary(sel.fill)(task_v, S.Ptr(ops_v[i - 1]), S.dynamic(i32(code)), chan, buf,
+            S.dynamic(i32(i - 1)), S.dynamic(deadline))
     end
-    local case_list = { op = 'case_array', items = items, T = types.ptr(CaseT) }
-    local k = wait_op(RT.FirstOf, { TASK, OPS, case_list, ex(known(types.I32, #list)),
-        ex(known(types.Bool, cases.default ~= nil)) }, #list, 'first_of')
+    local pick = S.boundary(sel.scan(kinds, cases.default ~= nil))(task_v, ops_v, time)
+    -- nothing ready and no default: wait on every record. Otherwise the answer is
+    -- already known and no record stays pending.
+    local result = b:new_local(types.I32, 'r')
+    S.if_(S.eq(pick, i32(-100)), function()
+        S.set(result, wait_op(RT.Arm, { TASK, OPS, ex(i32(#list)) }, #list, 'first_of'))
+    end, function()
+        S.set(member(task_v, 'result'), pick)
+        S.set(member(task_v, 'nops'), i32(0))
+        S.set(result, pick)
+    end)
+    local k = dyn(types.I32, read_expr(result))
     local arms = {}
     -- a send case that loses keeps its slots: they come back in every other arm
     local function take_back(except)

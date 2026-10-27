@@ -40,6 +40,7 @@ The resolutions, in the order they matter:
 25. **Text (§39)**: `Str` views, `Text` built in place with formatting decided while compiling, `Chars(n)` values; the text words are slc, so known text folds and known needles unroll. Range facts now include lower bounds by constants, and an arm that cannot fall through lends its facts to what follows. Field and method access in typed bodies no longer collides with the evaluator's own keys (a struct field named `name` used to read the local's name).
 
 26. **Library-defined types (§41)**: a type's layout is a `struct`; what `x.f`, `x[k]`, a conversion, an operator or a comparison means on it is a hook, a Lua function or native word run while specializing. The built-in kinds are served by the same hooks, so a library can define a fixed-point number, a ring buffer or a struct-of-arrays with no compiler change.
+30. **The runtime is built with the program (§42.4) and `first_of` is sequenced where it is written (§36.4)**: a program's C carries the runtime words it reaches and links only `slc_rt.c`; a two-case select runs 2.4 times faster.
 29. **`call` (§12.7)**: a keyword before an application that makes it a function boundary, shared by specialization key; `slc size` reports where one would pay. The map and data-stack libraries use it at seven large steps.
 28. **Native globals and function values (§42)**: `global(T, opts)` is static (or thread-local) storage reached as a `Ptr T`; `Fn(params): ret` is a C function pointer and `fnptr(word)` materializes a word as one. With them the whole runtime is SLC: the scheduler, tasks, workers, registries, timers, blocking threads, entropy and the I/O bootstraps compile with the program's other SLC words; C keeps `setjmp` traps, address location in a data stack and the io_uring kernel ABI. The data-stack set and the hash key are read in place by programs.
 27. **Field shorthand (§3.3)**: `.name` in a table constructor is `name = name`.
@@ -3057,6 +3058,8 @@ first_of {
 * When one case completes, the others are **withdrawn before the handler runs**, so exactly one case happens. A completing counterpart first claims the waiting task with a compare-and-swap on its selection word, so two senders cannot both deliver to it.
 * Ready cases are scanned from a rotating start, for fairness.
 
+The cases are known while compiling, so `first_of` is sequenced where it is written (`lib/select.slc`): the program fills the operation records itself, and a shared function per shape of `first_of` (its kinds in order, and whether it has a default) makes one attempt per case through the runtime's `slc_poll_recv`, `slc_poll_send` and `slc_poll_take`, each one locked transaction. Only when nothing is ready and there is no default does it wait, on every record, through `slc_select_arm`. No case array is built, no case kind is looked up at run time, and the clock is read only when a case waits on time: a two-case select over ready channels runs about 2.4 times faster than the interpreter it replaced.
+
 **Why I/O is never a case of `first_of`.** A channel operation, a pool take and a timer belong to the runtime, which can take them back exactly: a withdrawn receive has received nothing. The kernel's work cannot be taken back. A read that loses the race may already have consumed bytes from the socket, and then they are gone. So `first_of` admits only operations the runtime can withdraw, and an I/O case is rejected. The two needs behind such a case have direct forms:
 
 * *I/O with a time limit:* give the operation a deadline. Its result gains `timed_out`, and the result is exact: if bytes were read, the result says `done` with their count, never `timed_out`.
@@ -3292,7 +3295,7 @@ The `failed` arms the program left empty disappeared; the match is the branch on
 
 ## 36.8 The runtime
 
-The compiler emits calls to the runtime's exported words; everything system-specific sits behind them. The runtime is SLC (`runtime/*.slc`, §42), generated to C once per I/O backend; C holds only what C alone expresses (§42.3).
+The compiler emits calls to the runtime's exported words; everything system-specific sits behind them. The runtime is SLC (`runtime/*.slc`, §42) and is built with the program: a program's C holds the runtime words it reaches, by name, and nothing else, so it is one file (§42.4). C holds only what C alone expresses (§42.3).
 
 * **Workers.** N threads, one per core by default (`SLC_WORKERS` overrides), run runnable tasks from a run queue: a task's step runs until it returns `WAIT`, `YIELD` or `DONE`. Plain threads blocked in a wait run tasks too. One locked queue; work stealing can come later without changing anything above it.
 * **Handoffs stay on one thread.** A task woken by the task running on a thread runs there next, Go's `runnext`: a producer and its consumer pass values without crossing threads.
@@ -3837,6 +3840,14 @@ What stays C, and why:
 | `runtime/slc_io_uring.c` | the kernel takes addresses as integers (`sqe->addr`, `user_data`); SLC has no integer-pointer conversions |
 | `slc_rt.h` | the shared ABI: record layouts, constants, prototypes and inline accessors such as `slc_slot_at` |
 
+## 42.4 The runtime is built with the program
+
+A program is one C file. The runtime's words are made lazily: `export` in `runtime/scheduler.slc` records a word, and the function is made only when something names it. Reachability follows names: a call to an extern or runtime function reaches the runtime word of that name, and so does what the generated code itself calls (data-stack bookkeeping, spawn, plain waits, the slot check). Everything else is left out, so `hello` is 13 lines of C and a program that never waits carries no scheduler.
+
+Beside the program only C that C alone expresses links: `runtime/slc_rt.c` (traps and stack pinning) and, for io_uring, `runtime/slc_io_uring.c`. C of your own that calls runtime words the program never names asks for them: `--keep-runtime slc_stacks_free,slc_store_new` (or `SLC_KEEP_RUNTIME`).
+
+Two paths keep a single runtime unit instead, because they must have one copy of the scheduler's state: the in-process backend (`slc.load`, `slc run`, `native`) and libgccjit objects (`--gccjit`, `slc build`), which link the unit that `make runtime` prints (`--shared-runtime` builds it).
+
 # Appendix A. The prototype
 
 The prototype (`slc`) implements this document except where marked. It needs LuaJIT, LPeg and a C99 compiler; the second backend (§38) also needs libgccjit.
@@ -3876,6 +3887,6 @@ luajit tests/run.lua                  compile, check and run every example, on b
 | Bundled `require "slc.*"` libraries | `lib/` (`libc.slc`, `posix.slc`, `io.slc`) |
 | Driver | `slc.lua` |
 
-Generated C includes `slc_rt.h` when it needs the runtime; link `runtime/slc_rt.c` and the generated runtime unit (`make runtime` prints its path; `SLC_IO` selects the backend), plus `runtime/slc_io_uring.c` for io_uring, with `-pthread` (kqueue on Linux: `-I/usr/include/kqueue -lkqueue`). The examples in `examples/` contain every program in this document; their harnesses in `tests/` link the generated C and check results (including against reference implementations, and under UBSan and ASan). `tests/errors.lua` holds programs that must be rejected, each with its expected diagnostic and line.
+Generated C includes `slc_rt.h` when it needs the runtime; link `runtime/slc_rt.c` (as an archive member, so a program that never calls into the runtime does not need it) and, for io_uring (`SLC_IO=uring`), `runtime/slc_io_uring.c`, with `-pthread` (kqueue on Linux: `-I/usr/include/kqueue -lkqueue`). The examples in `examples/` contain every program in this document; their harnesses in `tests/` link the generated C and check results (including against reference implementations, and under UBSan and ASan). `tests/errors.lua` holds programs that must be rejected, each with its expected diagnostic and line.
 
 Limits worth knowing: the inline fuel is 400 nested applications, the known-loop fuel 100 000 iterations, and a pending value may hold up to 24 expression nodes before it is stored.

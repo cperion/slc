@@ -17,7 +17,7 @@ function B.source(backend)
     assert(backend == 'poll' or backend == 'kqueue' or backend == 'uring', 'unknown I/O backend ' .. backend)
     if cached[backend] then return cached[backend] end
     local text = command('SLC_IO=' .. quote(backend) .. ' ' .. quote(os.getenv('LUA') or 'luajit') .. ' ' .. quote(here .. '/slc.lua')
-        .. ' ' .. quote(here .. '/runtime/scheduler.slc'))
+        .. ' --shared-runtime ' .. quote(here .. '/runtime/scheduler.slc'))
     -- The runtime uses POSIX pread/pwrite and close-on-exec flags. Keep feature
     -- selection before every system header, including generated stdint.h.
     text = '#define _POSIX_C_SOURCE 200809L\n#define _DEFAULT_SOURCE 1\n' .. text

@@ -1,0 +1,86 @@
+-- first_of at the place it is written. The cases are known while compiling, so
+-- each case's attempt is its own code in the program: no case array is built,
+-- no kind is looked up, and the clock is read only when a case waits on time.
+-- The locked transactions themselves are the runtime's (slc_poll_*); this only
+-- sequences them. The call site fills the operation records (see S.first_of).
+local select = {}
+local h = '"slc_rt.h"'
+local Handle = cstruct("slc_chan", h, { { "idx", U32 }, { "gen", U32 } })
+local Op
+local Task = cstruct("slc_task", h, function(Self)
+        Op = cstruct("slc_op", h, function(Operation)
+                return { { "task", Ptr Self },
+                    { "kind", I32 }, { "chan", Handle }, { "buf", Ptr U8 },
+                    { "index", I32 }, { "queued", I32 }, { "deadline", U64 } }
+            end)
+        return { { "result", I32 }, { "ops", Ptr Op }, { "nops", I32 }, { "site", CString } }
+    end)
+select.Handle, select.Op, select.Task = Handle, Op, Task
+
+local poll_recv = extern("slc_poll_recv", { Ptr Task, Ptr Op }, I32, { header = h })
+local poll_send = extern("slc_poll_send", { Ptr Task, Ptr Op }, I32, { header = h })
+local poll_take = extern("slc_poll_take", { Ptr Task, Ptr Op }, I32, { header = h })
+local ticket = extern("slc_select_ticket", {}, U64, { header = h })
+select.now = extern("slc_now_ns", {}, U64, { header = h })
+
+-- one operation record, as the runtime reads it
+select.fill = do(task: Ptr Task,
+    op: Ptr Op, kind: I32, chan: Handle, buf: Ptr U8, index: I32, deadline: U64): Unit
+    op.task = task
+    op.kind = kind
+    op.chan = chan
+    op.buf = buf
+    op.index = index
+    op.queued = 0
+    op.deadline = deadline
+end
+
+local none = I32(-100)
+local closed = I32(-2)
+local cache = {}
+
+-- the word for one shape of first_of: its kinds in order ('recv', 'send', 'take',
+-- 'after') and whether it has a default. It gives the index of the first case
+-- ready, starting from a rotating case; closed when every receive saw a closed
+-- channel; the default (-1) when it has one; none when nothing is ready.
+function select.scan(kinds, has_default)
+    local key = table.concat(kinds, ',') .. (has_default and '+default' or '')
+    if cache[key] then return cache[key] end
+    local n = #kinds
+    local receives = 0
+    for _, kind in ipairs kinds do
+        if kind == 'recv' then receives = receives + 1 end
+    end
+    local scan = do(task: Ptr Task, ops: Ptr Op, time: U64): I32
+        local start = I32(ticket() % U64 n)
+        local pick = none
+        local drained = I32 0
+        local j = I32 0
+        while j < n and pick == none do
+            local i = (start + j) % n
+            for k, kind in ipairs kinds do
+                if i == k - 1 then
+                    local op = Ptr ops[k - 1]
+                    if kind == 'recv' then
+                        local got = poll_recv(task, op)
+                        if got == 1 then pick = i elseif got < 0 then drained = drained + 1 end
+                    elseif kind == 'send' then
+                        if poll_send(task, op) ~= 0 then pick = i end
+                    elseif kind == 'take' then
+                        if poll_take(task, op) ~= 0 then pick = i end
+                    elseif op.deadline <= time then
+                        pick = i
+                    end
+                end
+            end
+            j = j + 1
+        end
+        if pick == none and receives > 0 and drained == receives then pick = closed end
+        if pick == none and has_default then pick = -1 end
+        return pick
+    end
+    cache[key] = scan
+    return scan
+end
+
+return select

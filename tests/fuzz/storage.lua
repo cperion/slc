@@ -29,10 +29,12 @@ local TMP = (os.getenv('TMPDIR') or '/tmp') .. '/slc_storage_' .. STAMP
 os.execute('mkdir -p ' .. TMP)
 -- the compiler to call for generated programs: this binary when embedded
 local SLC = os.getenv('SLC_DIST') and ('%q'):format(os.getenv('SLC_DIST')) or ('luajit %q/slc.lua'):format(root)
--- the runtime as the embedding binary carries it (a prebuilt archive), or the
--- sources in a development tree
-local RT = os.getenv('SLC_RT') and ('%q'):format(os.getenv('SLC_RT'))
-    or (require('slc.runtime_build').source() .. ' ' .. root .. '/runtime/slc_rt.c')
+-- a program carries the runtime words it reaches; only runtime/slc_rt.c (traps) links beside it
+-- as an archive member, pulled only by a program that calls into the runtime
+local RT = TMP .. '/libslc_rt.a'
+assert(os.execute(('cc -std=c99 -O1 -pthread -I%q -c %q -o %q && ar rcs %q %q'):format(
+    root .. '/runtime', root .. '/runtime/slc_rt.c', TMP .. '/slc_rt.o', RT, TMP .. '/slc_rt.o')) == 0
+    or os.execute('true'), 'cannot build the runtime archive')
 
 local function sh(cmd)
     local p = io.popen('(' .. cmd .. ') 2>&1; echo "__rc=$?"')

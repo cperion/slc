@@ -28,13 +28,22 @@ model(policy, 'scheduler-c')
 -- No optional skip: this target deliberately requires both supported backends.
 local obj = build .. '/scheduler-jit.o'
 run('CC=' .. q((os.getenv('CC') or 'cc') .. ' -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE=1')
-    .. ' CPATH=' .. q(root .. '/runtime:' .. (os.getenv('CPATH') or '')) .. ' ' .. driver .. ' --gccjit -o ' .. q(obj) .. ' ' .. q(root .. '/runtime/scheduler.slc'))
+    .. ' CPATH=' .. q(root .. '/runtime:' .. (os.getenv('CPATH') or '')) .. ' ' .. driver .. ' --shared-runtime --gccjit -o ' .. q(obj) .. ' ' .. q(root .. '/runtime/scheduler.slc'))
 model(obj, 'scheduler-jit')
 for _, name in ipairs { 'channels', 'io' } do
     local c = build .. '/' .. name .. '.c'
     local bin = q(build .. '/' .. name)
-    run(driver .. ' -o ' .. q(c) .. ' ' .. q(root .. '/examples/' .. name .. '.slc'))
-    run(cc .. ' ' .. q(c) .. ' ' .. q(policy) .. ' ' .. q(root .. '/tests/' .. name .. '_main.c') .. runtime .. ' -o ' .. bin)
+    -- the runtime words the harness's C calls by name, which the program does not
+    local f = assert(io.open(root .. '/tests/' .. name .. '_main.c'))
+    local keep, seen = {}, {}
+    for id in f:read('*a'):gmatch('slc_[%w_]+') do
+        if not seen[id] then seen[id] = true; keep[#keep + 1] = id end
+    end
+    f:close()
+    run(driver .. ' --keep-runtime ' .. q(table.concat(keep, ',')) .. ' -o ' .. q(c) .. ' '
+        .. q(root .. '/examples/' .. name .. '.slc'))
+    -- the program carries the runtime words it reaches; only slc_rt.c links beside it
+    run(cc .. ' ' .. q(c) .. ' ' .. q(root .. '/tests/' .. name .. '_main.c') .. runtime .. ' -o ' .. bin)
     run('SLC_WORKERS=2 ' .. bin)
     run('SLC_SCHED_SEED=7 ' .. bin)
 end

@@ -20,6 +20,8 @@ list('macro/*.lua')
 list('slc/*.lua')
 list('lib/*.slc')
 list('runtime/*.h')
+list('runtime/*.slc')
+list('runtime/*.c')
 list('tests/fuzz/*.lua')
 list('tests/fuzz/regressions/*.lua')
 -- built by `make dist`: linked into the binary and carried for `slc build`

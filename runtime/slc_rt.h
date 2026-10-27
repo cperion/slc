@@ -186,7 +186,7 @@ typedef struct slc_op {
     void (*job)(void *);     /* blocking work */
 } slc_op;
 
-typedef struct slc_case { int32_t kind; slc_chan chan; void *buf; uint64_t ns; } slc_case;
+/* operation kinds of a first_of record, and its two non-case results */
 #define SLC_CASE_RECV 1
 #define SLC_CASE_SEND 2
 #define SLC_CASE_AFTER 3
@@ -296,8 +296,17 @@ int32_t slc_blocking(slc_task *t, slc_op *ops, void (*job)(void *), void *env, c
 /* the backend linked in: "poll", "io_uring" or "kqueue" */
 const char *slc_io_backend(void);
 
-/* result: the index of the case that completed, SLC_CASE_DEFAULT or SLC_CASE_CLOSED */
-int32_t slc_first_of(slc_task *t, slc_op *ops, const slc_case *cases, int32_t n, bool has_default,
-                     const char *site);
+/* first_of is sequenced where it is written (lib/select.slc): the program fills the
+ * operation records, tries each case once through these, and arms them all when none
+ * is ready. Each try is one locked transaction on one channel or pool: 1 it
+ * happened, 0 not ready (a receive also gives -1: closed and drained). */
+int32_t slc_poll_recv(slc_task *t, slc_op *op);
+int32_t slc_poll_send(slc_task *t, slc_op *op);
+int32_t slc_poll_take(slc_task *t, slc_op *op);
+/* wait on every record; SLC_NOW when one was ready after all, SLC_PENDING otherwise */
+int32_t slc_select_arm(slc_task *t, slc_op *ops, int32_t n, const char *site);
+/* where the scan starts, so no case is always favoured */
+uint64_t slc_select_ticket(void);
+uint64_t slc_now_ns(void);
 
 #endif

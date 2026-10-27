@@ -114,9 +114,10 @@ available at startup. See specification §38 for error recovery, code lifetime a
 foreign-library requirements. Direct invocations must have their dependencies on
 the loader paths; Make's environment is not a system-wide installation.
 
-Programs needing data stacks link `runtime/slc_rt.c` and the generated runtime
-unit (`make runtime` prints its path; `SLC_IO` selects the I/O backend). Tasks also
-need `-pthread`, and io_uring `runtime/slc_io_uring.c`. The runtime itself is SLC.
+A program's C is one file: it carries the runtime words it reaches (the runtime is
+SLC, built with the program; `SLC_IO` selects the I/O backend). Beside it link
+`runtime/slc_rt.c` when it includes `slc_rt.h`, `runtime/slc_io_uring.c` for io_uring,
+and `-pthread` for tasks.
 See the specification for io_uring/kqueue support and validation limits.
 
 ## Fixed-size values at compile time

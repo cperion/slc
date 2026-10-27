@@ -99,7 +99,30 @@ end
 local function sources(p, backend)
     return p .. ' ' .. root .. '/runtime/slc_rt.c' .. (backend and (' ' .. root .. '/runtime/' .. backend) or '')
 end
-local rt_sources = sources(policy)
+-- A program's C carries the runtime words it reaches: beside it only runtime/slc_rt.c
+-- (traps) links. The shared policy unit is for code that does not carry them: the
+-- libgccjit objects and the runtime's own harnesses.
+-- slc_rt.c links as an archive member, pulled only when the program calls into it
+local shared_sources = sources(policy)
+local rt_archive = build .. '/libslc_rt_test.a'
+do
+    local ok, out = sh(('%s -c %s -o %s/slc_rt_test.o && rm -f %s && ar rcs %s %s/slc_rt_test.o')
+        :format(CC, sq(root .. '/runtime/slc_rt.c'), build, sq(rt_archive), sq(rt_archive), build))
+    assert(ok, out)
+end
+local rt_sources = sq(rt_archive)
+
+-- the runtime words a harness's C calls by name, which the program does not
+local function keep_for(name)
+    local f = io.open(root .. '/tests/' .. name .. '_main.c')
+    if not f then return '' end
+    local text = f:read '*a'; f:close()
+    local seen, list = {}, {}
+    for id in text:gmatch('slc_[%w_]+') do
+        if not seen[id] then seen[id] = true; list[#list + 1] = id end
+    end
+    return table.concat(list, ',')
+end
 
 local function have(program) return sh('command -v ' .. program) end
 local clang = have('clang')
@@ -123,7 +146,7 @@ do
     local done = phase('compile examples')
     local cmds, labels = {}, {}
     for i, f in ipairs(examples) do
-        cmds[i] = ('%s -o %s %s'):format(SLC, cpaths[i], f)
+        cmds[i] = ('%s --keep-runtime %s -o %s %s'):format(SLC, sq(keep_for(names[i])), cpaths[i], f)
         labels[i] = names[i] .. ': compile'
     end
     local results = par(cmds, labels)
@@ -217,19 +240,20 @@ do
                     and not source:find('slc_strmap_new', 1, true))
             end
             if name == 'io' then
-                local base = root .. '/runtime/slc_rt.c'
-                local backends = { { 'io_uring', 'slc_io_uring.c', '' } }
+                local base = rt_sources
+                local backends = { { 'io_uring', 'uring', 'slc_io_uring.c', '' } }
                 if io.open('/usr/include/kqueue/sys/event.h') then
-                    backends[#backends + 1] = { 'kqueue', nil, '-I/usr/include/kqueue -lkqueue' }
+                    backends[#backends + 1] = { 'kqueue', 'kqueue', nil, '-I/usr/include/kqueue -lkqueue' }
                 end
                 for _, be in ipairs(backends) do
-                    local src = policy_for(be[1] == 'io_uring' and 'uring' or be[1]) .. ' ' .. base
-                        .. (be[2] and (' ' .. root .. '/runtime/' .. be[2]) or '')
+                    -- the backend is chosen when the program is built: it carries those runtime words
+                    local own = ('%s.%s.c'):format(c, be[1])
+                    local src = base .. (be[3] and (' ' .. root .. '/runtime/' .. be[3]) or '')
                     add(name .. ': run on ' .. be[1],
-                        ('%s %s %s %s -pthread %s -o %s.%s && %s.%s'):format(CC, c, main, src, be[3],
-                            sq(c), be[1], sq(c), be[1]))
+                        ('SLC_IO=%s %s --keep-runtime %s -o %s %s/examples/io.slc && %s %s %s %s -pthread %s -o %s.%s && %s.%s')
+                        :format(be[2], SLC, sq(keep_for('io')), sq(own), root, CC, sq(own), main, src, be[4], sq(c), be[1], sq(c), be[1]))
                 end
-                local src = policy_for('poll') .. ' ' .. base
+                local src = base
                 add(name .. ': run on poll',
                     ('%s %s %s %s -pthread -o %s.poll && %s.poll'):format(CC, c, main, src, sq(c), sq(c)))
                 if clang then
@@ -332,7 +356,7 @@ if have_jit then
             if built[i] and mains[i] then
                 local o = objects[i]
                 add(name .. ': gccjit run',
-                    ('%s %s %s %s -pthread -o %s.bin && %s.bin'):format(CC, o, mains[i], rt_sources, sq(o), sq(o)))
+                    ('%s %s %s %s -pthread -o %s.bin && %s.bin'):format(CC, o, mains[i], shared_sources, sq(o), sq(o)))
                 if name == 'channels' then
                     add(name .. ': gccjit deterministic schedule', ('SLC_SCHED_SEED=7 %s.bin'):format(sq(o)))
                 end
@@ -396,6 +420,11 @@ do
         { 'activities', 'NodeStore_borrow', false, 'no C helper for a store lookup' },
         { 'boundary', 'uint32_t t = weigh(a);\n    return t + weigh(b) + (a * 3u + a * 3u + a);', true,
           'call makes a shared function, a plain application stays inline' },
+        { 'channels', 'slc_poll_recv(', true, 'first_of makes its attempts in the program' },
+        { 'channels', 'slc_first_of', false, 'no first_of interpreter is called' },
+        { 'channels', 'slc_case', false, 'no first_of case array is built' },
+        { 'channels', '\nvoid slc_task_wake(', true, 'the program carries the runtime words it reaches' },
+        { 'hello', 'slc_trap_recoverable', false, 'a program that never calls into the runtime carries none of it' },
         { 'boundary', 'static uint32_t weigh_2(void) {\n    return 49u;\n}', true,
           'a known argument under call specializes the function' },
     }

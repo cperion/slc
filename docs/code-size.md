@@ -65,6 +65,14 @@ The data-stack library had the same shape: growing a stack was inlined at every 
 Two `call`s in `lib/stacks.slc` took `stores` from 3,100 to 1,600 lines and `strings`
 from 4,100 to 2,800.
 
+## The runtime is in the count
+
+A program's C carries the runtime words it reaches (spec §42.4). `hello` is 13 lines;
+a program that waits on a channel carries the scheduler, about 5,000 lines in
+`channels.slc`. `first_of` is a shared function per shape of select, not a copy per use.
+A program that never waits carries none of that, so a size surprise in a program with
+tasks is usually the program, not the runtime.
+
 ## When not to use `call`
 
 * **Hot paths.** Measure the run time of the loop that matters before and after. If it

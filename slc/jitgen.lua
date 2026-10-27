@@ -443,21 +443,6 @@ function Fn:expr(e)
     elseif op == 'slot_at' then
         local raw = ctx:call(u:rt_fn('slc_slot_at'), { self:task_value(), self:expr(e.slot) })
         return ctx:conv(raw, u:ct(e.T))
-    elseif op == 'case_array' then
-        -- the first_of case list: an array of slc_case, passed as its address
-        local case_t = u.scope:find('types', 'slc_case')
-        if not case_t then fail('no slc_case declared in the runtime header') end
-        local n = #e.items
-        local arr = self.fb:var(C.array(case_t, math.max(n, 1)), 'cases' .. n)
-        self.fb:assign(arr, ctx:zero(C.array(case_t, math.max(n, 1))))
-        for i, c in ipairs(e.items) do
-            local at = ctx:addr(ctx:index(arr, ctx:int_const(C.SIZE, i - 1)))
-            self.fb:assign(ctx:arrow(at, 'kind'), self:expr(c.kind))
-            if c.chan then self.fb:assign(ctx:arrow(at, 'chan'), self:expr(c.chan)) end
-            if c.buf then self.fb:assign(ctx:arrow(at, 'buf'), self:expr(c.buf)) end
-            if c.ns then self.fb:assign(ctx:arrow(at, 'ns'), self:expr(c.ns)) end
-        end
-        return ctx:addr(arr)
     elseif op == 'rtcall' then
         -- a runtime call: the header's declaration and converted arguments
         local target = u:rt_fn(e.cname)
