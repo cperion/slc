@@ -17,7 +17,7 @@ Runtime policy is ordinary SLC, built from [the runtime entry](scheduler.slc).
 - [Tasks](tasks.slc): workers, plain-thread waits, wake transitions, scopes, the
   channel and pool registries, timers, blocking threads and the I/O accounting,
   under the scheduler lock, with the thread bodies passed to `pthread_create` as
-  `fnptr` words. Its state is native globals (`global`, spec §42), thread-local
+  `fnptr` words. Its state is native globals (`global`, syntax §21), thread-local
   where it belongs to a thread.
 - [Select](../lib/select.slc): `first_of` at its call site. The program fills the
   operation records and a shared function per shape of select makes one attempt per
@@ -68,6 +68,6 @@ and poll-I/O integration. It requires libgccjit. The normal test suite also
 exercises backend integrations and the existing sanitizer paths. Missing platform
 headers or kernel support are limitations, not passing backend checks.
 
-[The remaining architecture audit](../docs/helpers-audit.md) tracks compiler-side
-library composition and external numeric conversion separately from this runtime
-rewrite.
+[The architecture](../docs/architecture.md#15-what-stays-in-c-and-lua-and-why) tracks
+compiler-side library composition and the external mechanisms separately from this
+runtime rewrite.

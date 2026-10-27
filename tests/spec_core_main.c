@@ -9,6 +9,7 @@ uint32_t choose_use(bool, uint32_t), f(bool, uint32_t), unannotated(uint32_t), t
 uint32_t add6(uint32_t), runtime_sum(uint32_t), count3(uint32_t, uint32_t, uint32_t);
 void print_twice(uint32_t);
 void counter_add(Counter *, uint32_t);
+uint32_t branch_bump(bool, uint32_t);
 
 static uint32_t printed;
 void foreign_print(uint32_t x) { printed = x; }
@@ -26,6 +27,8 @@ int main(void) {
     print_twice(21); assert(printed == 42);
     assert(count3(1, 2, 3) == 6);
     Counter c = { 5 }; counter_add(&c, 3); assert(c.value == 8);
+    /* a call in one arm escapes the local for every path: both arms must see 0 */
+    assert(branch_bump(true, 3) == 3 && branch_bump(false, 3) == 6);
     puts("spec_core: ok");
     return 0;
 }

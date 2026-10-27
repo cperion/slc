@@ -121,7 +121,7 @@ function map.library(T, storage, Entry, Result, string_keys)
         local slot = U32 0
         while slot < old_capacity do
             local entry = read m base slot
-            if entry.hash ~= 0 then insert_raw m fresh capacity entry end
+            if entry.hash ~= 0 then call insert_raw m fresh capacity entry end
             slot = slot + 1
         end
         storage.copy m base fresh bytes

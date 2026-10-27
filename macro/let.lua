@@ -4,7 +4,7 @@ macro.let: Let's lambdas and literal arguments as LuaMacro macros, for Lua 5.1 a
     luajit luam -lmacro.let program.lua       run
     luajit luam -lmacro.let -d program.lua    print the Lua it becomes
 
-The forms, as in Let (syntax.md §4 and the application sugar):
+The forms, as in Let's own syntax.md §4 and the application sugar:
 
     do(x) = x + 1            an expression lambda: the body runs to the end of its
                              expression, across lines, up to its delimiter

@@ -26,7 +26,7 @@ local chain = do(x: U32): U32
 end
 export chain
 
--- §8 programs as written in the spec
+-- syntax §5: programs as the language states them
 local snapshot = do(x: U32): U32
     local y: U32 = x * 3
     if x > 10 then
@@ -64,7 +64,7 @@ local use = do(flag: Bool, x: U32): U32
 end
 export use
 
--- §7.5 / §9.2: rebinding in known branches and host loops is fine
+-- syntax §4.5 / syntax §6.2: rebinding in known branches and host loops is fine
 local gen = do(mode)
     return do(x: U32): U32
         local scale = 1

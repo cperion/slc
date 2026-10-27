@@ -1,4 +1,4 @@
--- The storage model fuzzer (§1.5): a random sequence of store operations runs
+-- The storage model fuzzer (architecture §17.3): a random sequence of store operations runs
 -- twice -- once in SLC (C backend, -O0 and -O2) and once on a plain Lua table --
 -- and every observable step must agree.
 --

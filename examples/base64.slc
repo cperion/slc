@@ -1,0 +1,80 @@
+-- base64: encode standard input to standard output (RFC 4648, with padding).
+--
+-- A program that is mostly a loop, written the way the guide describes: the
+-- alphabet is a `Str` value known while compiling, so indexing it with a masked
+-- byte is checked and then folded away; the two buffers are activities, so a
+-- `return` inside either body still frees them.
+
+local c = require "slc.libc"
+
+local read_some = extern("read", { I32, Ptr U8, U64 }, I64, { header = "<unistd.h>" })
+local write_some = extern("write", { I32, Ptr U8, U64 }, I64, { header = "<unistd.h>" })
+
+local alphabet = Str "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local pad = U8 61
+
+-- one group: three input bytes become four characters, padded when `n` is short
+local encode_group = do(out: Ptr U8, b0: U32, b1: U32, b2: U32, n: U32): Unit
+    out[0] = alphabet[shr(b0, 2)]
+    out[1] = alphabet[bor(shl(band(b0, 3), 4), shr(b1, 4))]
+    out[2] = alphabet[bor(shl(band(b1, 15), 2), shr(b2, 6))]
+    out[3] = alphabet[band(b2, 63)]
+    if n < 3 then out[3] = pad end
+    if n < 2 then out[2] = pad end
+end
+
+-- every whole group in the buffer, then the tail when this is the end of the input;
+-- returns how many characters were written
+local encode = do(input: Ptr U8, have: U32, output: Ptr U8, last: Bool): U32
+    local groups = have / 3
+    local i: U32 = 0
+    while i < groups do
+        encode_group(Ptr output[i * 4], U32 input[i * 3], U32 input[i * 3 + 1],
+            U32 input[i * 3 + 2], 3)
+        i = i + 1
+    end
+    local out = groups * 4
+    local tail = have - groups * 3
+    if last and tail > 0 then
+        local b1: U32 = 0
+        if tail > 1 then b1 = U32 input[groups * 3 + 1] end
+        encode_group(Ptr output[out], U32 input[groups * 3], b1, 0, tail)
+        out = out + 4
+    end
+    return out
+end
+
+-- read into the input buffer, encode into the output buffer, write it out; the
+-- leftover one or two bytes at the end of a chunk move to the front of the buffer
+local pump = do(input: Ptr U8, capacity: U32): I32
+    local code: I32 = 0
+    c.with_buffer(U32 4096) do(output...)
+        local have: U32 = 0
+        local eof: Bool = false
+        while not eof do
+            local got = read_some(0, Ptr input[have], U64(capacity - have))
+            if got <= 0 then eof = true
+            else have = have + U32 got end
+            local out = encode(input, have, output.data, eof)
+            local groups = have / 3
+            local tail = have - groups * 3
+            local k: U32 = 0
+            while k < tail do
+                input[k] = input[groups * 3 + k]
+                k = k + 1
+            end
+            have = tail
+            if out > 0 and write_some(1, output.data, U64 out) < 0 then code = 1 end
+        end
+    end
+    return code
+end
+
+local main = do(): I32
+    local code: I32 = 0
+    c.with_buffer(U32 3072) do(input...)
+        code = pump(input.data, input.size)
+    end
+    return code
+end
+export main

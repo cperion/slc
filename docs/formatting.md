@@ -58,14 +58,14 @@ file, not arbitrary downloaded Lua code.
 | `column_width` | integer 20–240 | Soft wrapping target, not a hard limit. |
 | `call_style` | `"minimal"`, `"preserve"` | Remove safe call parentheses (and fold a spine's closers), or retain call spelling. |
 | `type_style` | `"inferred"`, `"preserve"` | Drop a local's annotation when its initializer is an application of that same type (below), or keep every annotation. |
-| `table_style` | `"shorthand"`, `"preserve"` | `"shorthand"` writes a table entry `name = name` as `.name` (spec §3.3); `"preserve"` keeps the spelling, including any `.name` already written. |
+| `table_style` | `"shorthand"`, `"preserve"` | `"shorthand"` writes a table entry `name = name` as `.name` (syntax §2.4); `"preserve"` keeps the spelling, including any `.name` already written. |
 | `spine_style` | `"pure"`, `"all"`, `"none"` | Which link bodies of an `endall` spine lose their indent. |
 
 Unknown settings and invalid values are errors, not silently ignored options.
 
 ## Inferred types
 
-A native local takes its type from its initializer (spec §8.1), so
+A native local takes its type from its initializer (syntax §5.1), so
 `local p: Point = Point { x = 1 }` repeats itself. With `type_style = "inferred"`
 the annotation is removed when the initializer is exactly an application of the
 annotated type expression:
@@ -149,7 +149,7 @@ A spine is a stack of calls whose bodies are the next call, closed by one
 ```lua
     counted stats do
     counted stats do
-    transaction document do(editing...)
+    transaction document do(draft...)
         insert n
     endall
 ```

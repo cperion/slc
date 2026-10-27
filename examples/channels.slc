@@ -1,4 +1,4 @@
--- Tasks and channels (§36): tasks share no memory and talk over channels.
+-- Tasks and channels (syntax §20): tasks share no memory and talk over channels.
 -- A task is a compiled state machine; what it sees from outside are copies
 -- taken at spawn. A tasks scope ends when all its tasks have.
 

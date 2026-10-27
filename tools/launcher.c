@@ -1,9 +1,10 @@
 /* The slc launcher: embed slc's own parts, run them on the host's LuaJIT.
  *
- * This is the single-binary entry point (alpha §3). It writes the embedded tree
- * into a content-addressed cache directory once, then runs slc.lua from there
- * with the host's LuaJIT (linked dynamically) and the host's libgccjit (loaded at
- * run time by slc itself). It compiles no C and embeds no compiler.
+ * This is the single-binary entry point (architecture §14.3). It writes the files
+ * the host tools must see (the runtime archive and the headers) into a work
+ * directory per run, loads everything else from memory, and runs slc.lua from
+ * there with the host's LuaJIT (linked dynamically) and the host's libgccjit
+ * (loaded at run time by slc itself). It compiles no C and embeds no compiler.
  */
 #include <lua.h>
 #include <lauxlib.h>

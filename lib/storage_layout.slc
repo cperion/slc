@@ -30,7 +30,7 @@ local ReadMap = cstruct("const slc_map", h, {
 local ReadMapPtr = Ptr ReadMap
 layout.map_address = do(map: ReadMapPtr, slot: U32): VP
     if slot >= map.cap then trap "Map: invalid bucket" end
-    local s = stacks.get map.stack
+    local s = call stacks.get map.stack
     return VP(Ptr s.data[map.base + U64 slot * map.width])
 end
 layout.store_new = do(stack: U64): layout.Store
@@ -57,7 +57,7 @@ layout.strmap_new = do(table_stack: U64, arena_stack: U64, width: U64): layout.S
         .arena_stack, arena_base = base, arena_len = 0, dead = 0 }
 end
 layout.iter_new = do(stack: U64, map: Ptr layout.Map): layout.Grow
-    local s = stacks.get stack
+    local s = call stacks.get stack
     if stack == map.stack or s.map_counter ~= null U32 then trap "Map: invalid iteration guard stack" end
     if map.iterating == U32 0xffffffff then trap "Map: too many nested iterations" end
     local id = token()
@@ -173,9 +173,13 @@ function layout.maps(T, Entry, view)
         return EP stacks.bytes(table_of(self).stack,
             base + U64 slot * size_of Entry, size_of Entry)
     end
-    p.read = do(self: Ref T, base: U64, slot: U32): Entry = at(self, base, slot)[0]
+    p.read = do(self: Ref T, base: U64, slot: U32): Entry
+        local entry = call at(self, base, slot)
+        return entry[0]
+    end
     p.write = do(self: Ref T, base: U64, slot: U32, entry: Entry): Unit
-        at(self, base, slot)[0] = entry
+        local at_slot = call at(self, base, slot)
+        at_slot[0] = entry
     end
     p.address = do(self: Ref T, slot: U32): Ptr T.elem
         local entry = EP layout.map_address(ReadMapPtr(table_of self), slot)

@@ -1,6 +1,7 @@
--- The spec's examples, sections 4 to 14, as one program.
+-- Programs from syntax.md sections 3 to 8 and architecture.md section 4, as one
+-- program.
 
--- §4.1 ordinary Lua builds native words
+-- syntax §3.1 ordinary Lua builds native words
 local make_multiplier = do(k)
     return do(x: U32): U32 =
     x * k
@@ -11,7 +12,7 @@ local triple = make_multiplier 3
 export double
 export triple
 
--- §5 words, autocurrying, saturated specialization
+-- syntax §3.4 words, autocurrying, saturated specialization
 local affine = do(
     a: U32,
     b: U32,
@@ -25,7 +26,7 @@ assert(host(affine(4, 3, 10)) == 43)
 export transform
 export use
 
--- §7.1 native conditionals
+-- syntax §4.1 native conditionals
 local choose = do(
     enabled: Bool,
     k: U32,
@@ -47,7 +48,7 @@ end
 export times8
 export choose_use
 
--- §7.2 branch-local state
+-- syntax §4.2 branch-local state
 local f = do(flag: Bool, x: U32): U32
     local y = x
 
@@ -61,7 +62,7 @@ local f = do(flag: Bool, x: U32): U32
 end
 export f
 
--- §8.1 unannotated bindings are staged values
+-- syntax §5.1 unannotated bindings are staged values
 local unannotated = do(x: U32): U32
     local k = 4
     local y = x * k
@@ -70,7 +71,7 @@ local unannotated = do(x: U32): U32
 end
 export unannotated
 
--- §8.2 typed locals are places
+-- syntax §5.2 typed locals are places
 local typed_local = do(x: U32): U32
     local y = x
 
@@ -80,7 +81,7 @@ local typed_local = do(x: U32): U32
 end
 export typed_local
 
--- §9.1 generation-time loops
+-- syntax §6.1 generation-time loops
 local make_sum = do(n)
     return do(x: U32): U32
         local total = x
@@ -96,7 +97,7 @@ end
 local add6 = make_sum 3
 export add6
 
--- §9.2 native loops
+-- syntax §6.2 native loops
 local triangular = do(n: U32): U32
     local total: U32 = 0
 
@@ -113,7 +114,7 @@ local runtime_sum = do(n: U32): U32 =
 triangular n
 export runtime_sum
 
--- §11 effects stay residual
+-- architecture §4 effects stay residual
 local foreign_print = extern("foreign_print", { U32 }, Unit)
 
 local print_scaled = do(k: U32, x: U32): Unit
@@ -123,7 +124,7 @@ end
 local print_twice = print_scaled 2
 export print_twice
 
--- §14 methods
+-- syntax §8 methods
 local Counter = struct {
     value: U32,
 }
@@ -145,6 +146,25 @@ local count3 = do(a: U32, b: U32, c: U32): U32
 end
 assert(host(count3(1, 2, 3)) == 6)
 export count3
+
+-- A `call` in one arm takes the local's address, so it is storage on every path.
+-- A path that still holds a pending value writes it out before its own stores,
+-- not after them at the join.
+local bump = do(c: Ref Counter, n: U32): Unit
+    c.value = c.value + n
+end
+local branch_bump = do(flag: Bool, n: U32): U32
+    local counter = Counter { value = 0 }
+    if flag then
+        call bump(Ref counter, n)
+    else
+        bump(Ref counter, n * 2)
+    end
+    return counter:get()
+end
+assert(host(branch_bump(true, 3)) == 3)
+assert(host(branch_bump(false, 3)) == 6)
+export branch_bump
 
 -- a mutable method through a reference, materialized
 export Counter.add as "counter_add"

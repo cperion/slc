@@ -1,4 +1,5 @@
--- §18, §19 and §25: managed stores, generational IDs, data stacks.
+-- syntax §9.8, architecture §10.1 and architecture §10.3: managed stores,
+-- generational IDs, data stacks.
 
 local Node = struct {
     value: U32,
@@ -14,7 +15,7 @@ function Graph:add(value: U32): Id Node
     }
 end
 
--- §19: specialization removes the condition and the static multiplier; the
+-- architecture §10.1: specialization removes the condition and the static multiplier; the
 -- store insertion stays, because it changes runtime storage
 local insert = do(
     enabled: Bool,
@@ -33,7 +34,7 @@ end
 local insert_double = insert(true, 2)
 export insert_double
 
--- §25: a computation that needs dynamic native storage
+-- architecture §10.3: a computation that needs dynamic native storage
 local populate = do(
     scale: U32,
     g: Ref Graph,

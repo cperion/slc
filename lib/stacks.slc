@@ -59,16 +59,19 @@ local reserve = do(s: Ptr Stack, need: U64): Unit
     if need <= s.cap then return end
     call expand(s, need)
 end
-stacks.top = do(index: U64): U64 = stacks.get(index).top
+stacks.top = do(index: U64): U64
+    local s = call stacks.get index
+    return s.top
+end
 stacks.begin = do(index: U64): U64
-    local s = stacks.get index
+    local s = call stacks.get index
     local top = band(s.top + 15, bnot(U64 15))
     reserve s top
     s.top = top
     return top
 end
 stacks.push = do(index: U64, n: U64): U64
-    local s = stacks.get index
+    local s = call stacks.get index
     local at = s.top
     if n > maximum - at then trap "data stack too large" end
     reserve(s, at + n)
@@ -83,13 +86,13 @@ local release_guard = do(s: Ptr Stack): Unit
     end
 end
 stacks.reset = do(index: U64, top: U64): Unit
-    local s = stacks.get index
+    local s = call stacks.get index
     if top > s.top then trap "data stack reset above its top" end
     if s.map_counter ~= null U32 and top <= s.map_guard_base then release_guard s end
     s.top = top
 end
 stacks.bytes = do(index: U64, at: U64, n: U64): Ptr U8
-    local s = stacks.get index
+    local s = call stacks.get index
     if at > s.top or n > s.top - at then trap "data stack view out of range" end
     if n == 0 then return null U8 end
     return Ptr s.data[at]

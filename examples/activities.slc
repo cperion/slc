@@ -5,15 +5,15 @@
 -- an ordinary tracked local: when it stays private it disappears from the C.
 
 local Document = struct { length: U32, cursor: U32, edits: U32 }
-local Editing = struct { length: U32, cursor: U32, edits: U32 }
+local Draft = struct { length: U32, cursor: U32, edits: U32 }
 
-function Editing:insert(n: U32): Unit
+function Draft:insert(n: U32): Unit
     self.length = self.length + n
     self.cursor = self.cursor + n
     self.edits = self.edits + 1
 end
 
-function Editing:move_left(): Unit
+function Draft:move_left(): Unit
     if self.cursor > 0 then
         self.cursor = self.cursor - 1
     end
@@ -21,13 +21,13 @@ end
 
 -- the activity: work on a copy, commit at the end (keyed spread both ways)
 local transaction = do(document: Ref Document, body): Unit
-    local editing = Editing { ...document }
-    body(Ref editing)
-    document = Document { ...editing }
+    local draft = Draft { ...document }
+    body(Ref draft)
+    document = Document { ...draft }
 end
 
 local type_text = do(doc: Ref Document, n: U32): Unit
-    transaction doc do(editing...)
+    transaction doc do(draft...)
         insert n
         move_left()
         if cursor > 3 then
@@ -40,7 +40,7 @@ export type_text
 -- open to work; bind to remember
 local back_and_forth = do(doc: Ref Document): U32
     local moved: U32 = 0
-    transaction doc do(editing...)
+    transaction doc do(draft...)
         local before = cursor
         move_left()
         moved = before - cursor
@@ -52,7 +52,7 @@ export back_and_forth
 -- a private document: the whole activity folds away
 local fresh_length = do(n: U32): U32
     local doc = Document { length = 0, cursor = 0, edits = 0 }
-    transaction(Ref doc) do(editing...)
+    transaction(Ref doc) do(draft...)
         insert n
         insert 2
     end
@@ -84,7 +84,7 @@ export evens
 local Node = struct { value: U32, weight: U32 }
 local Graph = struct { nodes: Store Node }
 local double_node = do(g: Ref Graph, id: Id Node): Unit
-    local node...= g.nodes[id]
+    local node... = g.nodes[id]
     value = value * 2
     weight = weight + 1
 end
@@ -138,7 +138,7 @@ end
 local import_rows = do(doc: Ref Document, n: U32): Unit
     traced 1 do
     traced 2 do
-    transaction doc do(editing...)
+    transaction doc do(draft...)
         insert n
     endall
     trace 9

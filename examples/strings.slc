@@ -1,4 +1,4 @@
--- Text (§39): Str views, Text built in place, Chars(n) as values. The text
+-- Text (syntax §14): Str views, Text built in place, Chars(n) as values. The text
 -- words are slc (lib/str.slc): over known text they run while compiling, and a
 -- known needle unrolls into byte comparisons.
 

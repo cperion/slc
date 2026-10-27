@@ -307,7 +307,7 @@ function T.chan(elem)
     return chans[elem]
 end
 
--- pools: slots of T whose ownership moves between tasks (§36.6)
+-- pools: slots of T whose ownership moves between tasks (syntax §20.6)
 local function holds_slot_inside(t, inside)
     if t.kind == 'slot' then return inside end
     if t.kind == 'struct' then

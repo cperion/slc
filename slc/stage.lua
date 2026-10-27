@@ -71,6 +71,16 @@ S.fail = fail
 -- the module being compiled ------------------------------------------------------------
 
 local module
+-- `slc size --profile`: what `call` means for this compilation, so the same
+-- program can be measured at both ends of the inlining range. 'written' is the
+-- language rule; 'inline' ignores every `call`; 'share' asks for a boundary at
+-- every application that can cross one (see Builder:apply). Measurement only:
+-- none of the three changes what the program does.
+S.call_policy = 'written'
+S.call_skipped = 0
+-- every residual statement, in the order the evaluator emitted it; `slc size`
+-- reads it after the backend has recorded a line count on each statement
+local emitted_stream = {}
 local reset_hooks = {}
 -- a host-lifetime type may cache work that belongs to one compilation
 function S.on_reset(f) reset_hooks[#reset_hooks + 1] = f end
@@ -79,14 +89,17 @@ function S.reset()
     module = {
         functions = {},          -- in creation order
         by_key = {},
+        export_by_key = {},      -- plain specialization key -> the exported function's body
         exports = {},
         externs = {},
         names = {},              -- C names in use at file scope
         memo = {},               -- pure Known calls: key -> Value
+        share_failed = {},       -- `slc size --profile share`: keys that cannot be a function
         uid = 0,
         version = 0,
     }
     S.module = module
+    emitted_stream = {}
     for _, f in ipairs(reset_hooks) do f() end
 end
 S.reset()
@@ -288,16 +301,28 @@ end
 S.copy_expr = copy_expr
 
 -- statements emitted so far (all builders): the measure `slc size` attributes
-local emitted_total = 0
-function S.emitted() return emitted_total end
+-- each one to the application that wrote it, and the C backend records its lines
+function S.emitted() return #emitted_stream end
+function S.statement(i) return emitted_stream[i] end
+-- `slc size --profile share`: an attempt that had to be undone leaves no statements
+function S.truncate_emitted(n)
+    for i = #emitted_stream, n + 1, -1 do emitted_stream[i] = nil end
+end
 
 function Builder:emit(stmt)
-    emitted_total = emitted_total + 1
     if not self.fn then
         local what = stmt.what or 'a runtime effect'
         fail(('cannot evaluate at compile time: it performs %s'):format(what), 3)
     end
+    -- a statement on a path already known to be dead never becomes residual
     if self.dead then return end
+    emitted_stream[#emitted_stream + 1] = stmt
+    stmt.id = #emitted_stream
+    local profile = S.size_profile
+    if profile then
+        stmt.module = profile:module()
+            or S.size_module(self.fn and self.fn.word and self.fn.word.loc)
+    end
     for _, k in ipairs { 'e', 'c', 'lo', 'hi' } do
         if stmt[k] then
             self:check_reads(stmt[k])
@@ -583,6 +608,7 @@ function Builder:read(p)
         if en.mat then return dyn(p.T, read_expr(p, en.ver)) end
         return en.val
     end
+    self:flush_pending(p)
     return dyn(p.T, read_expr(p))
 end
 
@@ -690,6 +716,7 @@ function Builder:store(p, v)
         self.state[p] = { mat = true, ver = new_version() }
         return
     end
+    self:flush_pending(p)
     self:emit { op = 'store', place = p, e = ex(v), what = 'a store' }
 end
 
@@ -747,11 +774,31 @@ function Builder:materialize(p, block, state)
     end
 end
 
-function Builder:materialize_all(block, state)
+-- defined with the joins below; the frame flush above needs it
+local same_entry
+
+-- A local whose address was taken on another path is ordinary storage here too,
+-- but the pending store belongs to the path that made it: writing it out before
+-- this path touches that memory keeps the path's own statement order, instead of
+-- landing the value after its uses at the join.
+function Builder:flush_pending(p)
+    if p.T.resizable or p.T.kind == 'atomic' then return end
+    local en = self.state[p]
+    if en and not en.mat and not en.uninit then self:materialize(p) end
+end
+
+-- Write out the stores this frame may have made, and no others. A place that
+-- still holds what it held when the frame began is pending on every path the
+-- frame can leave by, so the join keeps it pending and its store lands once,
+-- where the value is finally needed, instead of at each way out.
+function Builder:materialize_frame(frame, block, state)
     state = state or self.state
+    local entry = frame.s0
     local ps = {}
     for p, en in pairs(state) do
-        if not en.mat and not en.uninit then ps[#ps + 1] = p end
+        if not en.mat and not en.uninit and not (entry and same_entry(en, entry[p])) then
+            ps[#ps + 1] = p
+        end
     end
     table.sort(ps, function(a, b) return a.id < b.id end)
     for _, p in ipairs(ps) do self:materialize(p, block, state) end
@@ -1623,7 +1670,7 @@ end
 
 -- an untyped local names a value: binding a typed place takes its current
 -- value (resizable storage, which has no value, stays a name for the place)
--- `local ctx... = e`: the context is retained; a place stays a place (§30.5)
+-- `local ctx... = e`: the context is retained; a place stays a place (syntax §10.5)
 function S.open_bind(v)
     if is_place(v) then return v end
     return S.bind(v)
@@ -1759,7 +1806,7 @@ local function condition(c)
     return nil
 end
 
-local function same_entry(a, b)
+function same_entry(a, b)
     if a == b then return true end
     if not a or not b then return false end
     if a.uninit or b.uninit then return a.uninit and b.uninit end
@@ -2735,10 +2782,55 @@ end
 -- leave a loop-mode frame (a loop's exit, or a word's return)
 function Builder:exit_loop(frame)
     self:release_since(frame)
-    self:materialize_all()
+    self:materialize_frame(frame)
     self:emit { op = 'goto', label = frame.ends }
     frame.exit_states[#frame.exit_states + 1] = copy(self.state)
     self.dead = true
+end
+
+-- `slc size --profile share`: can this application become a shared function?
+-- Not every application can: a compile-time one has no call to make, a callback
+-- has no C body of its own, and an argument has to be a value the callee can name
+-- (a reference, a known value, a residual one), not a name for a place, a pack or
+-- a known array.
+local function shareable(w, args)
+    if w.infer or w.task then return false end
+    local residual = false
+    for _, a in ipairs(args) do
+        if is_place(a) then return false end
+        if not is_value(a) then return false end
+        local k = a.k
+        if k == 'pack' or k == 'array' or k == 'array_ptr' then return false end
+        if not static(a) then residual = true end
+    end
+    -- an application with nothing unknown is compile-time work: it folds, and a
+    -- function would only lose the value
+    return residual
+end
+
+-- `slc size --profile share` asks for a boundary at every application. Some can
+-- never have one: a word that reaches another function's local, a callback, a chain
+-- that suspends where a task would call it, an argument that cannot cross. Those stay
+-- in place and are counted, so the figure stays a measurement of this program rather
+-- than an estimate. Deciding before the call is emitted is what keeps the caller's
+-- own state untouched when the answer is no.
+function Builder:share_or_in_place(w, args, key)
+    local failed = module.share_failed
+    if not failed then failed = {}; module.share_failed = failed end
+    if failed[key] then return false end
+    local ok, err = pcall(function()
+        return module.by_key[key] or module.export_by_key[key] or build_function(w, args, key)
+    end)
+    local fn = ok and (module.by_key[key] or module.export_by_key[key] or nil) or nil
+    local fits = fn ~= nil
+    if fits and not fn.task then
+        -- `fn.waits` is the function's own suspension; the check follows its callees
+        fits = (not fn.waits) and pcall(S.check_task_waits, fn)
+    end
+    if fits then return true, self:emit_call(w, fn, args) end
+    failed[key] = true
+    module.by_key[key] = nil
+    return false, err
 end
 
 -- apply a saturated word inside builder b
@@ -2754,7 +2846,18 @@ function Builder:apply(w, args, opts)
     -- with the same key. It is always a call: the programmer asked for one.
     -- (When evaluating at compile time there is no function to call from, and
     -- the application runs in place, as every application does there.)
-    if rawget(w, 'boundary') and self.fn then
+    local boundary = rawget(w, 'boundary')
+    if boundary and S.call_policy == 'inline' then boundary = false end
+    if not boundary and S.call_policy == 'share' and self.fn then
+        boundary = shareable(w, args)
+        if boundary then
+            local shared, result = self:share_or_in_place(w, args, key)
+            if shared then return result end
+            boundary = false
+        end
+        if not boundary then S.call_skipped = S.call_skipped + 1 end
+    end
+    if boundary and self.fn then
         local crossing
         for i, a in ipairs(args) do
             -- A known view of a caller's local array (a Str over a Chars local)
@@ -2840,7 +2943,7 @@ function Builder:finish_frame(frame)
     for _, s in ipairs(frame.sites) do paths[#paths + 1] = { state = s } end
     if frame.base_state then
         self.dead = false
-        self:materialize_all(nil, frame.base_state)
+        self:materialize_frame(frame, nil, frame.base_state)
         paths[#paths + 1] = { state = frame.base_state }
     end
     local base = {}
@@ -2952,7 +3055,7 @@ function Builder:return_value(frame, v)
         return
     end
     frame.label = frame.label or ('L' .. uid())
-    self:materialize_all()
+    self:materialize_frame(frame)
     self:emit { op = 'goto', label = frame.label }
     frame.sites[#frame.sites + 1] = self.state
     self.dead = true
@@ -3291,7 +3394,12 @@ function Builder:call_arg(v)
 end
 
 function Builder:call_materialized(w, args, key)
-    local fn = module.by_key[key] or build_function(w, args, key)
+    local exported = module.export_by_key[key]
+    return self:emit_call(w, exported or module.by_key[key] or build_function(w, args, key), args)
+end
+
+-- the call itself: the callee exists, so its arguments may cross
+function Builder:emit_call(w, fn, args)
     self:bump_checked()          -- the callee may change any storage it reaches
     local cargs = {}
     for i, a in ipairs(args) do
@@ -3357,9 +3465,14 @@ function build_function(w, args, key, cname, opts)
                     sites = {}, args = vals, shape = shape_of(vals) }
     b.active[key] = 1
     push_frame(b, frame)
+    -- `slc size`: statements of a materialized body belong to the module that
+    -- writes the word, not to the site that asked for the function
+    local profile = S.size_profile
+    if profile then profile:push(S.size_module(w.loc)) end
     local ok, err = pcall(w.body, unpack(vals, 1, #args))
     pop_frame(b)
     pop_builder()
+    if profile then profile:pop() end
     if not ok then error(err, 0) end
     if fn.top_label then
         -- tail self-calls jump to the top: the body is a loop
@@ -3444,8 +3557,22 @@ function S.resolve_runtime(cname)
     local fn = module.lazy_fns[cname]
     if fn then return fn end
     local args = export_args(w, cname)
-    fn = build_function(w, args, spec_key(w, args) .. '@' .. cname, cname)
+    -- the program may already have materialized this specialization: then the
+    -- runtime entry point is that function under its header name, not a copy of it
+    local key = spec_key(w, args)
+    local same = module.by_key[key]
+    if same and not same.exported then
+        same.exported = true
+        same.cname = unique(module.names, cname)
+        same.export_name = cname
+        module.exports[#module.exports + 1] = same
+        module.export_by_key[key] = same
+        module.lazy_fns[cname] = same
+        return same
+    end
+    fn = build_function(w, args, key .. '@' .. cname, cname)
     fn.export_name = cname
+    module.export_by_key[key] = fn
     module.lazy_fns[cname] = fn
     return fn
 end
@@ -3470,7 +3597,7 @@ function S.export_word(w, cname)
         end
     end
     local key = spec_key(w, args)
-    local fn = module.by_key[key]
+    local fn = module.by_key[key] or module.export_by_key[key]
     if fn and not fn.exported then
         -- already materialized internally: the same function, now exported
         fn.exported = true
@@ -3481,6 +3608,7 @@ function S.export_word(w, cname)
         fn = build_function(w, args, key, cname)
     end
     fn.export_name = fn.export_name or cname
+    module.export_by_key[key] = fn
     module.exports[#module.exports + 1] = fn
     return fn
 end
@@ -4140,7 +4268,7 @@ function S.fnptr(w)
         end
     end
     local key = spec_key(w, args)
-    local fn = module.by_key[key] or build_function(w, args, key)
+    local fn = module.export_by_key[key] or module.by_key[key] or build_function(w, args, key)
     fn.addr_taken = true
     local ft = types.fn(ptypes, w.ret)
     return dyn(ft, { op = 'fnaddr', fn = fn, T = ft })
@@ -4845,7 +4973,7 @@ function S.atomic_ptr(p)
 end
 
 
--- tasks, channels and waits (§36) ---------------------------------------------------------------
+-- tasks, channels and waits (syntax §20) ---------------------------------------------------
 -- Go's model: tasks share no memory; what reaches a task is a copy, and what
 -- crosses a channel is a copy. A task compiles to a resumable C function; each
 -- wait is an operation: in a task it suspends, in plain code it blocks. A tasks
@@ -4870,6 +4998,49 @@ function S.check_isolated(fn)
             if o and o ~= fn then bad(r.name) end
         end
     end)
+end
+
+-- `slc size`: a module is named relative to the compiler's root when it is one of
+-- the builtin libraries or the runtime, and by its own name otherwise
+local compiler_root = (debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$') or '.'):gsub('/slc$', '')
+function S.size_module(path)
+    if not path then return nil end
+    path = path:gsub(':%d+.*$', ''):gsub('^%./', '')
+    -- the program's own words carry its base name; name the file once
+    if S.user_path and not path:find('/') and path == S.user_path:match('[^/]*$') then
+        return S.user_path
+    end
+    if path:sub(1, 1) ~= '/' then return path end     -- already relative to the tree
+    if path:sub(1, #compiler_root + 1) == compiler_root .. '/' then
+        return path:sub(#compiler_root + 2)
+    end
+    return (path:match('[^/]*$'))
+end
+
+-- `slc size`: the line an application is written on, in the program or in the
+-- library or runtime module being specialized, so the report can read it back
+function S.size_site()
+    for level = 2, 80 do
+        local info = debug.getinfo(level, 'Sl')
+        if not info then break end
+        local source, line = info.source, info.currentline
+        if source and line and line > 0 and source:sub(1, 1) == '@' then
+            local path = source:sub(2)
+            -- the compiler's own modules apply words as machinery, not as a site
+            if not path:match('/slc/[%w_]+%.lua$') and not path:match('^slc/[%w_]+%.lua$')
+                and not path:match('/size%.lua$') then
+                return S.size_module(path) .. ':' .. line
+            end
+        end
+    end
+    return ''
+end
+
+-- the function an application's statements land in: only that function's
+-- reachability (fn.emitted, set by the backend) decides whether they reach the C
+function S.size_function()
+    local b = current
+    return b and b.fn or nil
 end
 
 -- the user's line, for naming a wait in a deadlock report
@@ -4910,7 +5081,7 @@ local function rt_value(t, cname, args, what, place, hint)
     return dyn(t, read_expr(tmp))
 end
 
--- The command line a program's main sees (§3.7): count and NUL-terminated
+-- The command line a program's main sees (architecture §14.4): count and NUL-terminated
 -- argument strings. `args.length` counts them; `args[i]` is a Str view of one.
 local args_type
 function S.args_type()
@@ -5654,7 +5825,7 @@ function S.tasks(body)
     return r
 end
 
--- I/O by completion (§36.7) ---------------------------------------------------------------------------
+-- I/O by completion (syntax §20.7) ---------------------------------------------------------
 -- Every operation is a wait (a task suspends, plain code blocks) whose result
 -- is a sum: done, failed (the system's error code), and timed_out when the
 -- operation has a deadline. I/O is never a case of first_of: the kernel's

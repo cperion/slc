@@ -17,7 +17,7 @@ local rotate = do(x: U64, n): U64
     local right = shr x complement
     return bor left right
 end
-local round = do(h: Ref State): Unit
+local sip_round = do(h: Ref State): Unit
     h.v0 = h.v0 + h.v1
     h.v1 = rotate h.v1 13
     h.v1 = bxor h.v1 h.v0
@@ -35,8 +35,8 @@ local round = do(h: Ref State): Unit
 end
 local block = do(h: Ref State, word: U64): Unit
     h.v3 = bxor h.v3 word
-    round h
-    round h
+    sip_round h
+    sip_round h
     h.v0 = bxor h.v0 word
 end
 
@@ -90,10 +90,10 @@ hash.finish = do(h: Ref State): U64
     final = bor h.tail final
     block h final
     h.v2 = bxor h.v2 255
-    round h
-    round h
-    round h
-    round h
+    sip_round h
+    sip_round h
+    sip_round h
+    sip_round h
     local a = bxor h.v0 h.v1
     local b = bxor h.v2 h.v3
     return bxor a b
@@ -103,7 +103,10 @@ hash.sip24 = do(text: Str, k0: U64, k1: U64): U64
     local h = hash.init k0 k1
     local state = Ref h
     hash.bytes state text
-    return call hash.finish state
+    -- the whole hash inlines at the site: a program that applies sip24 at several
+    -- places shares it with `call hash.sip24(...)` rather than paying for a finish
+    -- function that its one site never shares
+    return hash.finish state
 end
 
 -- Seed acquisition is platform state; every mix and encoding stays visible to

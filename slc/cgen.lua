@@ -671,6 +671,9 @@ function Fn:expr(e, need)
     need = need or 0
     local op = e.op
     if op == 'const' then
+        if e.T.kind == 'cstr' and self.strings and self.strings.names[e.v] then
+            return self.strings.names[e.v]
+        end
         local s = fold.c_literal(e.T, e.v)
         local pr = s:match '^%-' and PREC.unary or PREC.atom
         return paren(s, pr, need)
@@ -832,7 +835,10 @@ end
 
 -- statements ---------------------------------------------------------------------------------
 
-function Fn:line(s) self.out[#self.out + 1] = ('    '):rep(self.indent) .. s end
+function Fn:line(s)
+    self.out[#self.out + 1] = ('    '):rep(self.indent) .. s
+    self.printed = (self.printed or 0) + 1
+end
 
 function Fn:declared(p)
     return self.decl_inline[p] or self.hoisted[p]
@@ -953,7 +959,16 @@ function Fn:block_switch(blk, i)
     return arms, sum, subj
 end
 
+-- `slc size`: how many lines each residual statement became. A statement's own
+-- lines exclude the statements nested in it, so a range of the emission stream can
+-- be summed without counting a child twice; statements the rewrites dropped keep
+-- no count at all, which is exactly the point of measuring the emitted C.
+-- `slc size`: a statement inside a loop is a statement paid per iteration, which is
+-- what makes a shared body cost at run time even when it shrinks the C
+local LOOPS = { loop = true, ['for'] = true }
+
 function Fn:block(blk)
+    self.open = self.open or {}
     local i = 1
     while i <= #blk do
         local arms, sum, subj = self:block_switch(blk, i)
@@ -961,7 +976,19 @@ function Fn:block(blk)
             self:emit_switch(arms, sum, subj)
             return
         end
-        self:stmt(blk[i])
+        local s = blk[i]
+        local before = self.printed or 0
+        s.child_lines = 0
+        if LOOPS[s.op] then self.loop_depth = (self.loop_depth or 0) + 1 end
+        s.loop = (self.loop_depth or 0) > 0
+        self.open[#self.open + 1] = s
+        self:stmt(s)
+        if LOOPS[s.op] then self.loop_depth = self.loop_depth - 1 end
+        self.open[#self.open] = nil
+        local delta = (self.printed or 0) - before
+        s.lines = delta - s.child_lines
+        local parent = self.open[#self.open]
+        if parent then parent.child_lines = parent.child_lines + delta end
         i = i + 1
     end
 end
@@ -1167,7 +1194,35 @@ end
 
 -- functions ----------------------------------------------------------------------------------
 
+-- A long string used as a byte table gets a name: `((uint8_t *)"...")[i]` at every
+-- access makes lines nobody can read, and gcc merges the copies in .rodata anyway.
+-- A message stays inline, however long and however often: `slc_trap("Store grew while
+-- it was not at the top of its data stack")` says what happened, `slc_trap(slc_str)`
+-- does not. A table is the case where the literal is cast to a pointer.
+local HOIST_LENGTH = 48
+local function string_table(fns, unique_name)
+    local counts, order = {}, {}
+    for _, fn in ipairs(fns) do
+        walk_block(fn.body, nil, function(e)
+            -- the bytes of a known Str are reached through a cast to a pointer
+            if e.op == 'conv' and e.a and e.a.op == 'const' and e.a.T.kind == 'cstr' then
+                local v = e.a.v
+                if counts[v] == nil then order[#order + 1] = v end
+                counts[v] = (counts[v] or 0) + 1
+            end
+        end)
+    end
+    local names = {}
+    for _, v in ipairs(order) do
+        if #v >= HOIST_LENGTH then names[v] = unique_name() end
+    end
+    return { counts = counts, names = names }
+end
+
+-- `fn.external` is set by a split build: one translation unit per function, so
+-- nothing it calls may be static
 local function signature(fn)
+    local exported = fn.exported or fn.external
     local ps = {}
     for _, p in ipairs(fn.params) do ps[#ps + 1] = decl_of(p.T, p.name) end
     if fn.gs then table.insert(ps, 1, 'size_t gs_sp') end
@@ -1178,11 +1233,11 @@ local function signature(fn)
         local fps = {}
         for i, p in ipairs(ft.params) do fps[i] = ctype(p) end
         if #fps == 0 then fps[1] = 'void' end
-        return (fn.exported and '' or 'static ') .. (ft.ret.kind == 'unit' and 'void' or ctype(ft.ret))
+        return (exported and '' or 'static ') .. (ft.ret.kind == 'unit' and 'void' or ctype(ft.ret))
             .. ' (*' .. fn.cname .. '(' .. table.concat(ps, ', ') .. '))(' .. table.concat(fps, ', ') .. ')'
     end
     local ret = fn.ret.kind == 'unit' and 'void' or ctype(fn.ret)
-    local head = (fn.exported and '' or 'static ') .. ret
+    local head = (exported and '' or 'static ') .. ret
     if ret:sub(-1) ~= '*' then head = head .. ' ' end
     return head .. fn.cname .. '(' .. table.concat(ps, ', ') .. ')'
 end
@@ -1358,7 +1413,7 @@ end
 
 local function emit_function(fn, out)
     local f = setmetatable({ out = out, indent = 1, names = {}, used = {}, decl_inline = {},
-                             hoisted = {}, reads = read_places(fn) }, Fn)
+                             hoisted = {}, reads = read_places(fn), strings = fn.strings }, Fn)
     f.used.slc_tk, f.used.slc_ops = true, true
     for _, p in ipairs(fn.params) do f.used[p.name] = true end
     if fn.gs then f.used.gs_sp = true end
@@ -1417,7 +1472,7 @@ local function emit_task(fn)
     local body = {}
     local f = setmetatable({ out = body, indent = 1, names = {}, used = {}, decl_inline = {}, hoisted = {},
                              task_mode = true, fields = {}, resumes = {}, reads = read_places(fn),
-                             step_name = fn.task_step, blocking_fns = {} }, Fn)
+                             step_name = fn.task_step, blocking_fns = {}, strings = fn.strings }, Fn)
     for _, p in ipairs(fn.params) do f.used[p.name] = true end
     f.used.f, f.used.task, f.used.ops, f.used.gs_sp = true, true, true, true
     plan_jumps(fn, f)
@@ -1448,7 +1503,7 @@ local function emit_task(fn)
         out[#out + 1] = '}'
         out[#out + 1] = ''
     end
-    out[#out + 1] = 'static slc_step ' .. step .. '(slc_task *slc_task_) {'
+    out[#out + 1] = (fn.external and '' or 'static ') .. 'slc_step ' .. step .. '(slc_task *slc_task_) {'
     out[#out + 1] = '    ' .. frame .. ' *f = (' .. frame .. ' *)slc_task_;'
     if fn.needs_gs then
         out[#out + 1] = '    size_t gs_sp = 0;'
@@ -1481,6 +1536,8 @@ local function reachable(mod)
     function visit(fn)
         if seen[fn] then return end
         seen[fn] = true
+        -- `slc size`: only these functions reach the C, so only their copies count
+        fn.emitted = true
         walk_block(fn.body, function(st)
             if st.task then visit(st.task) end
             if st.op == 'wait' and st.callee then named(st.callee.cname) end
@@ -1574,10 +1631,14 @@ end
 G.collect_structs = collect_structs
 
 -- the C definition of a native global
-function G.global_decl(g)
+-- mode: nil for the single-file definition, 'external' for a split build's
+-- definition (no static), 'extern' for the declaration its header carries
+function G.global_decl(g, mode)
     local name = S.global_cname(g)
-    local text = (g.exported and '' or 'static ') .. (g.tls and '__thread ' or '') .. decl_of(g.T, name)
-    if g.init ~= nil then text = text .. ' = ' .. fold.c_literal(g.T, g.init) end
+    local link = (mode == 'extern') and 'extern '
+        or ((mode == 'external' or g.exported) and '' or 'static ')
+    local text = link .. (g.tls and '__thread ' or '') .. decl_of(g.T, name)
+    if g.init ~= nil and mode ~= 'extern' then text = text .. ' = ' .. fold.c_literal(g.T, g.init) end
     return text .. ';'
 end
 
@@ -1617,19 +1678,27 @@ function G.prepare(mod)
     return fns
 end
 
-function G.emit(mod, opts)
+-- The C of a module in the pieces a split build needs, in emission order.
+-- `G.emit` joins them into one translation unit; `G.emit_split` writes one file
+-- per function beside a shared header, so a C compiler can work in parallel.
+-- Both modes come through here, so they cannot disagree about the program.
+local function module_parts(mod, opts)
     opts = opts or {}
     local fns = G.prepare(mod)
-    local out = {}
-    out[#out + 1] = '/* Generated by slc (staged Lua -> C). Do not edit. */'
+    if opts.split then for _, fn in ipairs(fns) do fn.external = true end end
+    local p = { banner = {}, macros = {}, includes = {}, types = {}, types_task = {},
+                strings = {}, externs = {}, globals = {}, protos = {}, functions = {},
+                steps = {}, fns = fns }
+    local function add(name, text) local t = p[name]; t[#t + 1] = text end
+    add('banner', '/* Generated by slc (staged Lua -> C). Do not edit. */')
     -- the runtime words use POSIX: feature selection comes before every system header
     if mod.resolve then
-        out[#out + 1] = '#define _POSIX_C_SOURCE 200809L'
-        out[#out + 1] = '#define _DEFAULT_SOURCE 1'
+        add('macros', '#define _POSIX_C_SOURCE 200809L')
+        add('macros', '#define _DEFAULT_SOURCE 1')
     end
-    out[#out + 1] = '#include <stdint.h>'
-    out[#out + 1] = '#include <stdbool.h>'
-    out[#out + 1] = '#include <stddef.h>'
+    add('includes', '#include <stdint.h>')
+    add('includes', '#include <stdbool.h>')
+    add('includes', '#include <stddef.h>')
     local need_math, need_rt = false, false
     for _, fn in ipairs(fns) do
         walk_block(fn.body, nil, function(e)
@@ -1638,8 +1707,8 @@ function G.emit(mod, opts)
             end
         end)
         if fn.needs_gs or fn.uses_rt then need_rt = true end
-        for _, p in ipairs(fn.params) do
-            if p.T.kind == 'chan' or p.T.kind == 'group' or p.T.kind == 'pool' or p.T.kind == 'slot' then need_rt = true end
+        for _, p_ in ipairs(fn.params) do
+            if p_.T.kind == 'chan' or p_.T.kind == 'group' or p_.T.kind == 'pool' or p_.T.kind == 'slot' then need_rt = true end
         end
         walk_block(fn.body, function(st) if st.task then need_rt = true end end, function(e)
             if e.T and (e.T.kind == 'chan' or e.T.kind == 'group') then need_rt = true end
@@ -1662,7 +1731,7 @@ function G.emit(mod, opts)
             end
         end
     end
-    if need_math then out[#out + 1] = '#include <math.h>' end
+    if need_math then add('includes', '#include <math.h>') end
     -- Headers of every foreign call the residual program makes, including calls
     -- in words inlined from a library module: their declarations belong here too.
     local headers, externs = {}, {}
@@ -1690,51 +1759,50 @@ function G.emit(mod, opts)
         end
     end
     table.sort(names)
-    for _, header in ipairs(names) do out[#out + 1] = '#include ' .. header end
-    if need_rt then out[#out + 1] = '#include "slc_rt.h"' end
-    out[#out + 1] = ''
+    for _, header in ipairs(names) do add('includes', '#include ' .. header) end
+    if need_rt then add('includes', '#include "slc_rt.h"') end
+    add('includes', '')
 
     -- types
     for _, t in ipairs(collect_structs(fns)) do
         if t.kind == 'struct' and rawget(t, 'foreign') then
             -- its layout comes from its header
         elseif t.kind == 'struct' then
-            out[#out + 1] = 'typedef struct ' .. ctype(t) .. ' {'
-            for _, f in ipairs(t.fields) do
-                out[#out + 1] = '    ' .. decl_of(f.type, f.name) .. ';'
-            end
-            out[#out + 1] = '} ' .. ctype(t) .. ';'
-            out[#out + 1] = ''
+            add('types', 'typedef struct ' .. ctype(t) .. ' {')
+            for _, f in ipairs(t.fields) do add('types', '    ' .. decl_of(f.type, f.name) .. ';') end
+            add('types', '} ' .. ctype(t) .. ';')
+            add('types', '')
         elseif t.kind == 'sum' then
             local name = ctype(t)
             local tags = {}
             for _, a in ipairs(t.alts) do tags[#tags + 1] = name .. '_' .. a.name .. ' = ' .. a.tag end
-            out[#out + 1] = 'enum { ' .. table.concat(tags, ', ') .. ' };'
-            out[#out + 1] = 'typedef struct ' .. name .. ' {'
-            out[#out + 1] = '    uint32_t tag;'
+            add('types', 'enum { ' .. table.concat(tags, ', ') .. ' };')
+            add('types', 'typedef struct ' .. name .. ' {')
+            add('types', '    uint32_t tag;')
             local members = {}
             for _, a in ipairs(t.alts) do
                 if a.type.kind ~= 'unit' then members[#members + 1] = '        ' .. decl_of(a.type, a.name) .. ';' end
             end
             if #members > 0 then
-                out[#out + 1] = '    union {'
-                for _, m in ipairs(members) do out[#out + 1] = m end
-                out[#out + 1] = '    } as;'
+                add('types', '    union {')
+                for _, m in ipairs(members) do add('types', m) end
+                add('types', '    } as;')
             end
-            out[#out + 1] = '} ' .. name .. ';'
-            out[#out + 1] = ''
+            add('types', '} ' .. name .. ';')
+            add('types', '')
         elseif t.kind == 'array' then
-            out[#out + 1] = ('typedef struct %s { %s; } %s;'):format(ctype(t), decl_of(t.elem, ('e[%d]'):format(t.length)), ctype(t))
-            out[#out + 1] = ''
+            add('types', ('typedef struct %s { %s; } %s;'):format(ctype(t),
+                decl_of(t.elem, ('e[%d]'):format(t.length)), ctype(t)))
+            add('types', '')
         elseif t.cdecl then
             local d = t.cdecl()
-            if d then out[#out + 1] = d; out[#out + 1] = '' end
+            if d then add('types', d); add('types', '') end
         end
     end
 
     for _, t in ipairs(tasks) do
-        out[#out + 1] = task_text[t][1]
-        out[#out + 1] = ''
+        add('types_task', task_text[t][1])
+        add('types_task', '')
     end
 
     -- foreign prototypes without a header
@@ -1750,12 +1818,12 @@ function G.emit(mod, opts)
                 for i, t in ipairs(x.params) do ps[i] = ctype(t) end
                 if #ps == 0 then ps[1] = 'void' end
                 local ret = x.ret.kind == 'unit' and 'void' or ctype(x.ret)
-                out[#out + 1] = 'extern ' .. ret .. ' ' .. x.cname .. '(' .. table.concat(ps, ', ') .. ');'
+                add('externs', 'extern ' .. ret .. ' ' .. x.cname .. '(' .. table.concat(ps, ', ') .. ');')
                 protos = true
             end
         end
     end
-    if protos then out[#out + 1] = '' end
+    if protos then add('externs', '') end
 
     -- native globals (static storage), in first-use order
     local globals, seen_globals = {}, {}
@@ -1770,34 +1838,145 @@ function G.emit(mod, opts)
     local defined = 0
     for _, g in ipairs(globals) do
         if not g.imported then
-            out[#out + 1] = G.global_decl(g)
+            add('globals', G.global_decl(g))
             defined = defined + 1
         end
     end
-    if defined > 0 then out[#out + 1] = '' end
+    p.defined_globals = globals
+    if defined > 0 then add('globals', '') end
 
     -- prototypes for internal functions (recursion, any order)
     local any_static = false
     for _, fn in ipairs(fns) do
-        if not fn.exported and not fn.task then out[#out + 1] = signature(fn) .. ';'; any_static = true end
+        if not fn.exported and not fn.task then
+            add('protos', signature(fn) .. ';')
+            any_static = true
+        end
     end
     for _, t in ipairs(tasks) do
-        out[#out + 1] = 'static slc_step ' .. t.task_step .. '(slc_task *slc_task_);'
+        add('protos', 'static slc_step ' .. t.task_step .. '(slc_task *slc_task_);')
         any_static = true
     end
-    if any_static then out[#out + 1] = '' end
+    if any_static then add('protos', '') end
+
+    -- the long or repeated literals, in first-use order
+    local tables = string_table(fns, function() return S.unique_global('slc_str') end)
+    for _, fn in ipairs(fns) do fn.strings = tables end
+    local seen = {}
+    for _, fn in ipairs(fns) do
+        walk_block(fn.body, nil, function(e)
+            if e.op == 'const' and e.T.kind == 'cstr' and tables.names[e.v] and not seen[e.v] then
+                seen[e.v] = true
+                p.strings[#p.strings + 1] = { name = tables.names[e.v], value = e.v }
+            end
+        end)
+    end
+    p.string_names = tables.names
 
     local plain = {}
     for _, fn in ipairs(fns) do if not fn.task then plain[#plain + 1] = fn end end
-    for i, fn in ipairs(plain) do
+    for _, fn in ipairs(plain) do
+        local out = {}
         emit_function(fn, out)
-        if i < #plain then out[#out + 1] = '' end
+        p.functions[#p.functions + 1] = { name = fn.cname, fn = fn, text = table.concat(out, '\n') }
     end
     for _, t in ipairs(tasks) do
+        p.steps[#p.steps + 1] = { name = t.task_step, fn = t, text = task_text[t][2] }
+    end
+    p.tasks = tasks
+    return p
+end
+G.module_parts = module_parts
+
+function G.emit(mod, opts)
+    local p = module_parts(mod, opts)
+    local out = {}
+    local function push(section)
+        for _, line in ipairs(p[section]) do out[#out + 1] = line end
+    end
+    push 'banner'
+    push 'macros'
+    push 'includes'
+    push 'types'
+    push 'types_task'
+    for _, c in ipairs(p.strings) do
+        out[#out + 1] = ('static const char %s[] = %s;'):format(c.name, fold.c_literal({ kind = 'cstr' }, c.value))
+    end
+    if #p.strings > 0 then out[#out + 1] = '' end
+    push 'externs'
+    push 'globals'
+    push 'protos'
+    for i, u in ipairs(p.functions) do
+        out[#out + 1] = u.text
+        if i < #p.functions then out[#out + 1] = '' end
+    end
+    for _, u in ipairs(p.steps) do
         out[#out + 1] = ''
-        out[#out + 1] = task_text[t][2]
+        out[#out + 1] = u.text
     end
     return table.concat(out, '\n') .. '\n'
+end
+
+-- one translation unit per function beside one shared header, so a C compiler
+-- can build them in parallel (`cc -c *.c` with -j). Every function becomes
+-- external: nothing is inlined across a translation unit boundary unless the
+-- C compiler is given -flto.
+function G.emit_split(mod, opts)
+    opts = opts or {}
+    opts.split = true
+    local p = module_parts(mod, opts)
+    local header = opts.header or 'program.h'
+    local out, files = {}, {}
+    local function say(...) out[#out + 1] = string.format(...) end
+    local function push(section)
+        for _, line in ipairs(p[section]) do out[#out + 1] = line end
+    end
+    push 'banner'
+    say('#pragma once')
+    push 'includes'
+    push 'types'
+    push 'types_task'
+    push 'externs'
+    -- the definitions live in one file, so the header declares them
+    local declared = false
+    for _, g in ipairs(p.defined_globals or {}) do
+        if not g.imported then
+            say('%s', G.global_decl(g, 'extern'))
+            declared = true
+        end
+    end
+    for _, c in ipairs(p.strings) do
+        say('extern const char %s[];', c.name)
+        declared = true
+    end
+    if declared then say('') end
+    for _, u in ipairs(p.functions) do say('%s;', signature(u.fn)) end
+    for _, t in ipairs(p.tasks) do say('slc_step %s(slc_task *slc_task_);', t.task_step) end
+    say('')
+    files[#files + 1] = { name = header, text = table.concat(out, '\n') .. '\n' }
+
+    local head = { '/* Generated by slc (staged Lua -> C). Do not edit. */' }
+    for _, line in ipairs(p.macros) do head[#head + 1] = line end
+    head[#head + 1] = ('#include "%s"'):format(header:match('[^/]*$'))
+    local prefix = table.concat(head, '\n') .. '\n\n'
+    local globals = {}
+    for _, g in ipairs(p.defined_globals or {}) do
+        if not g.imported then globals[#globals + 1] = G.global_decl(g, 'external') end
+    end
+    for _, c in ipairs(p.strings) do
+        globals[#globals + 1] = ('const char %s[] = %s;'):format(c.name,
+            fold.c_literal({ kind = 'cstr' }, c.value))
+    end
+    if #globals > 0 then
+        files[#files + 1] = { name = 'globals.c', text = prefix .. table.concat(globals, '\n') .. '\n' }
+    end
+    for _, u in ipairs(p.functions) do
+        files[#files + 1] = { name = u.name .. '.c', text = prefix .. u.text .. '\n' }
+    end
+    for _, u in ipairs(p.steps) do
+        files[#files + 1] = { name = u.name .. '.c', text = prefix .. u.text .. '\n' }
+    end
+    return files
 end
 
 -- a header with the exported prototypes

@@ -1,4 +1,4 @@
--- I/O by completion (§36.7): every operation is a wait, every result a sum.
+-- I/O by completion (syntax §20.7): every operation is a wait, every result a sum.
 local io = require "slc.io"
 
 -- a pipe between two tasks: the writer closes, the reader reads to the end

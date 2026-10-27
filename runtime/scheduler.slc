@@ -253,7 +253,7 @@ local receive = do(r: Ptr Channel, out: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Ta
         copy(out, ring_slot(r, 0), r.elem)
         r.head = (r.head + 1) % r.cap
         r.count = r.count - 1
-        local sender = claim_waiter(Ptr r.sendq, self)
+        local sender = call claim_waiter(Ptr r.sendq, self)
         if sender ~= null Op then
             copy(ring_slot(r, r.count), sender.buf, r.elem)
             r.count = r.count + 1
@@ -262,7 +262,7 @@ local receive = do(r: Ptr Channel, out: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Ta
         end
         return 1
     end
-    local sender = claim_waiter(Ptr r.sendq, self)
+    local sender = call claim_waiter(Ptr r.sendq, self)
     if sender ~= null Op then
         copy(out, sender.buf, r.elem)
         sender.task.result = done_result sender 0
@@ -275,7 +275,7 @@ end
 -- The caller checks closed and unlocks before trapping, before entering here.
 local send = do(r: Ptr Channel, value: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Task)): I32
     wake[0] = null Task
-    local receiver = claim_waiter(Ptr r.recvq, self)
+    local receiver = call claim_waiter(Ptr r.recvq, self)
     if receiver ~= null Op then
         copy(receiver.buf, value, r.elem)
         receiver.task.result = done_result receiver 1

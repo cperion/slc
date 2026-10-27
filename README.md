@@ -18,14 +18,17 @@ uint32_t entry(uint32_t x) {
 }
 ```
 
-Start with [Designing and writing SLC](docs/designing-and-writing-slc.md).
-[The specification](docs/staged-lua-c-v0.5.md) owns the language and ABI rules.
-[Maps and immutable lookup descriptions](docs/staged-lua-c-v0.5.md#40-maps-and-known-lookup-descriptions)
-are implemented in ordinary SLC, and [library-defined types](docs/staged-lua-c-v0.5.md#41-library-defined-types)
-use the same hooks as the built-in ones. [The alpha roadmap](docs/alpha-design.md) covers
-broader fuzzing and the single-binary distribution; [the SLC-first inventory](docs/slc-first.md)
-tracks the remaining library migrations.
-[Tuning code size and compile time](docs/code-size.md) covers `call` and `slc size`.
+Start with [Designing and writing SLC](docs/designing-and-writing-slc.md): the
+design process, how to write words, and the house style. [The syntax](docs/syntax.md)
+owns what a program means — the surface forms, the static rules and the runtime
+contracts, including [maps](docs/syntax.md#15-maps-and-known-lookup-descriptions) and
+[library-defined types](docs/syntax.md#16-library-defined-types).
+[The architecture](docs/architecture.md) owns how they are implemented: the pipeline,
+the residual IR, the two backends, the runtime, and
+[the boundary between SLC, Lua and C](docs/architecture.md#15-what-stays-in-c-and-lua-and-why).
+[Code size and compile time](docs/designing-and-writing-slc.md#112-code-size-and-compile-time)
+covers `call` and `slc size`; [status and remaining work](docs/architecture.md#17-status-limits-and-remaining-work)
+says what is not implemented.
 
 ## Requirements
 
@@ -68,9 +71,11 @@ luajit slc.lua fmt --check examples/*.slc
 ```
 
 Defaults favor four-space indentation, a soft 100-column width, safe
-parenthesis-free calls and flat endall spines. A `.slcfmt.lua` can set
-`indent_width`, `column_width`, `call_style` (`"minimal"` or `"preserve"`) and
-`spine_style` (`"pure"`, `"all"` or `"none"`). See
+parenthesis-free calls, inferred local types, `.name` field shorthand and flat
+endall spines. A `.slcfmt.lua` can set `indent_width`, `column_width`,
+`call_style` (`"minimal"` or `"preserve"`), `type_style` (`"inferred"` or
+`"preserve"`), `table_style` (`"shorthand"` or `"preserve"`) and `spine_style`
+(`"pure"`, `"all"` or `"none"`). See
 [formatting](docs/formatting.md) for semantics, configuration discovery and exit
 codes. `make test-format` checks style, idempotence, source preservation and
 compiler-output equivalence.
@@ -86,7 +91,7 @@ local model = require "model"  -- project Lua or SLC module
 This is Lua's actual `require`, extended with an SLC source searcher. Bundled
 names use `slc.*`, so Lua's `require "io"` still means Lua I/O. Newly loaded
 modules are cached per compilation, including Lua wrappers around staged
-values; host loader state is restored afterwards. See [module loading](docs/modules.md).
+values; host loader state is restored afterwards. See [module loading](docs/architecture.md#13-modules-and-the-compilation-scope).
 Run `make test-modules` for the loader/cache contract checks.
 
 ## Neovim syntax highlighting
@@ -110,15 +115,16 @@ luajit slc.lua run program.slc args             # execute now, with an optional 
 
 From Lua, `require 'slc'` and call `slc.load(path)` to obtain exports, raw pointers
 and FFI record types. A program can call `native(word)` to specialize on values
-available at startup. See specification §38 for error recovery, code lifetime and
-foreign-library requirements. Direct invocations must have their dependencies on
+available at startup. See [the architecture](docs/architecture.md#14-the-toolchain) for error recovery,
+code lifetime and foreign-library requirements. Direct invocations must have their dependencies on
 the loader paths; Make's environment is not a system-wide installation.
 
 A program's C is one file: it carries the runtime words it reaches (the runtime is
 SLC, built with the program; `SLC_IO` selects the I/O backend). Beside it link
 `runtime/slc_rt.c` when it includes `slc_rt.h`, `runtime/slc_io_uring.c` for io_uring,
 and `-pthread` for tasks.
-See the specification for io_uring/kqueue support and validation limits.
+See [architecture §17](docs/architecture.md#17-status-limits-and-remaining-work) for
+io_uring/kqueue support and validation limits.
 
 ## Fixed-size values at compile time
 
@@ -129,7 +135,7 @@ address escape materialize conservatively. Value copies are snapshots, while
 view's original length).
 
 See the [staged-values example](examples/staged_values.slc) and
-[the text contract](docs/staged-lua-c-v0.5.md#393-charsn). Its harnesses compare known,
+[the `Chars(n)` contract](docs/syntax.md#143-charsn). Its harnesses compare known,
 split, C and in-process execution, including copies, live views and task captures.
 This adds neither a compile-time heap nor a new borrowing policy.
 
@@ -139,19 +145,27 @@ This adds neither a compile-time heap nor a new borrowing policy.
 |---|---|
 | Driver / embedding entry | `slc.lua` |
 | LuaMacro engine | `macro.lua`, `macro/`, `macro/lib/` |
-| SLC application and typed-body hand-off | `macro/let.lua`, `macro/slc.lua` |
+| SLC application, lambdas, typed bodies | `macro/let.lua`, `macro/slc.lua` |
 | Standalone source macro CLI | `luam` (`luajit luam -lmacro.let program.lua`) |
 | Native types and exact folding | `slc/types.lua`, `slc/fold.lua` |
-| Specialization, state, words and control | `slc/stage.lua`, `slc/syntax.lua` |
-| Goose storage | `slc/memory.lua` |
+| Typed-body parser and translation | `slc/syntax.lua` |
+| Specialization, state, words, control, tasks | `slc/stage.lua` |
+| Goose storage and record layouts | `slc/memory.lua` |
 | Immutable fixed-array contents | `slc/array_value.lua` |
-| Text types and library | `slc/strings.lua`, `lib/str.slc` |
-| Differential fuzzing | `tests/fuzz/gen.lua`, `tests/fuzz/fuzz.lua` |
+| Text types and their compile-time fold | `slc/strings.lua` |
+| Map and `StrMap` type hooks | `slc/maps.lua` |
+| Module loader and compilation scope | `slc/loader.lua` |
 | C / libgccjit backends | `slc/cgen.lua`, `slc/jitgen.lua` |
 | Shared C rules / compiler-owned C reader | `slc/cjit.lua`, `slc/gccjit_h.lua` |
 | Header probes / in-process execution | `slc/probe.lua`, `slc/native.lua` |
-| Runtime / imported libraries | `runtime/`, `lib/` |
+| Runtime policy build / `slc size` | `slc/runtime_build.lua`, `slc/size.lua` |
+| Formatter | `slc/fmt.lua`, `slc/fmt_cli.lua` |
+| Fuzzers | `tests/fuzz/gen.lua`, `tests/fuzz/fuzz.lua`, `storage.lua`, `tasks.lua` |
+| Bundled libraries / runtime | `lib/`, `runtime/` |
 | Examples, fixtures and checks | `examples/`, `tests/` |
+
+[Architecture §18](docs/architecture.md#18-source-layout) has the complete table,
+including the single-binary tools.
 
 The macro layer is project source, **not a runtime bundle**. See
 [its integration notes](docs/luamacro/INTEGRATION.md) and

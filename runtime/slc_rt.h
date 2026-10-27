@@ -268,7 +268,7 @@ void slc_slot_release(slc_task *me, slc_slot s);
 void slc_slot_give(slc_task *me, slc_slot s);
 void slc_slot_adopt(slc_task *me, slc_slot s);
 
-/* I/O by completion (§36.7). The result is SLC_IO_DONE, SLC_IO_FAILED or
+/* I/O by completion (syntax §20.7). The result is SLC_IO_DONE, SLC_IO_FAILED or
  * SLC_IO_TIMED_OUT; *value receives the count or descriptor when done, the
  * system's error code when failed. A deadline of 0 is none; an offset of -1
  * is the descriptor's own position. */

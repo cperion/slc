@@ -563,7 +563,9 @@ local function gap(prev, tk, colon, unary)
     end
     if a == '{' and b == '}' then return '' end
     if a == '...' or b == '...' then
-        if a == '...' or tk.t == '...' and (prev.t == 'iden' or a == ')') then return '' end
+        -- `...args` and `f(...)` take no space; anything else after `...` does
+        if b == '...' and (prev.t == 'iden' or a == ')') then return '' end
+        if a == '...' and tk.t == 'iden' then return '' end
     end
     return ' '
 end

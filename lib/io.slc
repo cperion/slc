@@ -1,4 +1,4 @@
--- I/O by completion (§36.7).
+-- I/O by completion (syntax §20.7).
 --
 -- Every operation is a wait: a task suspends, plain code blocks. Results are
 -- sums matched exhaustively: done, failed (the system's error code) and, for

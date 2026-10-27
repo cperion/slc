@@ -444,16 +444,53 @@ end
 -- slc size names what the generated C is made of
 do
     local r = par { ('%s size %s/examples/strmaps.slc --top 3'):format(SLC:gsub(' %-o .*$', ''), root) }[1]
-    check('size: reports the generated C and the words worth a call',
+    check('size: reports the generated C, its modules and the words worth a call',
         r.ok and r.out:find('lines of C from', 1, true) and r.out:find('largest functions', 1, true)
-        and r.out:find('words evaluated in place', 1, true) and r.out:find('lib/map.slc', 1, true), r.out)
+        and r.out:find('where the C comes from', 1, true) and r.out:find('lib/map.slc', 1, true)
+        and r.out:find('words evaluated in place', 1, true) and r.out:find('count lines of C', 1, true),
+        r.out)
+    -- the three profiles are a range, so the order is the check: sharing is never
+    -- larger than as written, and as written is never larger than everything in place
+    local c = par { ('%s size %s/examples/stores.slc --compare'):format(SLC:gsub(' %-o .*$', ''), root) }[1]
+    local got = {}
+    for name, n in (c.out or ''):gmatch('(%a+)%s+([%d,]+)') do got[name] = tonumber((n:gsub(',', ''))) end
+    check('size: --compare brackets the program between inline and all-shared',
+        c.ok and got.share and got.written and got.inline and got.share <= got.written
+        and got.written <= got.inline and not c.out:find('no all-shared form', 1, true), c.out)
+end
+
+-- --split: one translation unit per function beside one header, so a C compiler
+-- can build the program in parallel
+do
+    local dir = build .. '/slc_split'
+    os.execute('rm -rf ' .. sq(dir))
+    local split_ok, split_out = sh(('%s --split %s --keep-runtime %s %s/examples/stores.slc')
+        :format(SLC, sq(dir), sq(keep_for('stores')), root))
+    local units = 0
+    for _ in io.popen('ls ' .. sq(dir) .. '/*.c 2>/dev/null'):lines() do units = units + 1 end
+    -- the units are compiled from inside `dir`, so the runtime include is absolute
+    local rt_abs = (io.popen('cd ' .. sq(root) .. ' && pwd'):read '*l') .. '/runtime'
+    local CCABS = CC:gsub('%s%-I[^%s]+', '') .. ' -I' .. rt_abs
+    local compile_ok, compile_out = false, ''
+    if split_ok then
+        compile_ok, compile_out = sh(('cd %s && ls *.c | xargs -P 8 -n 1 %s -c'):format(sq(dir), CCABS))
+    end
+    local run_ok, run_out = false, ''
+    if compile_ok then
+        run_ok, run_out = sh(
+            ('%s %s/tests/stores_main.c %s/*.o %s/runtime/slc_rt.c -pthread -o %s/stores && %s/stores')
+            :format(CCABS, root, sq(dir), root, sq(dir), sq(dir)))
+    end
+    check('split: one C file per function compiles in parallel and links',
+        split_ok and units > 10 and compile_ok and run_ok and run_out:find('stores: ok', 1, true) ~= nil,
+        split_out .. compile_out .. run_out)
 end
 
 local docs = par {
     ('luajit %s/tests/listings.lua'):format(root),
     ('luajit %s/tests/guide.lua'):format(root),
 }
-check('spec listings are real output', docs[1].ok, docs[1].out)
+check("documentation listings are real output", docs[1].ok, docs[1].out)
 check('guide examples are real', docs[2].ok, docs[2].out)
 
 print(('%d passed, %d failed'):format(passes, failures))

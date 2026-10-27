@@ -42,7 +42,7 @@ function storage.store(T, Id, p)
         return p.id s slot generation
     end
     api.remove = do(s: Ref T, id: Id): Bool
-        if not api.has(s, id) then return false end
+        if not call api.has(s, id) then return false end
         local token, slot, generation = p.components id
         local live = p.get(s, "live")
         p.set(s, "live", live - 1)
@@ -57,7 +57,7 @@ function storage.store(T, Id, p)
         return true
     end
     api.borrow = do(s: Ref T, id: Id): U32
-        if not api.has(s, id) then trap "stale or foreign Id in Store" end
+        if not call api.has(s, id) then trap "stale or foreign Id in Store" end
         local token, slot, generation = p.components id
         return slot
     end

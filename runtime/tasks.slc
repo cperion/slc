@@ -610,7 +610,7 @@ return function(t)
             end
             while task.woken == 0 do
                 local other = pop()
-                if other ~= null Task then step_task other else idle() end
+                if other ~= null Task then call step_task other else idle() end
             end
             task.woken = 0
             unlock sched

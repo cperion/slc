@@ -188,6 +188,10 @@ function slc.attach_runtime(mod, keep)
     local saved_path = package.path
     package.path = here .. '/?.lua;' .. package.path
     S.runtime_exports(true)
+    -- the runtime's words are made available here, not emitted into this program, so
+    -- nothing staged now reaches the C: `slc size` must not attribute statements to it
+    local profile = S.size_profile
+    S.size_profile = nil
     local ok, err = pcall(function()
         local chunk, why = loadstring(slc.translate(text, path), '@' .. path)
         if not chunk then error(why, 0) end
@@ -195,6 +199,7 @@ function slc.attach_runtime(mod, keep)
         local fine, e = xpcall(chunk, function(m) return m end)
         if not fine then error(e, 0) end
     end)
+    S.size_profile = profile
     S.runtime_exports(false)
     package.path = saved_path
     if not ok then error(err, 0) end
@@ -235,6 +240,10 @@ function slc.compile(src, path, opts)
             if not fine then error(e, 0) end
             if opts.no_c then return nil, S.module, penv end
             if opts.runtime ~= 'shared' then slc.attach_runtime(S.module, opts.keep) end
+            if opts.split then
+                return G.emit_split(S.module, { header = opts.split_header or 'program.h' }),
+                    S.module, penv
+            end
             return G.emit(S.module), S.module, penv
         end)
     end)
@@ -492,6 +501,7 @@ local function main(args)
         elseif a == '-d' then opts.dump = true
         elseif a == '--shared-runtime' then opts.runtime = 'shared'
         elseif a == '--keep-runtime' then i = i + 1; opts.keep = args[i]
+        elseif a == '--split' then i = i + 1; opts.split = args[i]
         elseif a == '--cc' then opts.cc = true
         elseif a == '--gccjit' then opts.gccjit = true; opts.runtime = 'shared'   -- an object links the shared runtime unit
         elseif a:sub(1, 1) == '-' and a ~= '-' then
@@ -501,6 +511,7 @@ local function main(args)
     end
     if not input then
         io.stderr:write((([[usage: luajit slc.lua [-o out.c] [-H out.h] [-d] [--cc] program.slc
+       luajit slc.lua --split dir program.slc      one C file per function + a header
        luajit slc.lua [--shared-runtime] [--keep-runtime name,...] ...
        luajit slc.lua run program.slc [args...]
        luajit slc.lua build program.slc -o program [-O0..-O3] [-g]
@@ -513,6 +524,19 @@ local function main(args)
        luajit slc.lua fmt [files...]
 ]]))); os.exit(2)
     end
+    if opts.split then
+        -- one translation unit per function, so a C compiler can build them in
+        -- parallel; the feature macros must precede the header in every unit
+        for _, other in ipairs { 'out', 'header', 'gccjit', 'dump', 'cc' } do
+            if opts[other] then
+                io.stderr:write('slc: --split writes every file itself; drop ',
+                    (other == 'out' and '-o') or (other == 'header' and '-H') or ('--' .. other), '\n')
+                os.exit(2)
+            end
+        end
+        local base = input:match('([^/]+)%.slc$') or 'program'
+        opts.split_header = base .. '.h'
+    end
     local ok, out, mod = pcall(function()
         local src = read(input)
         return slc.compile(src, input, opts)
@@ -520,6 +544,19 @@ local function main(args)
     if not ok then
         io.stderr:write(tostring(out), '\n')
         os.exit(1)
+    end
+    if opts.split then
+        if os.execute(('mkdir -p %q'):format(opts.split)) ~= 0 then
+            io.stderr:write('slc: cannot create ', opts.split, '\n'); os.exit(1)
+        end
+        for _, f in ipairs(out) do
+            local fh = assert(io.open(opts.split .. '/' .. f.name, 'w'))
+            fh:write(f.text)
+            fh:close()
+        end
+        io.write(('%s: %d files (%d translation units, one header)\n')
+            :format(opts.split, #out, #out - 1))
+        os.exit(0)
     end
     if out and not opts.dump then require('slc.size').note(out, input) end
     if opts.gccjit then

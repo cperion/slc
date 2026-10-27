@@ -166,11 +166,11 @@ return function(types)
     end
     local drain = do(q: Ptr Waiters, list: Ptr Op): Ptr Op
         local result = list
-        local waiter = claim_waiter(q, null Task)
+        local waiter = call claim_waiter(q, null Task)
         while waiter ~= null Op do
             waiter.next = result
             result = waiter
-            waiter = claim_waiter(q, null Task)
+            waiter = call claim_waiter(q, null Task)
         end
         return result
     end
@@ -180,8 +180,8 @@ return function(types)
         if r.gen == 0 then r.gen = 1 end
         free r.buf
         r.buf = null U8
-        local list = drain(Ptr r.recvq, null Op)
-        return drain(Ptr r.sendq, list)
+        local list = call drain(Ptr r.recvq, null Op)
+        return call drain(Ptr r.sendq, list)
     end
     local slc_pool_retire = do(r: Ptr Pool): Ptr Op
         r.live = false
@@ -189,7 +189,7 @@ return function(types)
         if generation == 0 then generation = 1 end
         atomic_ptr(Ptr r.m.gen)[0]:store(generation, "release")
         r.scope = null Scope
-        return drain(Ptr r.takers, null Op)
+        return call drain(Ptr r.takers, null Op)
     end
     local slc_channel_recycle_record = do(r: Ptr Channel, head: Ptr U32, index: U32): Unit
         r.next_free = head[0]

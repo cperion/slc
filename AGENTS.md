@@ -6,9 +6,10 @@ and their implementation constraints do not apply here.
 ## Authorities and workflow
 
 - Start from the user's request, the current source and tests.
-- `docs/staged-lua-c-v0.5.md` owns language/ABI contracts;
-  `docs/designing-and-writing-slc.md` explains programming style. Distinguish intended
-  semantics, implementation behavior and freshly observed evidence.
+- `docs/syntax.md` owns language/ABI contracts; `docs/architecture.md` owns the
+  compiler, the runtime and the SLC/Lua/C boundary; `docs/designing-and-writing-slc.md`
+  explains programming style. Distinguish intended semantics, implementation behavior
+  and freshly observed evidence.
 - Inspect before editing. Discuss material semantic/architectural changes and obtain
   approval before implementation. Do not silently add fallbacks or compatibility paths.
 - Keep changes focused. Preserve unrelated work and raw experimental evidence.

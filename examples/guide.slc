@@ -2,7 +2,8 @@
 -- Every lua block in the guide is an excerpt of this file (tests/guide.lua).
 local io = require "slc.io"
 
--- §3 Values first ----------------------------------------------------------------------------------
+-- §4.1 Values first ---------------------------------------------------------------------------------
+-- (step 2 of the guide's process)
 
 local Direction = oneof { left: Unit, right: Unit }
 local Command = oneof { move: Direction, insert: U32, undo: Unit, quit: Unit }
@@ -10,7 +11,7 @@ local Command = oneof { move: Direction, insert: U32, undo: Unit, quit: Unit }
 -- an outcome a caller acts on is a sum
 local Found = oneof { found: U32, missing: Unit }
 
--- §3 Ownership: trees are fields, graphs are stores ------------------------------------------------
+-- §5 Ownership: trees are fields, graphs are stores ------------------------------------------------
 
 local Document = struct { length: U32, cursor: U32, edits: U32 }
 
@@ -31,7 +32,7 @@ local outline_demo = do(n: U32): U32
 end
 export outline_demo
 
--- §4 Words: subject first, body last ---------------------------------------------------------------
+-- §12 Words: subject first, body last ---------------------------------------------------------------
 
 function Document:move_left(): Unit
     if self.cursor > 0 then
@@ -62,7 +63,7 @@ local first_or = do(xs: Slice U32, fallback: U32): U32
 end
 export first_or
 
--- §4.4 Keep known information available: configuration is a Lua table
+-- §15 Keep known information available: configuration is a Lua table
 local tab_stop = do(config, column: U32): U32
     local width: U32 = config.tab_width
     return (column / width + 1) * width
@@ -74,17 +75,17 @@ export tab_stop_4
 -- the pure core is testable while compiling
 assert(host(tab_stop({ tab_width = 8 }, U32 3)) == 8)
 
--- §5 Activities --------------------------------------------------------------------------------------
+-- §6 Step 4: activities ----------------------------------------------------------------------------
 
-local Editing = struct { length: U32, cursor: U32, edits: U32 }
+local Draft = struct { length: U32, cursor: U32, edits: U32 }
 
-function Editing:insert(n: U32): Unit
+function Draft:insert(n: U32): Unit
     self.length = self.length + n
     self.cursor = self.cursor + n
     self.edits = self.edits + 1
 end
 
-function Editing:move_left(): Unit
+function Draft:move_left(): Unit
     if self.cursor > 0 then
         self.cursor = self.cursor - 1
     end
@@ -92,14 +93,14 @@ end
 
 -- the activity owns completion: work on a copy, commit at the end
 local transaction = do(document: Ref Document, body): Unit
-    local editing = Editing { ...document }
-    body(Ref editing)
-    document = Document { ...editing }
+    local draft = Draft { ...document }
+    body(Ref draft)
+    document = Document { ...draft }
 end
 
 local type_word = do(document: Ref Document, n: U32): U32
     local moved: U32 = 0
-    transaction document do(editing...)
+    transaction document do(draft...)
         insert n
         local before = cursor
         move_left()
@@ -108,6 +109,32 @@ local type_word = do(document: Ref Document, n: U32): U32
     return moved
 end
 export type_word
+
+-- the body decides, the activity completes: the body returns an outcome
+local Outcome = oneof { commit: Unit, abort: U32 }
+
+local attempt = do(document: Ref Document, body): Bool
+    local draft = Draft { ...document }
+    local committed: Bool = body(Ref draft) {
+        commit() = true,
+        abort(reason) = false,
+    }
+    if committed then
+        document = Document { ...draft }
+    end
+    return committed
+end
+
+local type_capped = do(document: Ref Document, n: U32, cap: U32): Bool
+    return attempt document do(draft...)
+        insert n
+        if length > cap then
+            return Outcome.abort length
+        end
+        return Outcome.commit()
+    end
+end
+export type_capped
 
 -- stack activities instead of adding options
 local Stats = struct { entered: U32, left: U32 }
@@ -118,16 +145,52 @@ local counted = do(stats: Ref Stats, body): Unit
     stats.left = stats.left + 1
 end
 
-local import_words = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
+-- a policy that completes after the work inside it
+local clamped = do(document: Ref Document, max: U32, body): Unit
+    body()
+    if document.length > max then
+        document.length = max
+        document.cursor = max
+    end
+end
+
+local import_capped = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
     counted stats do
-    counted stats do
-    transaction document do(editing...)
+    clamped(document, 100) do
+    transaction document do(draft...)
         insert n
     endall
 end
-export import_words
+export import_capped
 
--- §8 Describe, then run -----------------------------------------------------------------------------
+-- §7 Step 5: states ---------------------------------------------------------------------------------
+
+-- a lifecycle as a sum, and one word per transition
+local Conn = oneof { reading: U32, rejected: U32, closed: Unit }
+local Event = oneof { bytes: U32, bad_line: Unit, hang_up: Unit }
+
+local step = do(c: Conn, e: Event): Conn = c {
+    reading(n) = e {
+        bytes(k) = Conn.reading(n + k),
+        bad_line() = Conn.rejected n,
+        hang_up() = Conn.closed(),
+    },
+    rejected(n) = Conn.reading 0,
+    closed() = Conn.closed(),
+}
+
+-- a known state and a known event kind fold to arithmetic
+local buffered_after = do(k: U32): U32
+    local next = step(Conn.reading 3, Event.bytes k)
+    return next {
+        reading(n) = n,
+        rejected(n) = n,
+        closed() = 0,
+    }
+end
+assert(host(buffered_after(U32 4)) == 7)
+
+-- §17 Describe, then run ----------------------------------------------------------------------------
 
 local apply = do(document: Ref Document, c: Command): Unit
     c {
@@ -171,7 +234,28 @@ local replay = do(document: Ref Document, commands: Ref(Grow Command)): Unit
 end
 export replay
 
--- §10 Concurrency ------------------------------------------------------------------------------------
+-- §18.1 Type hooks: a number that knows what + and < mean --------------------------------
+
+local Fixed = struct { raw: I32 }  -- a number with 16 fractional bits
+
+function Fixed.__cast(v, T)  -- a Lua number where a Fixed is expected
+    if type v == 'number' then
+        return Fixed { raw = I32(v * 65536) }
+    end
+end
+
+function Fixed.__add(a: Fixed, b: Fixed): Fixed
+    return Fixed { raw = a.raw + b.raw }
+end
+
+function Fixed.__lt(a: Fixed, b: Fixed): Bool  -- comparisons are staged in typed bodies: a native word
+    return a.raw < b.raw
+end
+
+local below = do(x: Fixed, y: Fixed): Bool = x < y
+export below
+
+-- §8 Step 6: concurrency ----------------------------------------------------------------------------
 
 local Chunk = struct { n: U32, bytes: Array(U8, 64) }
 
@@ -200,16 +284,16 @@ local line_count = do(workers, path: CString): U32
                 spawn do
                     local more: Bool = true
                     while more do
-                        local s = chunks:take()
-                        io.read(file, chunks[s].bytes) {
-                            done = do(n) chunks[s].n = n end,
-                            failed = do(e) chunks[s].n = 0 end,
+                        local slot = chunks:take()
+                        io.read(file, chunks[slot].bytes) {
+                            done = do(n) chunks[slot].n = n end,
+                            failed = do(e) chunks[slot].n = 0 end,
                         }
-                        if chunks[s].n == 0 then
-                            chunks:release s
+                        if chunks[slot].n == 0 then
+                            chunks:release slot
                             more = false
                         else
-                            filled:send s
+                            filled:send slot
                         end
                     end
                     filled:close()
@@ -219,17 +303,17 @@ local line_count = do(workers, path: CString): U32
                     tasks do(crew)
                         for _ = 1, workers do
                             crew.spawn do
-                                filled:each do(s)
-                                    counts:send(count_lines chunks[s])
-                                    chunks:release s
+                                filled:each do(slot)
+                                    counts:send(count_lines chunks[slot])
+                                    chunks:release slot
                                 end
                             end
                         end
                     end
                     counts:close()
                 end
-                counts:each do(n)
-                    total = total + n
+                counts:each do(lines)
+                    total = total + lines
                 end
             end
             io.close(file) { done = do() end, failed = do(e) end }
