@@ -109,6 +109,23 @@ end
     return x
 end
 ]])
+formatted('table shorthand is kept and spaced', 'local t = P {.x,.y, z=3}\n', 'local t = P { .x, .y, z = 3 }\n')
+formatted('the shorthand rewrites name = name', [[local f = do(x: U32, y: U32): P
+    local a, x2 = x, y
+    a, x = x, y
+    return P { x = x, y = y, z = z }
+end
+local t = { x = x, y = y }
+]], [[local f = do(x: U32, y: U32): P
+    local a, x2 = x, y
+    a, x = x, y
+    return P { .x, .y, .z }
+end
+local t = { .x, .y }
+]])
+formatted('table_style preserve keeps name = name', 'local t = { x = x }\n', 'local t = { x = x }\n',
+    { table_style = 'preserve' })
+formatted('shorthand is the default', 'local t = { x = x, y = 2 }\n', 'local t = { .x, y = 2 }\n')
 formatted('type_style preserve keeps annotations', 'local f = do(): U32\n    local a: U32 = U32(0)\n    return a\nend\n',
     'local f = do(): U32\n    local a: U32 = U32 0\n    return a\nend\n', { type_style = 'preserve' })
 formatted('a host binding keeps its annotation-free form', 'local a = U32(0)\n', 'local a = U32 0\n')
@@ -289,7 +306,7 @@ local function protected(text)
 end
 check('literal and comment bytes unchanged', protected(literal) == protected(out))
 check('comments in calls keep parentheses', fmt.format('local r = f( -- why\nx)\n'):find('f(  -- why', 1, true) ~= nil)
-for _, settings in ipairs { { indent_width = 0 }, { column_width = 10 }, { call_style = 'lua' }, { surprise = true }, { indent_width = false }, { spine_style = 'flat' }, { type_style = 'always' } } do
+for _, settings in ipairs { { indent_width = 0 }, { column_width = 10 }, { call_style = 'lua' }, { surprise = true }, { indent_width = false }, { spine_style = 'flat' }, { type_style = 'always' }, { table_style = 'sugar' } } do
     local ok = pcall(fmt.format, 'local x=1', settings)
     check('reject invalid config', not ok)
 end

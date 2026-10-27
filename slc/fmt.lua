@@ -4,7 +4,7 @@ local lexer = require 'macro.lexer'
 local syntax = require 'slc.syntax'
 local M = {}
 M.defaults = { indent_width = 4, column_width = 100, call_style = 'minimal', spine_style = 'pure',
-               type_style = 'inferred' }
+               type_style = 'inferred', table_style = 'shorthand' }
 
 function M.options(options)
     local out = {}
@@ -26,6 +26,9 @@ function M.options(options)
     end
     if out.type_style ~= 'inferred' and out.type_style ~= 'preserve' then
         error('fmt: type_style must be "inferred" or "preserve"', 0)
+    end
+    if out.table_style ~= 'preserve' and out.table_style ~= 'shorthand' then
+        error('fmt: table_style must be "preserve" or "shorthand"', 0)
     end
     if out.spine_style ~= 'pure' and out.spine_style ~= 'all' and out.spine_style ~= 'none' then
         error('fmt: spine_style must be "pure", "all" or "none"', 0)
@@ -476,6 +479,48 @@ local function drop_inferred(source, info, filename)
     return source
 end
 
+-- `{ x = x }` is `{ .x }`: the same parsed program, so this is only spelling.
+-- Only entries directly inside a table constructor qualify (`a, x = x, y` as a
+-- statement is not one).
+local function shorthand(source, info, filename)
+    local ts = info.tokens
+    local function significant(i, step)
+        i = i + step
+        while ts[i] and (ts[i].t == 'space' or ts[i].t == 'comment') do i = i + step end
+        return i
+    end
+    local stack, edits = {}, {}
+    for i, tk in ipairs(ts) do
+        if tk.t == '(' or tk.t == '[' or tk.t == '{' then
+            stack[#stack + 1] = tk.t
+        elseif tk.t == ')' or tk.t == ']' or tk.t == '}' then
+            stack[#stack] = nil
+        elseif tk.t == 'iden' and stack[#stack] == '{' then
+            local eq = significant(i, 1)
+            local value = significant(eq, 1)
+            local before, after = ts[significant(i, -1)], ts[significant(value, 1)]
+            if ts[eq] and ts[eq].t == '=' and ts[value] and ts[value].t == 'iden' and ts[value].v == tk.v
+                and before and (before.t == '{' or before.t == ',' or before.t == ';')
+                and after and (after.t == ',' or after.t == ';' or after.t == '}') then
+                local clean = true
+                for j = i + 1, value - 1 do
+                    if ts[j].t == 'comment' or ts[j].t == 'space' and ts[j].v:find('\n', 1, true) then clean = false end
+                end
+                if clean then edits[#edits + 1] = { tk.first, ts[value].last, tk.v } end
+            end
+        end
+    end
+    if #edits == 0 then return source end
+    table.sort(edits, function(a, b) return a[1] > b[1] end)
+    local candidate = source
+    for _, edit in ipairs(edits) do
+        candidate = candidate:sub(1, edit[1] - 1) .. '.' .. edit[3] .. candidate:sub(edit[2] + 1)
+    end
+    local ok, reparsed = pcall(parse, candidate, filename)
+    if ok and fingerprint(reparsed.ast) == fingerprint(info.ast) then return candidate end
+    return source
+end
+
 local function minimal(source, info, filename, signature)
     -- Same-length replacements keep token offsets valid even for nested calls.
     table.sort(info.calls, function(a, b) return a[1] > b[1] end)
@@ -507,6 +552,8 @@ local function gap(prev, tk, colon, unary)
     local a, b = prev.v, tk.v
     if tk.t == 'comment' then return '  ' end
     if prev.t == 'comment' then return ' ' end
+    -- `.name` shorthand entries: a dot never follows these in other code
+    if b == '.' and (a == '{' or a == ',' or a == ';') then return ' ' end
     if b == ',' or b == ';' or b == ')' or b == ']' or b == '.' or b == ':' or a == '.' then return '' end
     if a == ':' then return colon and ' ' or '' end
     if unary and not (a == '-' and b == '-') then return '' end
@@ -599,6 +646,10 @@ function M.format(source, options, filename)
     local info = parse(source, filename)
     if options.type_style == 'inferred' then
         source = drop_inferred(source, info, filename)
+        info = parse(source, filename)
+    end
+    if options.table_style == 'shorthand' then
+        source = shorthand(source, info, filename)
         info = parse(source, filename)
     end
     local signature = fingerprint(info.ast)

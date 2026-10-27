@@ -41,6 +41,7 @@ return {
     call_style = "minimal",
     spine_style = "pure",
     type_style = "inferred",
+    table_style = "shorthand",
 }
 ```
 
@@ -57,6 +58,7 @@ file, not arbitrary downloaded Lua code.
 | `column_width` | integer 20–240 | Soft wrapping target, not a hard limit. |
 | `call_style` | `"minimal"`, `"preserve"` | Remove safe call parentheses (and fold a spine's closers), or retain call spelling. |
 | `type_style` | `"inferred"`, `"preserve"` | Drop a local's annotation when its initializer is an application of that same type (below), or keep every annotation. |
+| `table_style` | `"shorthand"`, `"preserve"` | `"shorthand"` writes a table entry `name = name` as `.name` (spec §3.3); `"preserve"` keeps the spelling, including any `.name` already written. |
 | `spine_style` | `"pure"`, `"all"`, `"none"` | Which link bodies of an `endall` spine lose their indent. |
 
 Unknown settings and invalid values are errors, not silently ignored options.
@@ -110,6 +112,8 @@ end
 
 - Spaces around operators and after commas/type colons; no spaces around member
   selection or a method colon. No trailing whitespace outside literal/comment text.
+- A table entry `name = name` is written `.name` (`Point { .x, .y, z = 3 }`), per
+  `table_style`; set it to `"preserve"` to keep the long form.
 - Indentation follows parsed blocks and delimiters, including trailing lambdas,
   context openings and `endall`; `spine_style` decides how a spine's link bodies
   indent.
