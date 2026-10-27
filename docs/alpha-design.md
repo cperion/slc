@@ -415,10 +415,10 @@ slc version                                                                  [im
 The alpha ships when:
 
 * `slc` builds with a plain `cc` and the host's LuaJIT and libgccjit development
-  packages, on both targets;
-* its own test suite passes when run through it (the launcher spike plus
-  `make test-dist` is the first step; the suite through the binary is not wired
-  yet);
+  packages, on both targets (builds and passes its own checks on the development
+  machine; the second architecture is untested);
+* its own test suite passes when run through it: `make test-dist-suite` runs the
+  entire suite with `SLC_BIN` pointing at the built binary;
 * `slc run` and `slc build` work on a clean container that has the host's cc,
   LuaJIT and libgccjit, and the executables `slc build` produces run there;
 * the cache can be deleted at any time without consequence.

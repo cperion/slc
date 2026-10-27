@@ -16,7 +16,7 @@ export SLC_GCCJIT := $(CURDIR)/.local/lib/libgccjit.so.0
 endif
 endif
 
-.PHONY: help doctor dirs runtime test test-macros test-format test-modules test-native test-scheduler run tree-sitter test-tree-sitter dist test-dist
+.PHONY: help doctor dirs runtime test test-macros test-format test-modules test-native test-scheduler run tree-sitter test-tree-sitter dist test-dist test-dist-suite
 
 TREE_SITTER ?= tree-sitter
 NVIM ?= nvim
@@ -113,6 +113,10 @@ test-dist: dist
 	build/dist/slc fuzz --storage --count 4
 	build/dist/slc -o build/tmp/dist-arrays.c examples/arrays.slc
 	@printf '%s\n' 'dist checks passed (run, build, check, fuzzers)'
+
+# the alpha gate: the whole suite, compiled by the built binary
+test-dist-suite: dist
+	SLC_BIN=$(CURDIR)/build/dist/slc $(LUA) tests/run.lua
 
 run: dirs
 	@test -n "$(PROGRAM)" || { printf '%s\n' 'Set PROGRAM=path/to/program.slc'; exit 2; }
