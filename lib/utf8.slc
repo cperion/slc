@@ -12,7 +12,7 @@ local Rune = struct { cp: U32, size: U32 }
 local function step(s: Str, i: U32): Rune
     local c: U8 = s[i]
     if c < 0x80 then
-        return Rune { cp = U32(c), size = 1 }
+        return Rune { cp = U32 c, size = 1 }
     end
     -- a continuation byte must be 0x80..0xBF
     local function cont(at: U32): Bool
@@ -22,7 +22,7 @@ local function step(s: Str, i: U32): Rune
     end
     if c >= 0xC2 and c <= 0xDF then
         if not cont(i + 1) then return Rune { cp = 0xFFFD, size = 0 } end
-        local cp: U32 = (U32(c) - 0xC0) * 0x40 + (U32(s[i + 1]) - 0x80)
+        local cp: U32 = (U32 c - 0xC0) * 0x40 + (U32 s[i + 1] - 0x80)
         return Rune { cp = cp, size = 2 }
     end
     if c >= 0xE0 and c <= 0xEF then
@@ -31,7 +31,7 @@ local function step(s: Str, i: U32): Rune
         -- E0 A0..BF, ED 80..9F: no overlongs, no surrogates
         if c == 0xE0 and b1 < 0xA0 then return Rune { cp = 0xFFFD, size = 0 } end
         if c == 0xED and b1 > 0x9F then return Rune { cp = 0xFFFD, size = 0 } end
-        local cp: U32 = (U32(c) - 0xE0) * 0x1000 + (U32(b1) - 0x80) * 0x40 + (U32(s[i + 2]) - 0x80)
+        local cp: U32 = (U32 c - 0xE0) * 0x1000 + (U32 b1 - 0x80) * 0x40 + (U32 s[i + 2] - 0x80)
         return Rune { cp = cp, size = 3 }
     end
     if c >= 0xF0 and c <= 0xF4 then
@@ -42,8 +42,8 @@ local function step(s: Str, i: U32): Rune
         -- F0 90..BF, F4 80..8F: no overlongs, nothing above U+10FFFF
         if c == 0xF0 and b1 < 0x90 then return Rune { cp = 0xFFFD, size = 0 } end
         if c == 0xF4 and b1 > 0x8F then return Rune { cp = 0xFFFD, size = 0 } end
-        local cp: U32 = (U32(c) - 0xF0) * 0x40000 + (U32(b1) - 0x80) * 0x1000
-            + (U32(s[i + 2]) - 0x80) * 0x40 + (U32(s[i + 3]) - 0x80)
+        local cp: U32 = (U32 c - 0xF0) * 0x40000 + (U32 b1 - 0x80) * 0x1000
+        + (U32 s[i + 2] - 0x80) * 0x40 + (U32 s[i + 3] - 0x80)
         return Rune { cp = cp, size = 4 }
     end
     return Rune { cp = 0xFFFD, size = 0 }

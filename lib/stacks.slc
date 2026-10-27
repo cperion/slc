@@ -2,9 +2,9 @@
 -- trap transfer are foreign mechanisms; growth and lifetime bookkeeping are SLC.
 local h = '"slc_rt.h"'
 local Stack = cstruct("slc_stack", h, {
-    { "data", Ptr U8 }, { "top", U64 }, { "cap", U64 }, { "map_counter", Ptr U32 },
-    { "map_guard_base", U64 }, { "map_guard_token", U64 },
-})
+        { "data", Ptr U8 }, { "top", U64 }, { "cap", U64 }, { "map_counter", Ptr U32 },
+        { "map_guard_base", U64 }, { "map_guard_token", U64 },
+    })
 local Set = cstruct("slc_stackset", h, { { "stacks", Ptr Stack }, { "n", U64 } })
 local current = extern("slc_stacks_current", {}, Ptr Set, { header = h })
 local resize_stacks = extern("realloc", { Ptr Stack, U64 }, Ptr Stack, { header = "<stdlib.h>" })
@@ -24,7 +24,7 @@ stacks.get = do(index: U64): Ptr Stack
         while n <= index do n = n * 2 end
         local data = resize_stacks(context.stacks, n * size_of Stack)
         if data == null Stack then trap "out of memory for data stacks" end
-        zero(bytes(data[context.n]), 0, (n - context.n) * size_of Stack)
+        zero(bytes data[context.n], 0, (n - context.n) * size_of Stack)
         context.stacks = data
         context.n = n
     end

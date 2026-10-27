@@ -8,30 +8,39 @@ return function(t)
     local Waiters = cstruct("slc_fd_waiters", h, { { "head", Ptr Op }, { "tail", Ptr Op } })
     local Queue = cstruct("slc_fd_queue", h, { { "read", Waiters }, { "write", Waiters } })
     local State = cstruct("slc_kqueue_state", h, {
-        { "mu", Mutex }, { "kq", I32 }, { "incoming", Ptr Op }, { "fds", Ptr Queue }, { "capacity", U64 },
-    })
+            { "mu", Mutex },
+            { "kq", I32 }, { "incoming", Ptr Op }, { "fds", Ptr Queue }, { "capacity", U64 },
+        })
     local Event = cstruct("struct kevent", h, {
-        { "ident", U64 }, { "filter", I16 }, { "flags", U16 }, { "fflags", U32 }, { "data", I64 }, { "udata", Ptr Void },
-    })
-    local Timespec = cstruct("struct timespec", "<time.h>", { { "tv_sec", I64 }, { "tv_nsec", I64 } })
+            { "ident", U64 },
+            { "filter", I16 },
+            { "flags", U16 }, { "fflags", U32 }, { "data", I64 }, { "udata", Ptr Void },
+        })
+    local Timespec = cstruct("struct timespec",
+        "<time.h>", { { "tv_sec", I64 }, { "tv_nsec", I64 } })
     local lock = extern("pthread_mutex_lock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
     local unlock = extern("pthread_mutex_unlock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
     local trap = extern("slc_trap", { CString }, Unit, options)
     local now = extern("slc_now_ns", {}, U64, options)
     local errno = cread("errno", I32, "<errno.h>")
     local kqueue = extern("kqueue", {}, I32, options)
-    local kevent = extern("kevent", { I32, Ptr Event, I32, Ptr Event, I32, Ptr Timespec }, I32, options)
+    local kevent = extern("kevent",
+        { I32, Ptr Event, I32, Ptr Event, I32, Ptr Timespec }, I32, options)
     local close = extern("close", { I32 }, I32, { header = "<unistd.h>" })
     local resize = extern("realloc", { Ptr Queue, U64 }, Ptr Queue, { header = "<stdlib.h>" })
     local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.h>" })
-    local input, output, user = cconst("EVFILT_READ", I16, h), cconst("EVFILT_WRITE", I16, h), cconst("EVFILT_USER", I16, h)
-    local add, clear, oneshot, delete, eof = cconst("EV_ADD", U16, h), cconst("EV_CLEAR", U16, h), cconst("EV_ONESHOT", U16, h), cconst("EV_DELETE", U16, h), cconst("EV_EOF", U16, h)
+    local input, output, user = cconst("EVFILT_READ", I16, h), cconst("EVFILT_WRITE", I16, h), cconst("EVFILT_USER",
+        I16, h)
+    local add, clear, oneshot, delete, eof = cconst("EV_ADD", U16, h), cconst("EV_CLEAR", U16, h), cconst("EV_ONESHOT",
+        U16, h), cconst("EV_DELETE", U16, h), cconst("EV_EOF", U16, h)
     local trigger = cconst("NOTE_TRIGGER", U32, h)
-    local failed, timed_out, connect_kind = cconst("SLC_IO_FAILED", I32, h), cconst("SLC_IO_TIMED_OUT", I32, h), cconst("SLC_K_CONNECT", I32, h)
+    local failed, timed_out, connect_kind = cconst("SLC_IO_FAILED", I32, h), cconst("SLC_IO_TIMED_OUT",
+        I32, h), cconst("SLC_K_CONNECT", I32, h)
     local complete, try, abandon = t.complete, t.posix.try, t.posix.abandon
     local ReadOpPtr = Ptr t.posix.ReadOp
     local event = do(fd: U64, filter: I16, flags: U16, fflags: U32): Event
-        return Event { ident = fd, filter = filter, flags = flags, fflags = fflags, data = 0, udata = null Void }
+        return Event { ident = fd,
+            filter = filter, flags = flags, fflags = fflags, data = 0, udata = null Void }
     end
     local slc_kqueue_prepare = do(s: Ptr State): Unit
         s.kq = kqueue()
@@ -41,7 +50,7 @@ return function(t)
         if kevent(s.kq, Ptr ev, 1, null Event, 0, null Timespec) < 0 then trap "cannot register the kqueue wake-up" end
     end
     local slc_kqueue_submit = do(s: Ptr State, op: Ptr Op): Unit
-        if t.posix.prepare(op) ~= 0 or t.posix.offload(op) ~= 0 then return end
+        if t.posix.prepare op ~= 0 or t.posix.offload op ~= 0 then return end
         lock(Ptr s.mu)
         op.next = s.incoming
         s.incoming = op
@@ -57,7 +66,7 @@ return function(t)
             while n <= index do n = n * 2 end
             local queues = resize(s.fds, n * size_of Queue)
             if queues == null Queue then trap "out of memory for I/O" end
-            zero(bytes(queues[s.capacity]), 0, (n - s.capacity) * size_of Queue)
+            zero(bytes queues[s.capacity], 0, (n - s.capacity) * size_of Queue)
             s.fds = queues
             s.capacity = n
         end
@@ -94,7 +103,7 @@ return function(t)
                 complete(op, failed, I64 eof_error)
                 continue
             end
-            if try(op) == 0 then
+            if try op == 0 then
                 op.next = w.head
                 op.prev = null Op
                 if w.head ~= null Op then w.head.prev = op else w.tail = op end
@@ -112,7 +121,7 @@ return function(t)
         end
     end
     local slc_kqueue_run = do(s: Ptr State): Unit
-        local storage: Array(Event, 64) = Array(Event, 64) {}
+        local storage = Array(Event, 64) {}
         local events = (Ptr Event)(Ptr storage)
         while true do
             lock(Ptr s.mu)
@@ -125,7 +134,7 @@ return function(t)
                 local w = queue_of s incoming.fd direction
                 if w.head == null Op and watch(s, incoming.fd, direction, true) < 0 then
                     local error = errno()
-                    if try(incoming) == 0 then complete(incoming, failed, I64 error) end
+                    if try incoming == 0 then complete(incoming, failed, I64 error) end
                     incoming = next
                     continue
                 end

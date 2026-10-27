@@ -1,26 +1,26 @@
 -- StrMap owns key bytes; no key-length bound and no reference in an entry.
-local Counts = StrMap(U32)
+local Counts = StrMap U32
 local strmap_words = do(text: Str): U32
-    local words: Counts = Counts {}
-    text:split(" ") do(word)
+    local words = Counts {}
+    text:split " " do(word)
         if word.length > 0 then
             words:ensure(word, 0)
             words[word] = words[word] + 1
         end
     end
     local total: U32 = 0
-    words:each(do(key, count)
+    words:each do(key, count)
         total = total + count
-        words:put(key, count + 1) -- replacement is safe while the key is borrowed
-        words:remove("not-present")
-    end)
+        words:put(key, count + 1)  -- replacement is safe while the key is borrowed
+        words:remove "not-present"
+    end
     return total * 100 + words.length
 end
 export strmap_words
 
 local strmap_copy = do(): U32
-    local words: Counts = Counts {}
-    local key: Chars(8) = Chars(8)("cat")
+    local words = Counts {}
+    local key = Chars 8 "cat"
     words:put(key:str(), 7)
     key.bytes[0] = 98
     words:put(key:str(), 9)
@@ -31,14 +31,14 @@ end
 export strmap_copy
 
 local Item = struct { value: U32 }
-local Items = StrMap(Item)
+local Items = StrMap Item
 local strmap_live_key = do(): U32
-    local words: Items = Items {}
+    local words = Items {}
     words:put("cat", Item { value = 1 })
     words:put("bat", Item { value = 2 })
-    local key: Chars(8) = Chars(8)("cat")
+    local key = Chars 8 "cat"
     local text = key:str()
-    local item = Ref(words[text])
+    local item = Ref words[text]
     local before = item.value
     key.bytes[0] = 98
     return before * 10 + item.value
@@ -49,7 +49,7 @@ local Owner = struct { count: U32, words: Counts }
 local strmap_scopes = do(n: U32): U32
     local sum: U32 = 0
     for i: U32 = 1, n do
-        local owner: Owner = Owner { count = i, words = Counts {} }
+        local owner = Owner { count = i, words = Counts {} }
         owner.words:put("x", i)
         if i % 2 == 0 then continue end
         sum = sum + owner.words["x"]
@@ -59,37 +59,37 @@ end
 export strmap_scopes
 
 local strmap_missing = do(key: Str): U32
-    local words: Counts = Counts {}
+    local words = Counts {}
     return words[key]
 end
 export strmap_missing
 
 local strmap_mutation = do(mode: U32): U32
-    local words: Counts = Counts {}
+    local words = Counts {}
     words:put("a", 1)
-    words:each(do(key, value)
+    words:each do(key, value)
         if mode == 0 then words:put("b", value) end
-        if mode == 1 then words:remove(key) end
-    end)
+        if mode == 1 then words:remove key end
+    end
     return words.length
 end
 export strmap_mutation
 
 local strmap_reserved_keys = do(): U32
-    local words: Counts = Counts {}
+    local words = Counts {}
     for _, key in ipairs { "length", "put", "T", "k", "name", "e", "index_place" } do
         words:put(key, 1)
         words[key] = words[key] + 1
     end
     local total: U32 = 0
-    words:each(do(key, value) total = total + value end)
+    words:each do(key, value) total = total + value end
     return total + words.length
 end
 export strmap_reserved_keys
 
 local Bools = Map(Bool, U32)
 local map_bool_keys = do(): U32
-    local flags: Bools = Bools {}
+    local flags = Bools {}
     flags:put(true, 1)
     flags:put(false, 2)
     flags[true] = flags[false] + 3

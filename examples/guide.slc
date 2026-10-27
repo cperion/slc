@@ -23,11 +23,11 @@ local add_words = do(outline: Ref Outline, id: Id Heading, n: U32): U32
 end
 
 local outline_demo = do(n: U32): U32
-    local outline: Outline = Outline { headings = Store(Heading) {} }
-    local intro: Id Heading = outline.headings:add(Heading { level = 1, words = 0 })
-    local body: Id Heading = outline.headings:add(Heading { level = 2, words = 0 })
-    add_words(Ref(outline), intro, n)
-    return add_words(Ref(outline), body, 2 * n)
+    local outline = Outline { headings = Store(Heading) {} }
+    local intro: Id Heading = outline.headings:add Heading { level = 1, words = 0 }
+    local body: Id Heading = outline.headings:add Heading { level = 2, words = 0 }
+    add_words(Ref outline, intro, n)
+    return add_words(Ref outline, body, 2 * n)
 end
 export outline_demo
 
@@ -47,7 +47,7 @@ local find_nonzero = do(xs: Slice U32): Found
     local i: U32 = 0
     while i < xs.length do
         if xs[i] ~= 0 then
-            return Found.found(i)
+            return Found.found i
         end
         i = i + 1
     end
@@ -72,7 +72,7 @@ local tab_stop_4 = tab_stop { tab_width = 4 }
 export tab_stop_4
 
 -- the pure core is testable while compiling
-assert(host(tab_stop({ tab_width = 8 }, U32(3))) == 8)
+assert(host(tab_stop({ tab_width = 8 }, U32 3)) == 8)
 
 -- §5 Activities --------------------------------------------------------------------------------------
 
@@ -92,14 +92,14 @@ end
 
 -- the activity owns completion: work on a copy, commit at the end
 local transaction = do(document: Ref Document, body): Unit
-    local editing: Editing = Editing { ...document }
-    body(Ref(editing))
+    local editing = Editing { ...document }
+    body(Ref editing)
     document = Document { ...editing }
 end
 
 local type_word = do(document: Ref Document, n: U32): U32
     local moved: U32 = 0
-    transaction(document) do(editing...)
+    transaction document do(editing...)
         insert n
         local before = cursor
         move_left()
@@ -119,9 +119,9 @@ local counted = do(stats: Ref Stats, body): Unit
 end
 
 local import_words = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
-    counted(stats) do
-    counted(stats) do
-    transaction(document) do(editing...)
+    counted stats do
+    counted stats do
+    transaction document do(editing...)
         insert n
     endall
 end
@@ -153,7 +153,7 @@ local apply = do(document: Ref Document, c: Command): Unit
 end
 
 -- a known description: the interpreter dissolves
-local greeting = { Command.insert(5), Command.move(Direction.left()), Command.insert(1) }
+local greeting = { Command.insert 5, Command.move(Direction.left()), Command.insert 1 }
 local type_greeting = do(document: Ref Document): Unit
     for i = 1, #greeting do
         apply(document, greeting[i])
@@ -162,7 +162,7 @@ end
 export type_greeting
 
 -- a runtime description: the same engine, as a loop
-local replay = do(document: Ref Document, commands: Ref (Grow Command)): Unit
+local replay = do(document: Ref Document, commands: Ref(Grow Command)): Unit
     local i: U32 = 0
     while i < commands.length do
         apply(document, commands[i])
@@ -206,10 +206,10 @@ local line_count = do(workers, path: CString): U32
                             failed = do(e) chunks[s].n = 0 end,
                         }
                         if chunks[s].n == 0 then
-                            chunks:release(s)
+                            chunks:release s
                             more = false
                         else
-                            filled:send(s)
+                            filled:send s
                         end
                     end
                     filled:close()
@@ -219,18 +219,18 @@ local line_count = do(workers, path: CString): U32
                     tasks do(crew)
                         for _ = 1, workers do
                             crew.spawn do
-                                filled:each(do(s)
-                                    counts:send(count_lines(chunks[s]))
-                                    chunks:release(s)
-                                end)
+                                filled:each do(s)
+                                    counts:send(count_lines chunks[s])
+                                    chunks:release s
+                                end
                             end
                         end
                     end
                     counts:close()
                 end
-                counts:each(do(n)
+                counts:each do(n)
                     total = total + n
-                end)
+                end
             end
             io.close(file) { done = do() end, failed = do(e) end }
         end,
@@ -238,7 +238,7 @@ local line_count = do(workers, path: CString): U32
     }
     return total
 end
-local line_count_2 = line_count(2)
+local line_count_2 = line_count 2
 export line_count_2
 
 -- a reply, or a timeout
@@ -247,12 +247,12 @@ local ask = do(): U32
     tasks do(scope...)
         local replies = channel(U32, 1)
         spawn do
-            sleep(ms(5))
-            replies:send(42)
+            sleep(ms 5)
+            replies:send 42
         end
         first_of {
-            recv(replies) do(v) answer = v end,
-            after(seconds(1)) do answer = 0 end,
+            recv replies do(v) answer = v end,
+            after(seconds 1) do answer = 0 end,
             closed = do end,
         }
     end

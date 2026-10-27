@@ -45,14 +45,14 @@ local populate = do(
     end
 end
 
-local populate_double = populate(2)
+local populate_double = populate 2
 
 local run = do(n: U32): U32
-    local g: Graph = Graph {
+    local g = Graph {
         nodes = Store(Node) {},
     }
 
-    populate_double(Ref(g), n)
+    populate_double(Ref g, n)
 
     return g.nodes.length
 end
@@ -61,12 +61,12 @@ export run
 
 -- IDs: stale handles never identify a replacement object
 local churn = do(n: U32): U32
-    local g: Graph = Graph { nodes = Store(Node) {} }
-    local first: Id Node = g:add(1)
-    local removed = g.nodes:remove(first)
-    local second: Id Node = g:add(2)
-    local stale_ok = g.nodes:has(first)
-    local fresh_ok = g.nodes:has(second)
+    local g = Graph { nodes = Store(Node) {} }
+    local first: Id Node = g:add 1
+    local removed = g.nodes:remove first
+    local second: Id Node = g:add 2
+    local stale_ok = g.nodes:has first
+    local fresh_ok = g.nodes:has second
     local result: U32 = 0
     if removed and fresh_ok and not stale_ok and first ~= second then
         result = g.nodes[second].value + n
@@ -80,10 +80,10 @@ export churn
 local Bytes = Grow U8
 
 local digits = do(x: U32): U32
-    local buf: Bytes = Bytes {}
-    local v: U32 = x
+    local buf = Bytes {}
+    local v = x
     while v > 0 do
-        buf:push(U8(v % 10))
+        buf:push U8(v % 10)
         v = v / 10
     end
     return buf.length
@@ -97,9 +97,9 @@ local function depth(n: U32): U32
     return 1 + depth(n - 1)
 end
 local sum_depths = do(n: U32): U32
-    local g: Graph = Graph { nodes = Store(Node) {} }
-    g:add(depth(n))
-    return g.nodes.length + depth(n)
+    local g = Graph { nodes = Store(Node) {} }
+    g:add(depth n)
+    return g.nodes.length + depth n
 end
 export sum_depths
 

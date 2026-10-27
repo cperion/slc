@@ -54,7 +54,7 @@ return function(types)
         while link[0] ~= none do
             local index = link[0]
             local candidate = Ptr chunks[index / 256][index % 256]
-            if candidate.cap_slots >= n and candidate.cap_bytes >= U64(n) * elem then
+            if candidate.cap_slots >= n and candidate.cap_bytes >= U64 n * elem then
                 link[0] = candidate.next_free
                 return index
             end
@@ -66,7 +66,8 @@ return function(types)
     -- handles failures after unlocking; pthread initialization is a foreign call.
     local PoolMeta, Mutex = types.PoolMeta, types.Mutex
     local Attr = opaque "pthread_mutexattr_t"
-    local init_mutex = extern("pthread_mutex_init", { Ptr Mutex, Ptr Attr }, I32, { header = "<pthread.h>" })
+    local init_mutex = extern("pthread_mutex_init",
+        { Ptr Mutex, Ptr Attr }, I32, { header = "<pthread.h>" })
     local alloc_channels = extern("calloc", { U64, U64 }, Ptr Channel, { header = "<stdlib.h>" })
     local alloc_pools = extern("calloc", { U64, U64 }, Ptr Pool, { header = "<stdlib.h>" })
     local alloc_metas = extern("calloc", { U64, U64 }, Ptr PoolMeta, { header = "<stdlib.h>" })
@@ -81,7 +82,7 @@ return function(types)
             if chunk == null Channel then return -2 end
             local i = U32 0
             while i < 256 do
-                init_mutex(Ptr(chunk[i].mu), null Attr)
+                init_mutex(Ptr chunk[i].mu, null Attr)
                 i = i + 1
             end
             chunks[page] = chunk
@@ -102,7 +103,7 @@ return function(types)
             if chunk == null Pool or metadata == null PoolMeta then return -2 end
             local i = U32 0
             while i < 256 do
-                init_mutex(Ptr(chunk[i].mu), null Attr)
+                init_mutex(Ptr chunk[i].mu, null Attr)
                 chunk[i].m = Ptr metadata[i]
                 i = i + 1
             end
@@ -127,7 +128,7 @@ return function(types)
         r.sendq.tail = null Op
         r.buf = null U8
         if cap ~= 0 then
-            r.buf = alloc(U64(cap) * elem)
+            r.buf = alloc(U64 cap * elem)
             if r.buf == null U8 then return false end
         end
         return true
@@ -144,16 +145,16 @@ return function(types)
             r.m.data = alloc_bytes(U64 n, width)
             r.m.slots = alloc_slots(U64 n, size_of SlotMeta)
             if r.m.data == null U8 or r.m.slots == null SlotMeta then return false end
-            r.cap_bytes = U64(n) * elem
+            r.cap_bytes = U64 n * elem
             r.cap_slots = n
         else
-            zero(r.m.data, 0, U64(n) * elem)
+            zero(r.m.data, 0, U64 n * elem)
         end
         local i = U32 0
         while i < n do
             local slot = Ptr r.m.slots[i]
             if slot.gen == 0 then slot.gen = 1 end
-            atomic_ptr(Ptr(slot.owner))[0]:store(0, "release")
+            atomic_ptr(Ptr slot.owner)[0]:store(0, "release")
             slot.next_free = none
             if i + 1 < n then slot.next_free = i + 1 end
             i = i + 1
@@ -179,16 +180,16 @@ return function(types)
         if r.gen == 0 then r.gen = 1 end
         free r.buf
         r.buf = null U8
-        local list = drain(Ptr(r.recvq), null Op)
-        return drain(Ptr(r.sendq), list)
+        local list = drain(Ptr r.recvq, null Op)
+        return drain(Ptr r.sendq, list)
     end
     local slc_pool_retire = do(r: Ptr Pool): Ptr Op
         r.live = false
         local generation = r.m.gen + 1
         if generation == 0 then generation = 1 end
-        atomic_ptr(Ptr(r.m.gen))[0]:store(generation, "release")
+        atomic_ptr(Ptr r.m.gen)[0]:store(generation, "release")
         r.scope = null Scope
-        return drain(Ptr(r.takers), null Op)
+        return drain(Ptr r.takers, null Op)
     end
     local slc_channel_recycle_record = do(r: Ptr Channel, head: Ptr U32, index: U32): Unit
         r.next_free = head[0]
@@ -200,11 +201,13 @@ return function(types)
     end
     local slc_channel_close_waiters = do(r: Ptr Channel): Ptr Op
         r.closed = true
-        return drain(Ptr(r.recvq), null Op)
+        return drain(Ptr r.recvq, null Op)
     end
     local wake = extern("slc_task_wake", { Ptr Task }, Unit, { header = '"slc_scheduler.h"' })
-    local retire_channel = extern("slc_retire_channel_sync", { U32 }, Unit, { header = '"slc_scheduler.h"' })
-    local retire_pool = extern("slc_retire_pool_sync", { U32 }, Unit, { header = '"slc_scheduler.h"' })
+    local retire_channel = extern("slc_retire_channel_sync",
+        { U32 }, Unit, { header = '"slc_scheduler.h"' })
+    local retire_pool = extern("slc_retire_pool_sync",
+        { U32 }, Unit, { header = '"slc_scheduler.h"' })
     local free_indices = extern("free", { Ptr U32 }, Unit, { header = "<stdlib.h>" })
     local free_scope = extern("free", { Ptr Scope }, Unit, { header = "<stdlib.h>" })
     local slc_wait_wake = do(list: Ptr Op, plain: I32, selected: I32, clear: Bool): Unit
@@ -249,5 +252,6 @@ return function(types)
     export slc_pool_retire
     export slc_channel_recycle_record
     export slc_pool_recycle_record
-    return { inside = slc_scope_inside, close_waiters = slc_channel_close_waiters, wake_list = slc_wait_wake }
+    return { inside = slc_scope_inside,
+        close_waiters = slc_channel_close_waiters, wake_list = slc_wait_wake }
 end

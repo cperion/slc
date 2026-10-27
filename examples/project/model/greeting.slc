@@ -4,7 +4,7 @@ local greeting = {}
 local libc = require "slc.libc"
 
 greeting.say = do(who: Str): Unit
-    libc.say("hello, ")
+    libc.say "hello, "
     who:cstring() do(c)
         libc.say(c, "\n")
     end

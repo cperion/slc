@@ -3106,7 +3106,7 @@ uint64_t pooled(uint32_t count) {
     bool open = true;
     for (;;) {
         if (!open) break;
-        if (slc_recv(slc_tk, slc_ops, ch, &got, "channels.slc:346: recv") == SLC_PENDING) slc_block(slc_tk);
+        if (slc_recv(slc_tk, slc_ops, ch, &got, "channels.slc:345: recv") == SLC_PENDING) slc_block(slc_tk);
         r = slc_tk->result;
         if (r == 1) {
             slc_slot_adopt(slc_tk, got);
@@ -3133,7 +3133,7 @@ uint64_t pooled(uint32_t count) {
             slc_slot_release(slc_tk, r2.as.value);
         }
     }
-    if (slc_scope_end(slc_tk, slc_ops, scope, "channels.slc:333: the end of a tasks scope") == SLC_PENDING) slc_block(slc_tk);
+    if (slc_scope_end(slc_tk, slc_ops, scope, "channels.slc:332: the end of a tasks scope") == SLC_PENDING) slc_block(slc_tk);
     return total;
 }
 ```

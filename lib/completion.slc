@@ -5,7 +5,7 @@ local completion = {}
 function completion.io(Result, done_of)
     return do(status: I32, value: I64): Result
         if status == 0 then
-            if done_of then return Result.done(done_of(value)) end
+            if done_of then return Result.done(done_of value) end
             return Result.done()
         end
         if Result.index.timed_out then
@@ -17,7 +17,7 @@ end
 
 function completion.receive(Result, read_owned)
     return do(available: Bool): Result
-        if available then return Result.value(read_owned()) end
+        if available then return Result.value read_owned() end
         return Result.closed()
     end
 end

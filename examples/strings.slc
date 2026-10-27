@@ -3,13 +3,13 @@
 -- known needle unrolls into byte comparisons.
 
 -- a known needle unrolls: one comparison per byte, no loop, no bounds checks
-local is_world = do(name: Str): Bool = name:equals("world")
+local is_world = do(name: Str): Bool = name:equals "world"
 export is_world
 
 -- words separated by spaces
 local word_count = do(text: Str): U32
     local n: U32 = 0
-    text:split(" ") do(part)
+    text:split " " do(part)
         if part.length > 0 then
             n = n + 1
         end
@@ -17,12 +17,12 @@ local word_count = do(text: Str): U32
     return n
 end
 export word_count
-assert(host(word_count("the quick  brown fox")) == 4)
+assert(host(word_count "the quick  brown fox") == 4)
 
 -- the sum of a line of integers; fields that are not numbers count as 0
 local line_sum = do(line: Str): I64
     local total: I64 = 0
-    line:split(",") do(field)
+    line:split "," do(field)
         field:trim():parse(I64) {
             value = do(v) total = total + v end,
             bad = do() end,
@@ -31,13 +31,13 @@ local line_sum = do(line: Str): I64
     return total
 end
 export line_sum
-assert(host(line_sum("1, 2,-3, x, 40")) == 40)
+assert(host(line_sum "1, 2,-3, x, 40") == 40)
 
 -- a setting from a config text: the line that starts with "port="
 local port_of = do(config: Str): U32
     local port: U32 = 0
     config:lines() do(line)
-        if line:starts_with("port=") then
+        if line:starts_with "port=" then
             line:sub(5, line.length):parse(U32) {
                 value = do(v) port = v end,
                 bad = do() end,
@@ -50,7 +50,7 @@ export port_of
 
 -- where a word is, or 99
 local where = do(s: Str): U32
-    return s:find("fox") {
+    return s:find "fox" {
         at(i) = i,
         missing() = 99,
     }
@@ -59,22 +59,22 @@ export where
 
 -- building text: known pieces join while compiling, values are formatted
 local render_matches = do(n: U32, ok: Bool, expected: Str): Bool
-    local out: Text = Text {}
+    local out = Text {}
     out:write("n = ", n, ", ok = ", ok, ", unit = ", 1.5)
     local same: Bool = false
     out:str() do(s)
-        same = s:equals(expected)
+        same = s:equals expected
     end
     return same
 end
 export render_matches
 
 -- short text as a value: copied, stored, compared
-local Person = struct { name: Chars(16), age: U32 }
+local Person = struct { name: Chars 16, age: U32 }
 local remember = do(name: Str, age: U32): U32
-    local p: Person = Person { name = Chars(16)(name), age = age }
+    local p = Person { name = Chars 16 name, age = age }
     local back: U32 = 0
-    if p.name:str():equals(name) then
+    if p.name:str():equals name then
         back = p.name.length
     end
     return back + p.age
@@ -122,7 +122,7 @@ local strlen = extern("strlen", { CString }, U64, { header = "<string.h>" })
 local cstring_len = do(s: Str): U32
     local n: U32 = 0
     s:cstring() do(c)
-        n = U32(strlen(c))
+        n = U32(strlen c)
     end
     return n
 end
@@ -137,6 +137,6 @@ local parse_float = do(s: Str): F64
     }
 end
 export parse_float
-assert(host(parse_float("2.5")) == 2.5)
-assert(host(parse_float("-1e3")) == -1000)
-assert(host(parse_float("1.2.3")) == -1)
+assert(host(parse_float "2.5") == 2.5)
+assert(host(parse_float "-1e3") == -1000)
+assert(host(parse_float "1.2.3") == -1)

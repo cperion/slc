@@ -3,7 +3,7 @@
 -- §4.1 ordinary Lua builds native words
 local make_multiplier = do(k)
     return do(x: U32): U32 =
-        x * k
+    x * k
 end
 
 local double = make_multiplier 2
@@ -20,7 +20,7 @@ local affine = do(
 
 local transform = affine(4, 3)
 local use = do(x: U32): U32 =
-    affine(4, 3, x)
+affine(4, 3, x)
 assert(host(affine(4, 3, 10)) == 43)
 export transform
 export use
@@ -49,7 +49,7 @@ export choose_use
 
 -- §7.2 branch-local state
 local f = do(flag: Bool, x: U32): U32
-    local y: U32 = x
+    local y = x
 
     if flag then
         y = y * 2
@@ -72,7 +72,7 @@ export unannotated
 
 -- §8.2 typed locals are places
 local typed_local = do(x: U32): U32
-    local y: U32 = x
+    local y = x
 
     y = y + 1
 
@@ -83,7 +83,7 @@ export typed_local
 -- §9.1 generation-time loops
 local make_sum = do(n)
     return do(x: U32): U32
-        local total: U32 = x
+        local total = x
 
         for i = 1, n do
             total = total + i
@@ -108,9 +108,9 @@ local triangular = do(n: U32): U32
 end
 
 local fifteen = triangular 5
-assert(host(fifteen) == 15)
+assert(host fifteen == 15)
 local runtime_sum = do(n: U32): U32 =
-    triangular n
+triangular n
 export runtime_sum
 
 -- §11 effects stay residual
@@ -137,9 +137,9 @@ function Counter:get(): U32
 end
 
 local count3 = do(a: U32, b: U32, c: U32): U32
-    local counter: Counter = Counter { value = 0 }
-    counter:add(a)
-    counter:add(b)
+    local counter = Counter { value = 0 }
+    counter:add a
+    counter:add b
     counter:add c
     return counter:get()
 end

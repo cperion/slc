@@ -36,7 +36,7 @@ function keys.encoder(T)
         end
     elseif T.kind == "struct" then
         encode = do(h: Ref State, key: T): Unit
-            for _, field in ipairs(T.fields) do
+            for _, field in ipairs T.fields do
                 local part = field_value(key, field.name)
                 local feed = keys.encoder field.type
                 feed h part
@@ -45,7 +45,7 @@ function keys.encoder(T)
     elseif T.kind == "sum" then
         encode = do(h: Ref State, key: T): Unit
             local handlers = {}
-            for _, alt in ipairs(T.alts) do
+            for _, alt in ipairs T.alts do
                 local Payload = alt.type
                 if Payload == Unit then
                     handlers[alt.name] = do
@@ -112,7 +112,7 @@ function keys.equal(T)
         end
     elseif T.kind == "struct" then
         equal = do(a: T, b: T): Bool
-            for _, field in ipairs(T.fields) do
+            for _, field in ipairs T.fields do
                 local x, y = field_value(a, field.name), field_value(b, field.name)
                 local same = keys.equal field.type
                 if not same x y then return false end
@@ -124,7 +124,7 @@ function keys.equal(T)
         -- host state from a native conditional. Comparisons remain SLC words.
         local function right_handlers(alt, x)
             local right = {}
-            for _, other in ipairs(T.alts) do
+            for _, other in ipairs T.alts do
                 local Payload = other.type
                 if Payload == Unit then
                     local matches = other.name == alt.name
@@ -140,7 +140,7 @@ function keys.equal(T)
         end
         local function left_handlers(b)
             local left = {}
-            for _, alt in ipairs(T.alts) do
+            for _, alt in ipairs T.alts do
                 local Payload = alt.type
                 if Payload == Unit then
                     left[alt.name] = do(): Bool

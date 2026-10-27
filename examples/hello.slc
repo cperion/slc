@@ -3,7 +3,7 @@
 local libc = require "slc.libc"
 
 local main = do(): I32
-    libc.say("hello from slc\n")
+    libc.say "hello from slc\n"
     return 0
 end
 export main

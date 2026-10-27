@@ -13,8 +13,8 @@ local vectors = {
 }
 local bytes = ""
 for n = 0, 15 do
-    assert (host (hash.sip24 bytes k0 k1) == vectors[n + 1])
-    bytes = bytes .. string.char(n)
+    assert(host(hash.sip24 bytes k0 k1) == vectors[n + 1])
+    bytes = bytes .. string.char n
 end
 
 local hash_known = do(): U64 = hash.sip24("", k0, k1)

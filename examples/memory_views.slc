@@ -13,7 +13,7 @@ end
 export brighten
 
 local first_or = do(p: Ptr U32, d: U32): U32
-    if p == null(U32) then
+    if p == null U32 then
         return d
     end
     return p[0]
@@ -22,8 +22,8 @@ export first_or
 
 -- Ptr(place) is the one place a lifetime is dropped; the place becomes memory
 local through_pointer = do(x: U32): U32
-    local v: U32 = x
-    local p = Ptr(v)
+    local v = x
+    local p = Ptr v
     p[0] = p[0] + 1
     return v * 10
 end
@@ -34,7 +34,7 @@ local sum = do(xs: Slice U8): U32
     local total: U32 = 0
     local i: U32 = 0
     while i < xs.length do
-        total = total + U32(xs[i])
+        total = total + U32 xs[i]
         i = i + 1
     end
     return total
@@ -42,32 +42,32 @@ end
 export sum
 
 -- Slice(p, n) makes a view at the boundary
-local sum_raw = do(p: Ptr U8, n: U32): U32 = sum(Slice(p, n))
+local sum_raw = do(p: Ptr U8, n: U32): U32 = sum Slice(p, n)
 export sum_raw
 
 -- a binary format described as data; one range check, then constant offsets
 local Packet = struct { version: U32, flags: U32, length: U32, id: U32 }
 local format = {
     { "version", 0, 1 },
-    { "flags",   1, 1 },
-    { "length",  2, 2 },
-    { "id",      4, 4 },
+    { "flags", 1, 1 },
+    { "length", 2, 2 },
+    { "id", 4, 4 },
 }
 local size = 8
 local read_be = do(s: Slice U8, at, width): U32
     local v: U32 = 0
     for k = 0, width - 1 do
-        v = v * 256 + U32(s[at + k])
+        v = v * 256 + U32 s[at + k]
     end
     return v
 end
 local parse = do(buf: Slice U8): Packet
     local h = buf:sub(0, size)
     local fields = {}
-    for _, f in ipairs(format) do
+    for _, f in ipairs format do
         fields[f[1]] = read_be(h, f[2], f[3])
     end
-    return Packet(fields)
+    return Packet fields
 end
 export parse
 
@@ -82,14 +82,14 @@ local sum32 = do(xs: Slice U32): U32
     return total
 end
 local squares = do(n: U32): U32
-    local g: Grow U32 = (Grow U32) {}
+    local g = (Grow U32) {}
     local i: U32 = 1
     while i <= n do
         g:push(i * i)
         i = i + 1
     end
     return g:view() do(xs)
-        return sum32(xs)
+        return sum32 xs
     end
 end
 export squares
@@ -106,7 +106,7 @@ export fill
 
 -- a fact stops holding when its value changes: the second index is checked
 local next_after = do(xs: Slice U32, i: U32): U32
-    local j: U32 = i
+    local j = i
     if j < xs.length then
         local here: U32 = xs[j]
         j = j + 1

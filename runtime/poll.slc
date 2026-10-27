@@ -5,12 +5,12 @@ return function(t)
     local Op, Mutex = t.Op, t.Mutex
     local h = '"slc_io_poll.h"'
     local State = cstruct("slc_poll_state", h, {
-        { "mu", Mutex }, { "reader", I32 }, { "writer", I32 },
-        { "pending", Ptr(Ptr Op) }, { "count", U64 }, { "capacity", U64 },
-    })
+            { "mu", Mutex }, { "reader", I32 }, { "writer", I32 },
+            { "pending", Ptr(Ptr Op) }, { "count", U64 }, { "capacity", U64 },
+        })
     local Fd = cstruct("struct pollfd", "<poll.h>", {
-        { "fd", I32 }, { "events", I16 }, { "revents", I16 },
-    })
+            { "fd", I32 }, { "events", I16 }, { "revents", I16 },
+        })
     local ReadOp = t.posix.ReadOp
     local ReadOpPtr = Ptr ReadOp
     local options = { header = h }
@@ -21,7 +21,8 @@ return function(t)
     local prepare, offload, wants_write = t.posix.prepare, t.posix.offload, t.posix.wants_write
     local try, abandon, complete = t.posix.try, t.posix.abandon, t.complete
     local pipe = t.posix.pipe
-    local resize_ops = extern("realloc", { Ptr(Ptr Op), U64 }, Ptr(Ptr Op), { header = "<stdlib.h>" })
+    local resize_ops = extern("realloc",
+        { Ptr(Ptr Op), U64 }, Ptr(Ptr Op), { header = "<stdlib.h>" })
     local resize_fds = extern("realloc", { Ptr Fd, U64 }, Ptr Fd, { header = "<stdlib.h>" })
     local read = extern("read", { I32, Ptr U8, U64 }, I64, { header = "<unistd.h>" })
     local write = extern("write", { I32, Ptr U8, U64 }, I64, { header = "<unistd.h>" })
@@ -32,12 +33,12 @@ return function(t)
     local timed_out = cconst("SLC_IO_TIMED_OUT", I32, h)
     local slc_poll_prepare = do(state: Ptr State): Unit
         local value = I64 0
-        if pipe(Ptr(state.reader), Ptr(state.writer), Ptr value) ~= done then
+        if pipe(Ptr state.reader, Ptr state.writer, Ptr value) ~= done then
             trap "cannot make the I/O wake-up pipe"
         end
     end
     local slc_poll_submit = do(state: Ptr State, op: Ptr Op): Unit
-        if prepare(op) ~= 0 or offload(op) ~= 0 then return end
+        if prepare op ~= 0 or offload op ~= 0 then return end
         lock(Ptr state.mu)
         if state.count == state.capacity then
             local n = U64 16
@@ -59,7 +60,7 @@ return function(t)
         local capacity = U64 0
         while true do
             local timeout = I32(-1)
-            local buf: Array(U8, 64) = Array(U8, 64) {}
+            local buf = Array(U8, 64) {}
             lock(Ptr state.mu)
             local n = state.count
             if n + 1 > capacity then
@@ -97,7 +98,7 @@ return function(t)
             i = 0
             while i < n do
                 local op = state.pending[i]
-                if fds[i + 1].revents ~= 0 and try(op) ~= 0 then
+                if fds[i + 1].revents ~= 0 and try op ~= 0 then
                     state.pending[i] = null Op
                 elseif op.deadline ~= 0 and time >= op.deadline then
                     state.pending[i] = null Op

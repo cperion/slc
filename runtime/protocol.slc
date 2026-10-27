@@ -27,8 +27,8 @@ return function(t)
     local none, closed, pending = I32(-100), I32(-2), I32 1
     local PoolHandle = cstruct("slc_pool", header, { { "idx", U32 }, { "gen", U32 } })
     local Case = cstruct("const slc_case", header, {
-        { "kind", I32 }, { "chan", Handle }, { "buf", Ptr U8 }, { "ns", U64 },
-    })
+            { "kind", I32 }, { "chan", Handle }, { "buf", Ptr U8 }, { "ns", U64 },
+        })
     local channel_at = do(index: U32): Ptr Channel
         local chunks = channels()
         return Ptr chunks[index / 256][index % 256]
@@ -55,7 +55,7 @@ return function(t)
         if generation == 0 or index / 256 >= 4096 or chunks[index / 256] == null Pool then trap "not a pool" end
         local r = pool_at index
         lock(Ptr r.mu)
-        if not r.live or atomic_ptr(Ptr(r.m.gen))[0]:load("acquire") ~= generation then
+        if not r.live or atomic_ptr(Ptr r.m.gen)[0]:load "acquire" ~= generation then
             unlock(Ptr r.mu)
             trap "pool used after its tasks scope ended"
         end
@@ -69,7 +69,7 @@ return function(t)
         return send r value self w
     end
     local claimable = do(task: Ptr Task): Unit
-        atomic_ptr(Ptr(task.claimed))[0]:store(0, "release")
+        atomic_ptr(Ptr task.claimed)[0]:store(0, "release")
     end
     local begin = do(task: Ptr Task, ops: Ptr Op, n: I32, site: CString): Unit
         task.ops = ops
@@ -97,7 +97,7 @@ return function(t)
             return 0
         end
         claimable task
-        enqueue(Ptr(r.sendq), ops)
+        enqueue(Ptr r.sendq, ops)
         unlock(Ptr r.mu)
         return pending
     end
@@ -116,7 +116,7 @@ return function(t)
             return 0
         end
         claimable task
-        enqueue(Ptr(r.recvq), ops)
+        enqueue(Ptr r.recvq, ops)
         unlock(Ptr r.mu)
         return pending
     end
@@ -124,7 +124,7 @@ return function(t)
     local slc_chan_close = do(handle: Handle): Unit
         local r = lock_channel handle
         if r.closed then unlock(Ptr r.mu); trap "close of a closed channel" end
-        if has(Ptr(r.sendq), null Task) then unlock(Ptr r.mu); trap "send on a closed channel" end
+        if has(Ptr r.sendq, null Task) then unlock(Ptr r.mu); trap "send on a closed channel" end
         local list = close_waiters r
         unlock(Ptr r.mu)
         wake_list(list, 0, -3, true)
@@ -142,7 +142,8 @@ return function(t)
         timer_add ops
         return pending
     end
-    local slc_take = do(task: Ptr Task, ops: Ptr Op, handle: PoolHandle, out: Ptr Slot, site: CString): I32
+    local slc_take = do(task: Ptr Task,
+        ops: Ptr Op, handle: PoolHandle, out: Ptr Slot, site: CString): I32
         begin task ops 1 site
         initialize(task, ops, 4, Handle { idx = handle.idx, gen = handle.gen }, BytePtr out)
         local r = lock_pool handle.idx handle.gen
@@ -154,13 +155,13 @@ return function(t)
             return 0
         end
         claimable task
-        enqueue(Ptr(r.takers), ops)
+        enqueue(Ptr r.takers, ops)
         unlock(Ptr r.mu)
         return pending
     end
     local lock_slot = do(s: Slot): Ptr Pool
         local r = lock_pool s.pool s.pgen
-        if s.index >= r.m.n or atomic_ptr(Ptr(r.m.slots[s.index].gen))[0]:load("acquire") ~= s.gen then
+        if s.index >= r.m.n or atomic_ptr(Ptr r.m.slots[s.index].gen)[0]:load "acquire" ~= s.gen then
             unlock(Ptr r.mu)
             trap "a slot used after it was released"
         end
@@ -183,23 +184,23 @@ return function(t)
     local slc_slot_give = do(me: Ptr Task, s: Slot): Unit
         local r = lock_slot s
         owned_by r s me
-        atomic_ptr(Ptr(r.m.slots[s.index].owner))[0]:store(1, "release")
+        atomic_ptr(Ptr r.m.slots[s.index].owner)[0]:store(1, "release")
         unlock(Ptr r.mu)
     end
     local slc_slot_adopt = do(me: Ptr Task, s: Slot): Unit
         local r = lock_slot s
         if r.m.slots[s.index].owner ~= 1 then unlock(Ptr r.mu); trap "a slot adopted that was not sent" end
         if not inside(me, r.scope) then unlock(Ptr r.mu); trap "a slot received outside its pool's tasks scope" end
-        atomic_ptr(Ptr(r.m.slots[s.index].owner))[0]:store(me.id, "release")
+        atomic_ptr(Ptr r.m.slots[s.index].owner)[0]:store(me.id, "release")
         unlock(Ptr r.mu)
     end
     local slc_slot_release = do(me: Ptr Task, s: Slot): Unit
         local r = lock_slot s
         owned_by r s me
         recycle r s.index
-        local w = wait_claim(Ptr(r.takers), null Task)
+        local w = wait_claim(Ptr r.takers, null Task)
         if w ~= null Op then
-            take(r, s.pool, SlotPtr(w.buf), w.task.id)
+            take(r, s.pool, SlotPtr w.buf, w.task.id)
             w.task.result = result w 0
             unlock(Ptr r.mu)
             wake w.task
@@ -215,12 +216,12 @@ return function(t)
                 if op.kind == 1 or op.kind == 2 then
                     local r = channel_at op.chan.idx
                     lock(Ptr r.mu)
-                    if op.kind == 1 then unlink(Ptr(r.recvq), op) else unlink(Ptr(r.sendq), op) end
+                    if op.kind == 1 then unlink(Ptr r.recvq, op) else unlink(Ptr r.sendq, op) end
                     unlock(Ptr r.mu)
                 elseif op.kind == 4 then
                     local r = pool_at op.chan.idx
                     lock(Ptr r.mu)
-                    unlink(Ptr(r.takers), op)
+                    unlink(Ptr r.takers, op)
                     unlock(Ptr r.mu)
                 else
                     timer_remove op
@@ -255,7 +256,7 @@ return function(t)
                 if done ~= 0 then return i end
             elseif op.kind == 4 then
                 local r = lock_pool op.chan.idx op.chan.gen
-                local got = take(r, op.chan.idx, SlotPtr(op.buf), task.id)
+                local got = take(r, op.chan.idx, SlotPtr op.buf, task.id)
                 unlock(Ptr r.mu)
                 if got then return i end
             elseif op.deadline <= time then return i end
@@ -278,13 +279,13 @@ return function(t)
                     local r = lock_pool op.chan.idx op.chan.gen
                     if r.free_head ~= U32 0xffffffff then
                         if not claim task then unlock(Ptr r.mu); return pending end
-                        take(r, op.chan.idx, SlotPtr(op.buf), task.id)
+                        take(r, op.chan.idx, SlotPtr op.buf, task.id)
                         unlock(Ptr r.mu)
                         withdraw task
                         task.result = i
                         return 0
                     end
-                    enqueue(Ptr(r.takers), op)
+                    enqueue(Ptr r.takers, op)
                     unlock(Ptr r.mu)
                 else
                     local r = lock_channel op.chan
@@ -296,9 +297,9 @@ return function(t)
                             i = i + 1
                             continue
                         end
-                        ready = r.count > 0 or has(Ptr(r.sendq), task)
+                        ready = r.count > 0 or has(Ptr r.sendq, task)
                     else
-                        ready = r.closed or r.count < r.cap or has(Ptr(r.recvq), task)
+                        ready = r.closed or r.count < r.cap or has(Ptr r.recvq, task)
                     end
                     if ready then
                         local w = null Task
@@ -314,9 +315,9 @@ return function(t)
                         return 0
                     end
                     if op.kind == 1 then
-                        enqueue(Ptr(r.recvq), op)
+                        enqueue(Ptr r.recvq, op)
                         nlinked = nlinked + 1
-                    else enqueue(Ptr(r.sendq), op) end
+                    else enqueue(Ptr r.sendq, op) end
                     unlock(Ptr r.mu)
                 end
                 i = i + 1
@@ -332,7 +333,8 @@ return function(t)
             end
         end
     end
-    local slc_first_of = do(task: Ptr Task, ops: Ptr Op, cases: Ptr Case, n: I32, has_default: Bool, site: CString): I32
+    local slc_first_of = do(task: Ptr Task,
+        ops: Ptr Op, cases: Ptr Case, n: I32, has_default: Bool, site: CString): I32
         local time = now()
         begin task ops n site
         local i = I32 0

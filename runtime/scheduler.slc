@@ -36,29 +36,31 @@ local Mutex = cstruct("pthread_mutex_t", "<pthread.h>", {})
 local Handle = cstruct("slc_chan", header, { { "idx", U32 }, { "gen", U32 } })
 local Scope, Op
 local Task = cstruct("slc_task", header, function(Self)
-    Scope = cstruct("slc_scope", header, function(ScopeSelf)
-        return { { "parent", Ptr ScopeSelf }, { "chans", Ptr U32 }, { "nchans", U64 },
-            { "pools", Ptr U32 }, { "npools", U64 }, { "live", I32 }, { "waiter", Ptr Self } }
+        Scope = cstruct("slc_scope", header, function(ScopeSelf)
+                return { { "parent", Ptr ScopeSelf }, { "chans", Ptr U32 }, { "nchans", U64 },
+                    { "pools", Ptr U32 },
+                    { "npools", U64 }, { "live", I32 }, { "waiter", Ptr Self } }
+            end)
+        Op = cstruct("slc_op", header, function(Operation)
+                return {
+                    { "deadline", U64 }, { "queued", I32 }, { "index", I32 }, { "kind", I32 },
+                    { "next", Ptr Operation }, { "prev", Ptr Operation }, { "task", Ptr Self },
+                    { "buf", Ptr U8 }, { "chan", Handle },
+                    { "fd", I32 }, { "len", U32 }, { "offset", I64 },
+                    { "value", Ptr I64 }, { "backend", Ptr U8 },
+                }
+            end)
+        return { { "next", Ptr Self }, { "claimed", I32 }, { "result", I32 }, { "id", U64 },
+            { "cur_scope", Ptr Scope },
+            { "scope", Ptr Scope }, { "ops", Ptr Op }, { "nops", I32 }, { "site", CString },
+            { "all_prev", Ptr Self }, { "all_next", Ptr Self }, { "run", I32 } }
     end)
-    Op = cstruct("slc_op", header, function(Operation)
-        return {
-            { "deadline", U64 }, { "queued", I32 }, { "index", I32 }, { "kind", I32 },
-            { "next", Ptr Operation }, { "prev", Ptr Operation }, { "task", Ptr Self },
-            { "buf", Ptr U8 }, { "chan", Handle },
-            { "fd", I32 }, { "len", U32 }, { "offset", I64 },
-            { "value", Ptr I64 }, { "backend", Ptr U8 },
-        }
-    end)
-    return { { "next", Ptr Self }, { "claimed", I32 }, { "result", I32 }, { "id", U64 },
-        { "cur_scope", Ptr Scope }, { "scope", Ptr Scope }, { "ops", Ptr Op }, { "nops", I32 }, { "site", CString },
-        { "all_prev", Ptr Self }, { "all_next", Ptr Self }, { "run", I32 } }
-end)
 local Queue = cstruct("slc_run_queue", header, {
-    { "head", Ptr Task }, { "tail", Ptr Task }, { "len", U64 },
-})
+        { "head", Ptr Task }, { "tail", Ptr Task }, { "len", U64 },
+    })
 local Heap = cstruct("slc_timer_heap", header, {
-    { "data", Ptr(Ptr Op) }, { "len", U64 }, { "cap", U64 },
-})
+        { "data", Ptr(Ptr Op) }, { "len", U64 }, { "cap", U64 },
+    })
 local resize = extern("realloc", { Ptr(Ptr Op), U64 }, Ptr(Ptr Op), { header = "<stdlib.h>" })
 local trap = extern("slc_trap", { CString }, Unit, { header = header })
 
@@ -109,7 +111,7 @@ end
 local next_task = do(q: Ptr Queue, state: Ptr U64, deterministic: Bool): Ptr Task
     if q.len == 0 then return null Task end
     local index = U64 0
-    if deterministic then index = random(state) % q.len end
+    if deterministic then index = random state % q.len end
     return pop q index
 end
 
@@ -170,7 +172,7 @@ end
 
 local remove = do(h: Ptr Heap, op: Ptr Op): Unit
     if op.queued == 0 then return end
-    local i = U64(op.queued) - 1
+    local i = U64 op.queued - 1
     op.queued = 0
     h.len = h.len - 1
     if i < h.len then
@@ -183,17 +185,17 @@ end
 -- Waiter queues and channel transfers. Claimed records are removed before
 -- publication; losing records are discarded, but this task's own cases stay.
 local Waiters = cstruct("struct queue", header, {
-    { "head", Ptr Op }, { "tail", Ptr Op },
-})
+        { "head", Ptr Op }, { "tail", Ptr Op },
+    })
 local Channel = cstruct("struct chan_rec", header, {
-    { "closed", Bool }, { "elem", U64 }, { "cap", U32 }, { "head", U32 }, { "count", U32 },
-    { "buf", Ptr U8 }, { "recvq", Waiters }, { "sendq", Waiters },
-    { "live", Bool }, { "gen", U32 }, { "next_free", U32 }, { "mu", Mutex },
-})
+        { "closed", Bool }, { "elem", U64 }, { "cap", U32 }, { "head", U32 }, { "count", U32 },
+        { "buf", Ptr U8 }, { "recvq", Waiters }, { "sendq", Waiters },
+        { "live", Bool }, { "gen", U32 }, { "next_free", U32 }, { "mu", Mutex },
+    })
 local copy = extern("memcpy", { Ptr U8, Ptr U8, U64 }, Ptr U8, { header = "<string.h>" })
 
 local claim = do(task: Ptr Task): Bool
-    return atomic_ptr(Ptr(task.claimed))[0]:cas(0, 1, "acq_rel")
+    return atomic_ptr(Ptr task.claimed)[0]:cas(0, 1, "acq_rel")
 end
 local enqueue = do(q: Ptr Waiters, op: Ptr Op): Unit
     op.next = null Op
@@ -232,7 +234,7 @@ local has_waiter = do(q: Ptr Waiters, self: Ptr Task): Bool
 end
 local ring_slot = do(r: Ptr Channel, k: U32): Ptr U8
     local index = (r.head + k) % r.cap
-    local offset = U64(index) * r.elem
+    local offset = U64 index * r.elem
     return Ptr r.buf[offset]
 end
 local done_result = do(op: Ptr Op, plain: I32): I32
@@ -245,7 +247,7 @@ local receive = do(r: Ptr Channel, out: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Ta
         copy(out, ring_slot(r, 0), r.elem)
         r.head = (r.head + 1) % r.cap
         r.count = r.count - 1
-        local sender = claim_waiter(Ptr(r.sendq), self)
+        local sender = claim_waiter(Ptr r.sendq, self)
         if sender ~= null Op then
             copy(ring_slot(r, r.count), sender.buf, r.elem)
             r.count = r.count + 1
@@ -254,7 +256,7 @@ local receive = do(r: Ptr Channel, out: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Ta
         end
         return 1
     end
-    local sender = claim_waiter(Ptr(r.sendq), self)
+    local sender = claim_waiter(Ptr r.sendq, self)
     if sender ~= null Op then
         copy(out, sender.buf, r.elem)
         sender.task.result = done_result sender 0
@@ -267,7 +269,7 @@ end
 -- The caller checks closed and unlocks before trapping, before entering here.
 local send = do(r: Ptr Channel, value: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Task)): I32
     wake[0] = null Task
-    local receiver = claim_waiter(Ptr(r.recvq), self)
+    local receiver = claim_waiter(Ptr r.recvq, self)
     if receiver ~= null Op then
         copy(receiver.buf, value, r.elem)
         receiver.task.result = done_result receiver 1
@@ -285,25 +287,26 @@ end
 -- Pool free-list policy and release publication. The pool lock remains held
 -- across recycle, waiter selection, handoff and completion result publication.
 local SlotMeta = cstruct("slc_slot_meta", header, {
-    { "owner", U64 }, { "gen", U32 }, { "next_free", U32 },
-})
+        { "owner", U64 }, { "gen", U32 }, { "next_free", U32 },
+    })
 local PoolMeta = cstruct("slc_pool_meta", header, {
-    { "gen", U32 }, { "slots", Ptr SlotMeta }, { "elem", U64 }, { "n", U32 }, { "data", Ptr U8 },
-})
+        { "gen", U32 },
+        { "slots", Ptr SlotMeta }, { "elem", U64 }, { "n", U32 }, { "data", Ptr U8 },
+    })
 local Pool = cstruct("struct pool_rec", header, {
-    { "m", Ptr PoolMeta }, { "free_head", U32 }, { "live", Bool }, { "scope", Ptr Scope },
-    { "cap_bytes", U64 }, { "cap_slots", U32 }, { "takers", Waiters }, { "next_free", U32 },
-    { "mu", Mutex },
-})
+        { "m", Ptr PoolMeta }, { "free_head", U32 }, { "live", Bool }, { "scope", Ptr Scope },
+        { "cap_bytes", U64 }, { "cap_slots", U32 }, { "takers", Waiters }, { "next_free", U32 },
+        { "mu", Mutex },
+    })
 local Slot = cstruct("slc_slot", header, {
-    { "pool", U32 }, { "pgen", U32 }, { "index", U32 }, { "gen", U32 },
-})
+        { "pool", U32 }, { "pgen", U32 }, { "index", U32 }, { "gen", U32 },
+    })
 local take = do(r: Ptr Pool, pool: U32, out: Ptr Slot, owner: U64): Bool
     local i = r.free_head
     if i == U32 0xffffffff then return false end
     local slot = Ptr r.m.slots[i]
     r.free_head = slot.next_free
-    atomic_ptr(Ptr(slot.owner))[0]:store(owner, "release")
+    atomic_ptr(Ptr slot.owner)[0]:store(owner, "release")
     out.pool = pool
     out.pgen = r.m.gen
     out.index = i
@@ -314,14 +317,15 @@ local recycle = do(r: Ptr Pool, index: U32): Unit
     local slot = Ptr r.m.slots[index]
     local generation = slot.gen + 1
     if generation == 0 then generation = 1 end
-    atomic_ptr(Ptr(slot.gen))[0]:store(generation, "release")
-    atomic_ptr(Ptr(slot.owner))[0]:store(0, "release")
+    atomic_ptr(Ptr slot.gen)[0]:store(generation, "release")
+    atomic_ptr(Ptr slot.owner)[0]:store(0, "release")
     slot.next_free = r.free_head
     r.free_head = index
 end
 
 local bookkeeping = require "runtime.bookkeeping"
-bookkeeping { Task = Task, Op = Op, Heap = Heap, claim = claim, remove = remove, result = done_result }
+bookkeeping { Task = Task,
+    Op = Op, Heap = Heap, claim = claim, remove = remove, result = done_result }
 
 local lifecycle = require "runtime.lifecycle"
 local lifetime = lifecycle { Scope = Scope, Task = Task, Op = Op, Channel = Channel, Pool = Pool,
@@ -340,7 +344,7 @@ local io = io_policy { Op = Op, Task = Task, claim = claim }
 local posix_policy = require "runtime.posix"
 local posix = posix_policy { Op = Op, complete = io.complete }
 
-local backend = os.getenv('SLC_IO') or 'poll'
+local backend = os.getenv 'SLC_IO' or 'poll'
 local backend_policy = require('runtime.' .. backend)
 backend_policy { Op = Op, Mutex = Mutex, posix = posix, complete = io.complete }
 

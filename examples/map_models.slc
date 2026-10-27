@@ -11,7 +11,7 @@ function model(T, string_keys)
     return do(rounds: U32, width: U32, limit: U32): Bool
         local m = T {}
         local expected = Values {}
-        local bytes = Buffer(string.rep("x", 96))
+        local bytes = Buffer string.rep("x", 96)
         bytes.len = width
         local random = U32 12345
         local count = U32 0
@@ -49,28 +49,28 @@ function model(T, string_keys)
             end
         end
         if string_keys then
-            local used = extent (Ref m)
+            local used = extent(Ref m)
             if used > 32768 then return false end
         end
         return true
     end
 end
 local map_model = model(Map(U32, U32), false)
-local strmap_model = model(StrMap(U32), true)
+local strmap_model = model(StrMap U32, true)
 export map_model
 export strmap_model
 
-local Texts = StrMap(Buffer)
+local Texts = StrMap Buffer
 local map_table_alias = do(count: U32): U32
     local m = Texts {}
     m:put("source", Buffer "new-key")
-    local key = Chars(8)("k0")
+    local key = Chars 8 "k0"
     for i: U32 = 1, count do
         key.bytes[1] = U8 i
         m:put(key:str(), Buffer "v")
     end
     local source = m["source"]:str()
-    m:put(source, Buffer "ok") -- eighth entry grows the table after copying source
+    m:put(source, Buffer "ok")  -- eighth entry grows the table after copying source
     return m.length + m["new-key"].len
 end
 export map_table_alias
@@ -88,7 +88,7 @@ local Counts = StrMap U32
 local arena_alias = extern("map_model_arena_alias", { Ref Counts }, Str)
 local map_arena_alias = do(count: U32, width: U32): U32
     local m = Counts {}
-    local key = Buffer(string.rep("x", 96))
+    local key = Buffer string.rep("x", 96)
     key.len = width
     for i: U32 = 0, count - 1 do
         key.bytes[0] = U8 i
@@ -96,11 +96,11 @@ local map_arena_alias = do(count: U32, width: U32): U32
     end
     for i: U32 = 0, count / 2 - 1 do
         key.bytes[0] = U8(i * 2)
-        m:remove(key:str())
+        m:remove key:str()
     end
-    local source = arena_alias (Ref m)
-    m:put(source, 999) -- compact while the pending key aliases the old arena
-    local copied = Buffer(string.rep("x", 96))
+    local source = arena_alias(Ref m)
+    m:put(source, 999)  -- compact while the pending key aliases the old arena
+    local copied = Buffer string.rep("x", 96)
     copied.len = width - 1
     return m[copied:str()] + m.length
 end

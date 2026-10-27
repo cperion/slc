@@ -33,7 +33,7 @@ str.equals_known = do(a: Str, b): Bool
     end
     local same: Bool = true
     for k = 1, #b do
-        same = same and a[k - 1] == b:byte(k)
+        same = same and a[k - 1] == b:byte k
     end
     return same
 end
@@ -44,7 +44,7 @@ str.starts_with_known = do(s: Str, prefix): Bool
     end
     local same: Bool = true
     for k = 1, #prefix do
-        same = same and s[k - 1] == prefix:byte(k)
+        same = same and s[k - 1] == prefix:byte k
     end
     return same
 end
@@ -55,7 +55,7 @@ str.ends_with_known = do(s: Str, suffix): Bool
     end
     local same: Bool = true
     for k = 1, #suffix do
-        same = same and s[s.length - (#suffix - k + 1)] == suffix:byte(k)
+        same = same and s[s.length - (#suffix - k + 1)] == suffix:byte k
     end
     return same
 end
@@ -71,10 +71,10 @@ str.find_known = do(s: Str, t): str.Found
     while i <= last do
         local hit: Bool = true
         for k = 1, #t do
-            hit = hit and s[i + (k - 1)] == t:byte(k)
+            hit = hit and s[i + (k - 1)] == t:byte k
         end
         if hit then
-            return str.Found.at(i)
+            return str.Found.at i
         end
         i = i + 1
     end
@@ -123,7 +123,7 @@ str.find = do(s: Str, t: Str): str.Found
             j = j + 1
         end
         if j == t.length then
-            return str.Found.at(i)
+            return str.Found.at i
         end
         i = i + 1
     end
@@ -156,10 +156,10 @@ local space = do(c: U8): Bool = c == 32 or c == 9 or c == 10 or c == 13
 str.trim = do(s: Str): Str
     local a: U32 = 0
     local b: U32 = s.length
-    while a < b and space(s[a]) do
+    while a < b and space s[a] do
         a = a + 1
     end
-    while b > a and space(s[b - 1]) do
+    while b > a and space s[b - 1] do
         b = b - 1
     end
     return s:sub(a, b)
@@ -171,12 +171,12 @@ str.split = do(s: Str, sep: U8, body): Unit
     local i: U32 = 0
     while i < s.length do
         if s[i] == sep then
-            body(s:sub(start, i))
+            body s:sub(start, i)
             start = i + 1
         end
         i = i + 1
     end
-    body(s:sub(start, s.length))
+    body s:sub(start, s.length)
 end
 
 -- the lines: the parts between newlines, without a last empty one
@@ -185,13 +185,13 @@ str.lines = do(s: Str, body): Unit
     local i: U32 = 0
     while i < s.length do
         if s[i] == 10 then
-            body(s:sub(start, i))
+            body s:sub(start, i)
             start = i + 1
         end
         i = i + 1
     end
     if start < s.length then
-        body(s:sub(start, s.length))
+        body s:sub(start, s.length)
     end
 end
 
@@ -211,12 +211,12 @@ function str.parsed(t)
 end
 
 for _, T in ipairs { U8, U16, U32, U64 } do
-    local P = str.parsed(T)
+    local P = str.parsed T
     str['parse_' .. T.name] = do(s: Str): P
         if s.length == 0 then
             return P.bad()
         end
-        local max: T = bnot(T(0))
+        local max: T = bnot(T 0)
         local v: T = 0
         local i: U32 = 0
         while i < s.length do
@@ -224,20 +224,20 @@ for _, T in ipairs { U8, U16, U32, U64 } do
             if c < 48 or c > 57 then
                 return P.bad()
             end
-            local d: T = T(c - 48)
+            local d = T(c - 48)
             if v > (max - d) / 10 then
                 return P.bad()
             end
             v = v * 10 + d
             i = i + 1
         end
-        return P.value(v)
+        return P.value v
     end
 end
 
 for _, pair in ipairs { { I8, U8 }, { I16, U16 }, { I32, U32 }, { I64, U64 } } do
     local T, U = pair[1], pair[2]
-    local P = str.parsed(T)
+    local P = str.parsed T
     str['parse_' .. T.name] = do(s: Str): P
         local i: U32 = 0
         local negative: Bool = false
@@ -249,7 +249,7 @@ for _, pair in ipairs { { I8, U8 }, { I16, U16 }, { I32, U32 }, { I64, U64 } } d
             return P.bad()
         end
         -- the magnitude, up to 2^(bits-1) - 1, or 2^(bits-1) when negative
-        local limit: U = shr(bnot(U(0)), 1)
+        local limit: U = shr(bnot(U 0), 1)
         if negative then
             limit = limit + 1
         end
@@ -259,7 +259,7 @@ for _, pair in ipairs { { I8, U8 }, { I16, U16 }, { I32, U32 }, { I64, U64 } } d
             if c < 48 or c > 57 then
                 return P.bad()
             end
-            local d: U = U(c - 48)
+            local d = U(c - 48)
             if m > (limit - d) / 10 then
                 return P.bad()
             end
@@ -267,9 +267,9 @@ for _, pair in ipairs { { I8, U8 }, { I16, U16 }, { I32, U32 }, { I64, U64 } } d
             i = i + 1
         end
         if negative then
-            return P.value(T(U(0) - m))
+            return P.value T(U 0 - m)
         end
-        return P.value(T(m))
+        return P.value(T m)
     end
 end
 
@@ -287,13 +287,13 @@ local function float_syntax(s: Str): Bool
     local i: U32 = 0
     if i < n and (s[i] == 43 or s[i] == 45) then i = i + 1 end
     local count: U32 = 0
-    while i < n and is_digit(s[i]) do
+    while i < n and is_digit s[i] do
         count = count + 1
         i = i + 1
     end
     if i < n and s[i] == 46 then
         i = i + 1
-        while i < n and is_digit(s[i]) do
+        while i < n and is_digit s[i] do
             count = count + 1
             i = i + 1
         end
@@ -303,7 +303,7 @@ local function float_syntax(s: Str): Bool
         i = i + 1
         if i < n and (s[i] == 43 or s[i] == 45) then i = i + 1 end
         local exponent: U32 = 0
-        while i < n and is_digit(s[i]) do
+        while i < n and is_digit s[i] do
             exponent = exponent + 1
             i = i + 1
         end
@@ -312,12 +312,12 @@ local function float_syntax(s: Str): Bool
     return i == n
 end
 
-str.parse_F64 = do(s: Str): str.parsed(F64)
-    local P = str.parsed(F64)
+str.parse_F64 = do(s: Str): str.parsed F64
+    local P = str.parsed F64
     if parse_known_p s then return parse_known s end
     if not float_syntax s then return P.bad() end
     return s:cstring() do(c)
-        return P.value(strtod(c, null CString))
+        return P.value strtod(c, null CString)
     end
 end
 str.c_length = do(bytes: Ptr U8): U32

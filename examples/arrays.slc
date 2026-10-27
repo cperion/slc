@@ -6,26 +6,26 @@ local checksum = do(xs: Slice U8): U32
     local s: U32 = 0
     local i: U32 = 0
     while i < xs.length do
-        s = s + U32(xs[i])
+        s = s + U32 xs[i]
         i = i + 1
     end
     return s
 end
 
 local fill = do(n: U32): U32
-    local p: Packet = Packet { len = 0, data = Array(U8, 8)() }
+    local p = Packet { len = 0, data = Array(U8, 8)() }
     local i: U32 = 0
     while i < n do
         p.data[i] = U8(i * 3)
         i = i + 1
     end
     p.len = n
-    return checksum(p.data:slice():sub(0, p.len))
+    return checksum p.data:slice():sub(0, p.len)
 end
 export fill
 
 local fixed = do(): U32
-    local a: Array(U32, 4) = Array(U32, 4) { 10, 20, 30, 40 }
+    local a = Array(U32, 4) { 10, 20, 30, 40 }
     local b: Array(U32, 4)
     b[0] = a[3]
     b[1] = a[0] + a[1]

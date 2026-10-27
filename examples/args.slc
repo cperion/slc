@@ -10,6 +10,6 @@ local main = do(args: Args): I32
         i = i + 1
     end
     libc.say("args = ", args.length, ", bytes = ", bytes, "\n")
-    return I32(args.length)
+    return I32 args.length
 end
 export main

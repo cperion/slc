@@ -5,16 +5,19 @@ local h = '"slc_rt.h"'
 local layout = {}
 local slice_parts, make_slice = __S.slice_parts, __S.make_slice
 layout.Store = cstruct("slc_store", h, {
-    { "stack", U64 }, { "base", U64 }, { "len", U32 }, { "live", U32 }, { "free_head", U32 }, { "token", U64 },
-})
+        { "stack", U64 },
+        { "base", U64 }, { "len", U32 }, { "live", U32 }, { "free_head", U32 }, { "token", U64 },
+    })
 layout.Grow = cstruct("slc_grow", h, { { "stack", U64 }, { "base", U64 }, { "len", U32 } })
 layout.Id = cstruct("slc_id", h, { { "token", U64 }, { "slot", U32 }, { "gen", U32 } })
 layout.Map = cstruct("slc_map", h, {
-    { "stack", U64 }, { "base", U64 }, { "width", U64 }, { "len", U32 }, { "cap", U32 }, { "iterating", U32 },
-})
+        { "stack", U64 },
+        { "base", U64 }, { "width", U64 }, { "len", U32 }, { "cap", U32 }, { "iterating", U32 },
+    })
 layout.StrMap = cstruct("slc_strmap", h, {
-    { "entries", layout.Map }, { "arena_stack", U64 }, { "arena_base", U64 }, { "arena_len", U64 }, { "dead", U64 },
-})
+        { "entries", layout.Map },
+        { "arena_stack", U64 }, { "arena_base", U64 }, { "arena_len", U64 }, { "dead", U64 },
+    })
 local token = extern("slc_next_token", {}, U64, { header = h })
 local pin = extern("slc_gs_pin", { U64, Ptr U8, U64 }, U64, { header = h })
 local trap = extern("slc_trap", { CString }, Unit, { header = h })
@@ -22,25 +25,27 @@ local maximum = U64 0xffffffffffffffffULL
 local Void = opaque "void"
 local VP = Ptr Void
 local ReadMap = cstruct("const slc_map", h, {
-    { "stack", U64 }, { "base", U64 }, { "width", U64 }, { "cap", U32 },
-})
+        { "stack", U64 }, { "base", U64 }, { "width", U64 }, { "cap", U32 },
+    })
 local ReadMapPtr = Ptr ReadMap
 layout.map_address = do(map: ReadMapPtr, slot: U32): VP
     if slot >= map.cap then trap "Map: invalid bucket" end
     local s = stacks.get map.stack
-    return VP(Ptr s.data[map.base + U64(slot) * map.width])
+    return VP(Ptr s.data[map.base + U64 slot * map.width])
 end
 layout.store_new = do(stack: U64): layout.Store
     local base = stacks.begin stack
     local id = token()
-    return layout.Store { stack = stack, base = base, len = 0, live = 0, free_head = 0xffffffff, token = id }
+    return layout.Store { stack = stack,
+        base = base, len = 0, live = 0, free_head = 0xffffffff, token = id }
 end
 layout.grow_new = do(stack: U64): layout.Grow
-    return layout.Grow { stack = stack, base = stacks.begin(stack), len = 0 }
+    return layout.Grow { stack = stack, base = stacks.begin stack, len = 0 }
 end
 layout.map_new = do(stack: U64, width: U64): layout.Map
     if width < 8 or width % 8 ~= 0 then trap "Map: invalid entry layout" end
-    return layout.Map { stack = stack, base = stacks.begin(stack), width = width, len = 0, cap = 0, iterating = 0 }
+    return layout.Map { stack = stack,
+        base = stacks.begin stack, width = width, len = 0, cap = 0, iterating = 0 }
 end
 layout.strmap_new = do(table_stack: U64, arena_stack: U64, width: U64): layout.StrMap
     -- slc_strkey is the full fixed prefix, including native trailing padding.
@@ -48,7 +53,8 @@ layout.strmap_new = do(table_stack: U64, arena_stack: U64, width: U64): layout.S
     if table_stack == arena_stack or width < size_of Key then trap "StrMap: invalid storage layout" end
     local entries = layout.map_new table_stack width
     local base = stacks.begin arena_stack
-    return layout.StrMap { entries = entries, arena_stack = arena_stack, arena_base = base, arena_len = 0, dead = 0 }
+    return layout.StrMap { entries = entries,
+        arena_stack = arena_stack, arena_base = base, arena_len = 0, dead = 0 }
 end
 layout.iter_new = do(stack: U64, map: Ptr layout.Map): layout.Grow
     local s = stacks.get stack
@@ -93,7 +99,7 @@ function layout.storage(T, R, Elem, Slot, view, make_id, components)
         return set(self, value)
     end
     p.width = do(): U64 = size_of Storage
-    p.top = do(self: Ref T): U64 = stacks.top(view(self).stack)
+    p.top = do(self: Ref T): U64 = stacks.top view(self).stack
     p.push = do(self: Ref T, n: U64): U64 = stacks.push(view(self).stack, n)
     p.reset = do(self: Ref T, n: U64): Unit = stacks.reset(view(self).stack, n)
     p.maximum = do(): U64 = maximum
@@ -111,20 +117,20 @@ function layout.storage(T, R, Elem, Slot, view, make_id, components)
     p.slot_set = do(self: Ref T, index: U32, field, value: U32): Unit
         at(self, index)[field] = value
     end
-    local IdType = is_store and Id(Elem) or U32
+    local IdType = is_store and Id Elem or U32
     p.id = do(self: Ref T, index: U32, gen: U32): IdType
         return make_id { token = view(self).token, slot = index, gen = gen }
     end
     p.components = components
     p.pin = do(self: Ref T, text: Str): U64
-        local ptr, len = slice_parts(text)
+        local ptr, len = slice_parts text
         return pin(view(self).stack, ptr, U64 len)
     end
     p.bytes = do(self: Ref T, at: U64, len: U32): Str
         return make_slice(Str, stacks.bytes(view(self).stack, at, U64 len), len)
     end
     p.write_bytes = do(self: Ref T, at: U64, text: Str): Unit
-        local ptr, len = slice_parts(text)
+        local ptr, len = slice_parts text
         stacks.write(view(self).stack, at, ptr, U64 len)
     end
     return p
@@ -144,7 +150,7 @@ function layout.maps(T, Entry, view)
         else h[0] = layout.map_new(stack, size_of Entry) end
     end
     p.iter = do(self: Ref T, guard: Ptr layout.Grow, stack: U64): Unit
-        guard[0] = layout.iter_new(stack, table_of(self))
+        guard[0] = layout.iter_new(stack, table_of self)
     end
     p.get = function(self, field)
         local arena = field == "dead" or field:sub(1, 6) == "arena_"
@@ -164,14 +170,15 @@ function layout.maps(T, Entry, view)
         return set(self, value)
     end
     local at = do(self: Ref T, base: U64, slot: U32): EP
-        return EP(stacks.bytes(table_of(self).stack, base + U64(slot) * size_of Entry, size_of Entry))
+        return EP stacks.bytes(table_of(self).stack,
+            base + U64 slot * size_of Entry, size_of Entry)
     end
     p.read = do(self: Ref T, base: U64, slot: U32): Entry = at(self, base, slot)[0]
     p.write = do(self: Ref T, base: U64, slot: U32, entry: Entry): Unit
         at(self, base, slot)[0] = entry
     end
-    p.address = do(self: Ref T, slot: U32): Ptr(T.elem)
-        local entry = EP(layout.map_address(ReadMapPtr(table_of(self)), slot))
+    p.address = do(self: Ref T, slot: U32): Ptr T.elem
+        local entry = EP layout.map_address(ReadMapPtr(table_of self), slot)
         return Ptr entry.value
     end
     p.replace = do(self: Ref T, slot: U32, value: T.elem): Unit
@@ -183,25 +190,27 @@ function layout.maps(T, Entry, view)
             if area == "" then return table_of(self).stack end
             return view(self).arena_stack
         end
-        p[area .. "top"] = do(self: Ref T): U64 = stacks.top(stack(self))
-        p[area .. "push"] = do(self: Ref T, n: U64): U64 = stacks.push(stack(self), n)
-        p[area .. "reset"] = do(self: Ref T, at: U64): Unit = stacks.reset(stack(self), at)
-        p[area .. "copy"] = do(self: Ref T, dst: U64, src: U64, n: U64): Unit = stacks.copy(stack(self), dst, src, n)
+        p[area .. "top"] = do(self: Ref T): U64 = stacks.top(stack self)
+        p[area .. "push"] = do(self: Ref T, n: U64): U64 = stacks.push(stack self, n)
+        p[area .. "reset"] = do(self: Ref T, at: U64): Unit = stacks.reset(stack self, at)
+        p[area .. "copy"] = do(self: Ref T, dst: U64, src: U64, n: U64): Unit = stacks.copy(stack self,
+            dst, src, n)
     end
     p.zero = do(self: Ref T, at: U64, n: U64): Unit = stacks.zero(table_of(self).stack, at, n)
     p.arena_view = do(self: Ref T, at: U64, len: U32): Str
         return make_slice(Str, stacks.bytes(view(self).arena_stack, at, U64 len), len)
     end
     p.pin = do(self: Ref T, text: Str): U64
-        local ptr, len = slice_parts(text)
+        local ptr, len = slice_parts text
         return pin(view(self).arena_stack, ptr, U64 len)
     end
     p.arena_write = do(self: Ref T, at: U64, text: Str): Unit
-        local ptr, len = slice_parts(text)
+        local ptr, len = slice_parts text
         stacks.write(view(self).arena_stack, at, ptr, U64 len)
     end
     p.key = do(self: Ref T, entry: Entry): T.key
-        if str then return p.arena_view(self, view(self).arena_base + entry.key.offset, entry.key.len) end
+        if str then return p.arena_view(self,
+                view(self).arena_base + entry.key.offset, entry.key.len) end
         return entry.key
     end
     p.capacity = do(self: Ref T): U32 = table_of(self).cap
@@ -209,7 +218,7 @@ function layout.maps(T, Entry, view)
     return p
 end
 local function project(value, path)
-    for field in path:gmatch("[^.]+") do value = value[field] end
+    for field in path:gmatch "[^.]+" do value = value[field] end
     return value
 end
 function layout.releaser(Meta, stack, base)

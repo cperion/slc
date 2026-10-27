@@ -9,9 +9,9 @@ local report = do(path: CString, n: U32, ratio: F64): Bool
         write "report\n"
         say("n = ", n, ", ratio = ", ratio, "\n")
         if n > 10 then
-            return                -- leaves the body only: the file is still closed
+            return  -- leaves the body only: the file is still closed
         end
-        say("small\n")
+        say "small\n"
     end
 end
 export report
@@ -20,8 +20,8 @@ export report
 local checksum = do(path: CString): U32
     local c...
     local total: U32 = 0
-    local ok = each_byte(path) do(b)
-        total = total + U32(b)
+    local ok = each_byte path do(b)
+        total = total + U32 b
     end
     if not ok then
         return 0
@@ -34,13 +34,13 @@ export checksum
 local sum_filled = do(n: U32, byte: U8): U32
     local c...
     local total: U32 = 0
-    with_buffer(n) do(buffer...)
-        fill(byte)
+    with_buffer n do(buffer...)
+        fill byte
         data[0] = 1
         local bytes = Slice(data, size)
         local i: U32 = 0
         while i < bytes.length do
-            total = total + U32(bytes[i])
+            total = total + U32 bytes[i]
             i = i + 1
         end
     end

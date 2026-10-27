@@ -78,7 +78,7 @@ function storage.grow(T, p)
             local length = p.get(g, "len")
             local base = p.get(g, "base")
             local top = p.top g
-            if top - base ~= U64(length) then trap "Text grew while it was not at the top of its data stack" end
+            if top - base ~= U64 length then trap "Text grew while it was not at the top of its data stack" end
             if n > none - length then trap "Text is full" end
             local pinned = p.pin g text
             local bytes = U64 n

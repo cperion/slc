@@ -32,14 +32,14 @@ end
 
 local main = do(args: Args): I32
     if args.length < 2 then
-        libc.say("usage: count_lines FILE\n")
+        libc.say "usage: count_lines FILE\n"
         return 2
     end
     local n: U32 = 0
     args[1]:cstring() do(c)
-        n = count_file(c)
+        n = count_file c
     end
     libc.say("lines = ", n, "\n")
-    return I32(n)
+    return I32 n
 end
 export main

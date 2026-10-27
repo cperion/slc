@@ -5,9 +5,9 @@
 -- a pipeline: produce -> square -> sum --------------------------------------------------------
 
 local square = do(inp: Chan U32, out: Chan U64): Unit
-    inp:each(do(v)
-        out:send(U64(v) * U64(v))
-    end)
+    inp:each do(v)
+        out:send(U64 v * U64 v)
+    end
     out:close()
 end
 
@@ -19,16 +19,15 @@ local sum_squares = do(n: U32): U64
         spawn do
             local i: U32 = 0
             while i < n do
-                nums:send(i)
+                nums:send i
                 i = i + 1
             end
             nums:close()
         end
         spawn(square, nums, squares)
-        squares:each(do(v)
+        squares:each do(v)
             total = total + v
-        end)
-    end
+        endall
     return total
 end
 export sum_squares
@@ -40,7 +39,7 @@ local Done = struct { id: U32, steps: U32 }
 
 local collatz = do(n: U32): U32
     local steps: U32 = 0
-    local x: U64 = U64(n)
+    local x = U64 n
     while x ~= 1 do
         if band(x, 1) == 0 then
             x = shr(x, 1)
@@ -53,9 +52,9 @@ local collatz = do(n: U32): U32
 end
 
 local worker = do(jobs: Chan Job, results: Chan Done): Unit
-    jobs:each(do(j)
-        results:send(Done { id = j.id, steps = collatz(j.n) })
-    end)
+    jobs:each do(j)
+        results:send Done { id = j.id, steps = collatz j.n }
+    end
 end
 
 -- `workers` is known while specializing: the spawns unroll, and the four
@@ -67,7 +66,7 @@ local total_steps = do(workers, n: U32): U64
         local results = channel(Done, 16)
         spawn do
             for i: U32 = 1, n do
-                jobs:send(Job { id = i, n = i })
+                jobs:send Job { id = i, n = i }
             end
             jobs:close()
         end
@@ -76,14 +75,14 @@ local total_steps = do(workers, n: U32): U64
         end
         for _: U32 = 1, n do
             results:recv() {
-                value = do(d) total = total + U64(d.steps) end,
+                value = do(d) total = total + U64 d.steps end,
                 closed = do end,
             }
         end
     end
     return total
 end
-local total_steps4 = total_steps(4)
+local total_steps4 = total_steps 4
 export total_steps4
 
 -- first_of: whichever completes first; `closed` once every channel is closed ------------------------
@@ -101,14 +100,14 @@ local merged = do(n: U32): U64
     local sum: U64 = 0
     local done: Bool = false
     tasks do(scope...)
-        local a = channel(U32, 0)              -- unbuffered: a rendezvous
+        local a = channel(U32, 0)  -- unbuffered: a rendezvous
         local b = channel(U32, 4)
         spawn(count_from, a, 0, n)
         spawn(count_from, b, 1000000, n)
         while not done do
             first_of {
-                recv(a) do(v) sum = sum + U64(v) end,
-                recv(b) do(v) sum = sum + U64(v) end,
+                recv a do(v) sum = sum + U64 v end,
+                recv b do(v) sum = sum + U64 v end,
                 closed = do done = true end,
             }
         end
@@ -123,7 +122,7 @@ local poll_empty = do(): Bool
     tasks do(scope...)
         local c = channel(U32, 1)
         first_of {
-            recv(c) do(v) waited = false end,
+            recv c do(v) waited = false end,
             default = do waited = true end,
         }
     end
@@ -138,8 +137,8 @@ local gives_up = do(): Bool
     tasks do(scope...)
         local never = channel(U32, 0)
         first_of {
-            recv(never) do(v) timed_out = false end,
-            after(ms(20)) do timed_out = true end,
+            recv never do(v) timed_out = false end,
+            after(ms 20) do timed_out = true end,
             closed = do end,
         }
         never:close()
@@ -153,8 +152,8 @@ local late_reply = do(): U32
     tasks do(scope...)
         local c = channel(U32, 0)
         spawn do
-            sleep(ms(10))
-            c:send(42)
+            sleep(ms 10)
+            c:send 42
         end
         c:recv() { value = do(v) got = v end, closed = do end }
     end
@@ -167,9 +166,9 @@ export late_reply
 local Request = struct { x: U32, reply: Chan U64 }
 
 local server = do(requests: Chan Request): Unit
-    requests:each(do(r)
-        r.reply:send(U64(r.x) * 10)
-    end)
+    requests:each do(r)
+        r.reply:send(U64 r.x * 10)
+    end
 end
 
 local ask = do(n: U32): U64
@@ -179,7 +178,7 @@ local ask = do(n: U32): U64
         local replies = channel(U64, 1)
         spawn(server, requests)
         for i: U32 = 1, n do
-            requests:send(Request { x = i, reply = replies })
+            requests:send Request { x = i, reply = replies }
             replies:recv() {
                 value = do(v) total = total + v end,
                 closed = do end,
@@ -202,15 +201,15 @@ local accumulator = do(inbox: Chan Msg, out: Chan I64): Unit
         inbox:recv() {
             value = do(m)
                 m {
-                    add = do(x) acc = acc + I64(x) end,
-                    sub = do(x) acc = acc - I64(x) end,
+                    add = do(x) acc = acc + I64 x end,
+                    sub = do(x) acc = acc - I64 x end,
                     stop = do running = false end,
                 }
             end,
             closed = do running = false end,
         }
     end
-    out:send(acc)
+    out:send acc
 end
 
 local tally = do(adds: U32, subs: U32): I64
@@ -220,12 +219,12 @@ local tally = do(adds: U32, subs: U32): I64
         local out = channel(I64, 1)
         spawn(accumulator, inbox, out)
         for i: U32 = 1, adds do
-            inbox:send(Msg.add(i))
+            inbox:send(Msg.add i)
         end
         for i: U32 = 1, subs do
-            inbox:send(Msg.sub(i))
+            inbox:send(Msg.sub i)
         end
-        inbox:send(Msg.stop())
+        inbox:send Msg.stop()
         out:recv() {
             value = do(v) result = v end,
             closed = do end,
@@ -252,7 +251,7 @@ local nested = do(groups: U32, per: U32): U64
                     local k: U32 = 0
                     while k < per do
                         inner.spawn do
-                            parts:send(U64(g) * 1000 + U64(k))
+                            parts:send(U64 g * 1000 + U64 k)
                         end
                         k = k + 1
                     end
@@ -262,7 +261,7 @@ local nested = do(groups: U32, per: U32): U64
                         got = got + 1
                     end
                 end
-                sums:send(part)
+                sums:send part
             end
             g = g + 1
         end
@@ -282,10 +281,10 @@ local grow_in_task = do(n: U32): U32
     tasks do(scope...)
         local out = channel(U32, 1)
         spawn do
-            local g: Grow U32 = (Grow U32) {}
+            local g = (Grow U32) {}
             local i: U32 = 1
             while i <= n do
-                g:push(i)
+                g:push i
                 i = i + 1
             end
             local s: U32 = g:view() do(xs)
@@ -297,7 +296,7 @@ local grow_in_task = do(n: U32): U32
                 end
                 return t
             end
-            out:send(s)
+            out:send s
         end
         out:recv() { value = do(v) result = v end, closed = do end }
     end
@@ -313,7 +312,7 @@ local fill = do(b: Ref Block, k: U32): Unit
     b.n = k % 64
     local i: U32 = 0
     while i < b.n do
-        b.data[i] = U8(band(k + i, 255))
+        b.data[i] = U8 band(k + i, 255)
         i = i + 1
     end
 end
@@ -322,7 +321,7 @@ local checksum = do(b: Ref Block): U32
     local s: U32 = 0
     local i: U32 = 0
     while i < b.n do
-        s = s + U32(b.data[i])
+        s = s + U32 b.data[i]
         i = i + 1
     end
     return s
@@ -336,18 +335,17 @@ local pooled = do(count: U32): U64
         spawn do
             local k: U32 = 0
             while k < count do
-                local s = buffers:take()             -- waits while all four are out
-                fill(buffers[s], k)                  -- buffers[s]: checked at every use
-                full:send(s)                         -- s now belongs to the receiver
+                local s = buffers:take()  -- waits while all four are out
+                fill(buffers[s], k)  -- buffers[s]: checked at every use
+                full:send s  -- s now belongs to the receiver
                 k = k + 1
             end
             full:close()
         end
-        full:each(do(s)
-            total = total + U64(checksum(buffers[s]))
-            buffers:release(s)
-        end)
-    end
+        full:each do(s)
+            total = total + U64(checksum buffers[s])
+            buffers:release s
+        endall
     return total
 end
 export pooled
@@ -360,20 +358,20 @@ local take_or_time = do(): U32
         local nobody = channel(Slot Block, 0)
         local s = one:take()
         first_of {
-            take(one) do(t) outcome = 99 end,        -- the only slot is out: cannot fire
-            after(ms(5)) do outcome = 1 end,
+            take one do(t) outcome = 99 end,  -- the only slot is out: cannot fire
+            after(ms 5) do outcome = 1 end,
         }
         first_of {
-            send(nobody, s) do outcome = 98 end,     -- nobody receives: loses to the timer
-            after(ms(5)) do outcome = outcome + 10 end,
+            send(nobody, s) do outcome = 98 end,  -- nobody receives: loses to the timer
+            after(ms 5) do outcome = outcome + 10 end,
         }
-        one:release(s)                               -- still ours
+        one:release s  -- still ours
         first_of {
-            take(one) do(t)
+            take one do(t)
                 outcome = outcome + 100
-                one:release(t)
+                one:release t
             end,
-            after(ms(500)) do outcome = 0 end,
+            after(ms 500) do outcome = 0 end,
         }
         nobody:close()
     end
@@ -383,7 +381,7 @@ export take_or_time
 
 -- blocking: a call into C that blocks runs on a blocking thread while its task
 -- waits; the block reads and writes the task's own locals
-local c_poll = extern("poll", { Ptr U8, U64, I32 }, I32, { header = "<poll.h>" })     -- poll(NULL, 0, ms): a sleep
+local c_poll = extern("poll", { Ptr U8, U64, I32 }, I32, { header = "<poll.h>" })  -- poll(NULL, 0, ms): a sleep
 
 local parallel_sleeps = do(n: U32): U32
     local total: U32 = 0
@@ -395,10 +393,10 @@ local parallel_sleeps = do(n: U32): U32
                 local slept: U32 = 0
                 local asked: I32 = 50
                 blocking do
-                    c_poll(null(U8), 0, asked)
-                    slept = U32(asked)
+                    c_poll(null U8, 0, asked)
+                    slept = U32 asked
                 end
-                done:send(slept)
+                done:send slept
             end
             k = k + 1
         end
@@ -421,7 +419,7 @@ local use_after_scope = do(h: Ref Holder): Unit
     tasks do(scope...)
         h.ch = channel(U32, 1)
     end
-    h.ch:send(1)
+    h.ch:send 1
 end
 export use_after_scope
 
@@ -432,7 +430,6 @@ local forgotten = do(): Unit
         local c = channel(U32, 0)
         spawn do
             c:recv() { value = do(v) end, closed = do end }
-        end
-    end
+        endall
 end
 export forgotten

@@ -3,7 +3,7 @@ local numbers = Map.known(U32, U32, source)
 source[1][2] = 999
 source[2][1] = 9
 assert(host(numbers[U32 1]) == 10)
-assert(host(numbers.length) == 2)
+assert(host numbers.length == 2)
 local words = StrMap.known(U32, { { "if", 1 }, { "a\0b", 2 }, { "length", 3 }, { "", 4 } })
 local empty = StrMap.known(U32, {})
 assert(not host(empty:has "anything"))

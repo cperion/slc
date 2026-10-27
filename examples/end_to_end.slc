@@ -35,7 +35,7 @@ local process = do(
     x: U32
 ): U32
 
-    local box: NumberBox = NumberBox {
+    local box = NumberBox {
         value = transform x,
     }
 
@@ -51,10 +51,10 @@ local enabled_process = process true
 
 -- Fully known invocation
 local answer = enabled_process 10
-assert(host(answer) == 86)
+assert(host answer == 86)
 
 -- Native entry
 local entry = do(x: U32): U32 =
-    enabled_process x
+enabled_process x
 
 export entry

@@ -5,9 +5,9 @@ local greeting = require "greeting"
 
 local main = do(args: Args): I32
     if args.length > 1 then
-        greeting.say(args[1])
+        greeting.say args[1]
     else
-        libc.say("hello, world\n")
+        libc.say "hello, world\n"
     end
     return 0
 end

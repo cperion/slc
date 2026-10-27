@@ -41,9 +41,9 @@ export ring_sum
 local Bytes = Ring(U8, 2)
 local ring_bytes = do(a: U8, b: U8, c: U8): U32
     local r = Bytes { head = 0, len = 0, items = (Grow U8) {} }
-    r:push(a)
-    r:push(b)
-    r:push(c)
-    return U32(r[0]) * 256 + U32(r[1])
+    r:push a
+    r:push b
+    r:push c
+    return U32 r[0] * 256 + U32 r[1]
 end
 export ring_bytes

@@ -2,7 +2,7 @@ local function fact(n: U32): U32
     if n <= 1 then return 1 end
     return n * fact(n - 1)
 end
-assert(host(fact(10)) == 3628800)
+assert(host(fact 10) == 3628800)
 export fact
 
 local abs = extern("abs", { I32 }, I32, { header = "<stdlib.h>" })
@@ -22,7 +22,7 @@ local pick = do(a: U32): U32 = a  -- rule 3: f 21 {1} is f(21)({1})
 local chain = do(x: U32): U32
     local t = { 5 }
     local f = do(k) return do(tb) return k + tb[1] end end
-    return pick(f 21 {1} + x)
+    return pick(f 21 { 1 } + x)
 end
 export chain
 
@@ -42,7 +42,7 @@ local function steps(k: U32, x: U32): U32
     if x == 0 then return k end
     return steps(k + 1, x - 1)
 end
-local walk = do(x: U32): U32 = steps(dynamic(U32(0)), x)
+local walk = do(x: U32): U32 = steps(dynamic(U32 0), x)
 export walk
 
 local Counter = struct {

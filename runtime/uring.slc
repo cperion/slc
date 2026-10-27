@@ -8,31 +8,37 @@ return function(t)
     local h = '"slc_io_uring.h"'
     local options = { header = h }
     local SQE = cstruct("struct io_uring_sqe", h, {
-        { "opcode", U8 }, { "flags", U8 }, { "fd", I32 }, { "off", U64 }, { "addr", U64 },
-        { "len", U32 }, { "op_flags", U32, "rw_flags" }, { "user_data", U64 },
-    })
+            { "opcode", U8 }, { "flags", U8 }, { "fd", I32 }, { "off", U64 }, { "addr", U64 },
+            { "len", U32 }, { "op_flags", U32, "rw_flags" }, { "user_data", U64 },
+        })
     local CQE = cstruct("struct io_uring_cqe", h, { { "user_data", U64 }, { "res", I32 } })
-    local Timespec = cstruct("struct __kernel_timespec", h, { { "tv_sec", I64 }, { "tv_nsec", I64 } })
+    local Timespec = cstruct("struct __kernel_timespec",
+        h, { { "tv_sec", I64 }, { "tv_nsec", I64 } })
     local Extra = cstruct("slc_uring_extra", h, { { "ts", Timespec }, { "addr", Address } })
     local BytePtr = Ptr U8
     local State = cstruct("slc_uring_state", h, {
-        { "mu", Mutex }, { "fd", I32 }, { "sq_head", Ptr U32 }, { "sq_tail", Ptr U32 },
-        { "sq_mask", Ptr U32 }, { "sq_array", Ptr U32 }, { "sq_entries", U32 },
-        { "cq_head", Ptr U32 }, { "cq_tail", Ptr U32 }, { "cq_mask", Ptr U32 },
-        { "sqes", Ptr SQE }, { "cqes", Ptr CQE },
-    })
+            { "mu", Mutex }, { "fd", I32 }, { "sq_head", Ptr U32 }, { "sq_tail", Ptr U32 },
+            { "sq_mask", Ptr U32 }, { "sq_array", Ptr U32 }, { "sq_entries", U32 },
+            { "cq_head", Ptr U32 }, { "cq_tail", Ptr U32 }, { "cq_mask", Ptr U32 },
+            { "sqes", Ptr SQE }, { "cqes", Ptr CQE },
+        })
     local function constant(name, T) return cconst(name, T or I32, h) end
     local read_kind, write_kind = constant "SLC_K_READ", constant "SLC_K_WRITE"
     local accept_kind, connect_kind, open_kind, close_kind = constant "SLC_K_ACCEPT", constant "SLC_K_CONNECT", constant "SLC_K_OPEN", constant "SLC_K_CLOSE"
     local done, failed, timed_out = constant "SLC_IO_DONE", constant "SLC_IO_FAILED", constant "SLC_IO_TIMED_OUT"
-    local read_op, write_op, accept_op, connect_op = constant("IORING_OP_READ", U8), constant("IORING_OP_WRITE", U8), constant("IORING_OP_ACCEPT", U8), constant("IORING_OP_CONNECT", U8)
-    local open_op, close_op, timeout_op = constant("IORING_OP_OPENAT", U8), constant("IORING_OP_CLOSE", U8), constant("IORING_OP_LINK_TIMEOUT", U8)
+    local read_op, write_op, accept_op, connect_op = constant("IORING_OP_READ", U8), constant("IORING_OP_WRITE",
+        U8), constant("IORING_OP_ACCEPT", U8), constant("IORING_OP_CONNECT", U8)
+    local open_op, close_op, timeout_op = constant("IORING_OP_OPENAT", U8), constant("IORING_OP_CLOSE",
+        U8), constant("IORING_OP_LINK_TIMEOUT", U8)
     local link_flag = constant("IOSQE_IO_LINK", U8)
     local getevents = constant("IORING_ENTER_GETEVENTS", U32)
     local canceled = cconst("ECANCELED", I32, "<errno.h>")
-    local interrupted, again, busy = cconst("EINTR", I32, "<errno.h>"), cconst("EAGAIN", I32, "<errno.h>"), cconst("EBUSY", I32, "<errno.h>")
-    local af_inet, sock_stream, sock_cloexec = cconst("AF_INET", I32, "<sys/socket.h>"), cconst("SOCK_STREAM", I32, "<sys/socket.h>"), cconst("SOCK_CLOEXEC", I32, "<sys/socket.h>")
-    local at_fdcwd, cloexec = cconst("AT_FDCWD", I32, "<fcntl.h>"), cconst("O_CLOEXEC", U32, "<fcntl.h>")
+    local interrupted, again, busy = cconst("EINTR", I32, "<errno.h>"), cconst("EAGAIN",
+        I32, "<errno.h>"), cconst("EBUSY", I32, "<errno.h>")
+    local af_inet, sock_stream, sock_cloexec = cconst("AF_INET", I32, "<sys/socket.h>"), cconst("SOCK_STREAM",
+        I32, "<sys/socket.h>"), cconst("SOCK_CLOEXEC", I32, "<sys/socket.h>")
+    local at_fdcwd, cloexec = cconst("AT_FDCWD", I32, "<fcntl.h>"), cconst("O_CLOEXEC",
+        U32, "<fcntl.h>")
     local lock = extern("pthread_mutex_lock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
     local unlock = extern("pthread_mutex_unlock", { Ptr Mutex }, I32, { header = "<pthread.h>" })
     local trap = extern("slc_trap", { CString }, Unit, options)
@@ -50,10 +56,10 @@ return function(t)
     local complete = t.complete
     local next_sqe = do(s: Ptr State): Ptr SQE
         local tail = s.sq_tail[0]
-        while tail - atomic_ptr(s.sq_head)[0]:load("acquire") >= s.sq_entries do enter(s, 0, 0, 0) end
+        while tail - atomic_ptr(s.sq_head)[0]:load "acquire" >= s.sq_entries do enter(s, 0, 0, 0) end
         local index = band tail s.sq_mask[0]
         local sqe = Ptr s.sqes[index]
-        zero(bytes(sqe[0]), 0, size_of SQE)
+        zero(bytes sqe[0], 0, size_of SQE)
         s.sq_array[index] = index
         atomic_ptr(s.sq_tail)[0]:store(tail + 1, "release")
         return sqe
@@ -71,7 +77,7 @@ return function(t)
             local fd = socket(af_inet, flags, 0)
             if fd < 0 then
                 free(BytePtr extra)
-                complete(op, failed, I64(errno()))
+                complete(op, failed, I64 errno())
                 return
             end
             op.fd = fd
@@ -152,7 +158,7 @@ return function(t)
                 if error ~= interrupted and error ~= again and error ~= busy then trap "io_uring_enter failed to wait" end
             end
             local head = s.cq_head[0]
-            local tail = atomic_ptr(s.cq_tail)[0]:load("acquire")
+            local tail = atomic_ptr(s.cq_tail)[0]:load "acquire"
             -- Preserve the tool-visible publication edge from all submitters.
             lock(Ptr s.mu)
             unlock(Ptr s.mu)

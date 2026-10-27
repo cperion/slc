@@ -12,7 +12,7 @@ local Stats = struct { rows: U32, sum: I64, min: I64, max: I64 }
 -- the statistics of one numeric field, in units of 10^-decimals; `rows` are the
 -- lines after the header
 local field_stats = do(layout, rows: Slice U8): Stats
-    local s: Stats = Stats { rows = 0, sum = 0, min = 0, max = 0 }
+    local s = Stats { rows = 0, sum = 0, min = 0, max = 0 }
     local i: U32 = 0
     while i < rows.length do
         -- the fields before ours: the count is known, so this unrolls
@@ -29,14 +29,14 @@ local field_stats = do(layout, rows: Slice U8): Stats
         end
         local v: I64 = 0
         while i < rows.length and rows[i] >= 48 and rows[i] <= 57 do
-            v = v * 10 + I64(rows[i]) - 48
+            v = v * 10 + I64 rows[i] - 48
             i = i + 1
         end
         -- the decimals the first row had: a known count, unrolled
         if layout.decimals > 0 then
             i = i + 1
             for _ = 1, layout.decimals do
-                v = v * 10 + I64(rows[i]) - 48
+                v = v * 10 + I64 rows[i] - 48
                 i = i + 1
             end
         end
@@ -70,24 +70,25 @@ if path and wanted and native then
     local f = assert(io.open(path, 'rb'))
     local text = f:read '*a'
     f:close()
-    local header, first = text:match('^([^\n]*)\n([^\n]*)')
+    local header, first = text:match '^([^\n]*)\n([^\n]*)'
     local index
     local k = 0
-    for name in (header .. ','):gmatch('([^,]*),') do
+    for name in (header .. ','):gmatch '([^,]*),' do
         k = k + 1
         if name == wanted then index = k end
     end
     if not index then error(('no column %q in %s'):format(wanted, header), 0) end
     local field = {}
-    for x in (first .. ','):gmatch('([^,]*),') do field[#field + 1] = x end
-    local decimals = #(field[index]:match('%.(%d+)$') or '')
+    for x in (first .. ','):gmatch '([^,]*),' do field[#field + 1] = x end
+    local decimals = #(field[index]:match '%.(%d+)$' or '')
 
     local decode = native(field_stats { index = index, decimals = decimals })
 
     local ffi = require 'ffi'
     local body = text:sub(#header + 2)
-    local s = decode({ ptr = ffi.cast('uint8_t *', body), len = #body })
+    local s = decode { ptr = ffi.cast('uint8_t *', body), len = #body }
     local unit = 10 ^ decimals
-    print(('%s (column %d of %s, %d decimals): %d rows, sum %s, min %s, max %s'):format(wanted, index, path, decimals,
-        s.rows, tonumber(s.sum) / unit, tonumber(s.min) / unit, tonumber(s.max) / unit))
+    print(('%s (column %d of %s, %d decimals): %d rows, sum %s, min %s, max %s'):format(wanted,
+            index, path, decimals,
+            s.rows, tonumber s.sum / unit, tonumber s.min / unit, tonumber s.max / unit))
 end

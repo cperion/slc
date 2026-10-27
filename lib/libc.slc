@@ -16,25 +16,26 @@
 local FILE = opaque "FILE"
 
 local stdio = { header = "<stdio.h>" }
-local fopen   = extern("fopen",   { CString, CString }, Ptr FILE, stdio)
-local fclose  = extern("fclose",  { Ptr FILE }, I32, stdio)
-local fputs   = extern("fputs",   { CString, Ptr FILE }, I32, stdio)
-local fputc   = extern("fputc",   { I32, Ptr FILE }, I32, stdio)
-local fgetc   = extern("fgetc",   { Ptr FILE }, I32, stdio)
-local fprintf = extern("fprintf", { Ptr FILE, CString }, I32, { header = "<stdio.h>", variadic = true })
-local printf  = extern("printf",  { CString }, I32, { header = "<stdio.h>", variadic = true })
+local fopen = extern("fopen", { CString, CString }, Ptr FILE, stdio)
+local fclose = extern("fclose", { Ptr FILE }, I32, stdio)
+local fputs = extern("fputs", { CString, Ptr FILE }, I32, stdio)
+local fputc = extern("fputc", { I32, Ptr FILE }, I32, stdio)
+local fgetc = extern("fgetc", { Ptr FILE }, I32, stdio)
+local fprintf = extern("fprintf",
+    { Ptr FILE, CString }, I32, { header = "<stdio.h>", variadic = true })
+local printf = extern("printf", { CString }, I32, { header = "<stdio.h>", variadic = true })
 
 local stdlib = { header = "<stdlib.h>" }
-local malloc  = extern("malloc",  { U64 }, Ptr U8, stdlib)
-local free    = extern("free",    { Ptr U8 }, Unit, stdlib)
+local malloc = extern("malloc", { U64 }, Ptr U8, stdlib)
+local free = extern("free", { Ptr U8 }, Unit, stdlib)
 
 local string_h = { header = "<string.h>" }
-local memset  = extern("memset",  { Ptr U8, I32, U64 }, Ptr U8, string_h)
+local memset = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, string_h)
 
 -- formatted output: the format is built from the arguments' types while
 -- specializing, so it always matches them
 local say = do(...parts): Unit
-    printf(cformat(...parts))
+    printf cformat(...parts)
 end
 
 -- files ----------------------------------------------------------------------------------------
@@ -47,12 +48,12 @@ function File:write(s: CString): Unit
 end
 
 function File:put(byte: U8): Unit
-    fputc(I32(byte), self.handle)
+    fputc(I32 byte, self.handle)
 end
 
 -- the next byte, or -1 at the end
 function File:next_byte(): I32
-    return fgetc(self.handle)
+    return fgetc self.handle
 end
 
 function File:say(...parts): Unit
@@ -62,12 +63,12 @@ end
 -- open, run the body, close; false if the file could not be opened
 local with_file = do(path: CString, mode: CString, body): Bool
     local h: Ptr FILE = fopen(path, mode)
-    if h == null(FILE) then
+    if h == null FILE then
         return false
     end
-    local file: File = File { handle = h }
-    body(Ref(file))
-    fclose(h)
+    local file = File { handle = h }
+    body(Ref file)
+    fclose h
     return true
 end
 
@@ -76,7 +77,7 @@ local each_byte = do(path: CString, body): Bool
     return with_file(path, "rb") do(reading...)
         local b: I32 = next_byte()
         while b >= 0 do
-            body(U8(b))
+            body(U8 b)
             b = next_byte()
         end
     end
@@ -88,18 +89,18 @@ end
 local Buffer = struct { data: Ptr U8, size: U32 }
 
 function Buffer:fill(byte: U8): Unit
-    memset(self.data, I32(byte), U64(self.size))
+    memset(self.data, I32 byte, U64 self.size)
 end
 
 -- allocate, run the body, free; false if the allocation failed
 local with_buffer = do(size: U32, body): Bool
-    local p: Ptr U8 = malloc(U64(size))
-    if p == null(U8) then
+    local p: Ptr U8 = malloc(U64 size)
+    if p == null U8 then
         return false
     end
-    local buffer: Buffer = Buffer { data = p, size = size }
-    body(Ref(buffer))
-    free(p)
+    local buffer = Buffer { data = p, size = size }
+    body(Ref buffer)
+    free p
     return true
 end
 

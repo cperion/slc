@@ -43,13 +43,16 @@ return function(t)
         offset: I64, deadline: U64, value: Ptr I64, site: CString): I32
         return start task ops write_kind fd buf n offset deadline value site
     end
-    local slc_io_accept = do(task: Ptr Task, ops: Ptr Op, fd: I32, deadline: U64, value: Ptr I64, site: CString): I32
+    local slc_io_accept = do(task: Ptr Task,
+        ops: Ptr Op, fd: I32, deadline: U64, value: Ptr I64, site: CString): I32
         return start(task, ops, accept_kind, fd, null Void, 0, -1, deadline, value, site)
     end
-    local slc_io_connect = do(task: Ptr Task, ops: Ptr Op, host: U32, port: U32, deadline: U64, value: Ptr I64, site: CString): I32
+    local slc_io_connect = do(task: Ptr Task,
+        ops: Ptr Op, host: U32, port: U32, deadline: U64, value: Ptr I64, site: CString): I32
         return start(task, ops, connect_kind, -1, null Void, port, I64 host, deadline, value, site)
     end
-    local slc_io_open_path = do(task: Ptr Task, ops: Ptr Op, path: Ptr Void, flags: I32, mode: U32, value: Ptr I64, site: CString): I32
+    local slc_io_open_path = do(task: Ptr Task,
+        ops: Ptr Op, path: Ptr Void, flags: I32, mode: U32, value: Ptr I64, site: CString): I32
         return start(task, ops, open_kind, flags, path, mode, -1, 0, value, site)
     end
     local slc_io_close = do(task: Ptr Task, ops: Ptr Op, fd: I32, value: Ptr I64, site: CString): I32
@@ -58,7 +61,7 @@ return function(t)
     local slc_io_complete = do(op: Ptr Op, status: I32, value: I64): Unit
         local task = op.task
         op.value[0] = value
-        if not t.claim(task) then trap "an I/O operation completed twice" end
+        if not t.claim task then trap "an I/O operation completed twice" end
         task.result = status
         notify task
     end

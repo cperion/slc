@@ -6,8 +6,8 @@ return function(t)
     local h = '"slc_scheduler.h"'
     local Cond = cstruct("pthread_cond_t", "<pthread.h>", {})
     local Idler = cstruct("struct idler", h, function(Self)
-        return { { "cv", Cond }, { "next", Ptr Self }, { "listed", I32 } }
-    end)
+            return { { "cv", Cond }, { "next", Ptr Self }, { "listed", I32 } }
+        end)
     local Job = cstruct("struct bjob", h, function(Self) return { { "next", Ptr Self } } end)
     local signal = extern("pthread_cond_signal", { Ptr Cond }, I32, { header = "<pthread.h>" })
     local wake = extern("slc_wake_locked", { Ptr Task }, Unit, { header = h })
@@ -42,7 +42,7 @@ return function(t)
         if task.all_next ~= null Task then task.all_next.all_prev = task.all_prev end
         local scope = task.scope
         scope.live = scope.live - 1
-        if scope.live == 0 and scope.waiter ~= null Task and t.claim(scope.waiter) then return scope.waiter end
+        if scope.live == 0 and scope.waiter ~= null Task and t.claim scope.waiter then return scope.waiter end
         return null Task
     end
     local slc_blocked_remove = do(head: Ptr(Ptr Task), task: Ptr Task): Unit
@@ -67,7 +67,7 @@ return function(t)
             local op = heap.data[0]
             t.remove heap op
             fired = true
-            if t.claim(op.task) then
+            if t.claim op.task then
                 op.task.result = t.result op 0
                 wake op.task
             end

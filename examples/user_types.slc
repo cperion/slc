@@ -5,7 +5,7 @@
 local Fixed = struct { raw: I32 }
 
 function Fixed.__cast(v)
-    if type(v) == 'number' then
+    if type v == 'number' then
         return Fixed { raw = I32(v * 65536) }
     end
 end
@@ -15,7 +15,7 @@ function Fixed.__add(a: Fixed, b: Fixed): Fixed
 end
 
 function Fixed.__mul(a: Fixed, b: Fixed): Fixed
-    local wide = I64(a.raw) * I64(b.raw)
+    local wide = I64 a.raw * I64 b.raw
     return Fixed { raw = I32(wide / 65536) }
 end
 

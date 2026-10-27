@@ -54,7 +54,7 @@ local inferred_storage = do(n: U32): U32
 end
 
 local inferred_mixed = do(x: U32): U32
-    local a: U32, b = x, x + 1
+    local a, b = x, x + 1
     b = b + 2
     return a + b
 end

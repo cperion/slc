@@ -17,7 +17,7 @@ export area
 
 -- a known tag selects its handler at compile time
 assert(host(area(Shape.rect { width = 4, height = 5 })) == 20)
-local strip = do(k: U32): U32 = area(Shape.rect { width = k, height = 1 })
+local strip = do(k: U32): U32 = area Shape.rect { width = k, height = 1 }
 export strip
 
 -- `name(params) = body` is `name = do(params) = body`; Unit alternatives take nothing
@@ -26,7 +26,7 @@ local unwrap_or = do(o: Opt, d: U32): U32 = o { some(v) = v, none() = d }
 local pick = do(flag: Bool, x: U32): U32
     local o: Opt = Opt.none()
     if flag then
-        o = Opt.some(x)
+        o = Opt.some x
     end
     return unwrap_or(o, 7)
 end
@@ -62,11 +62,11 @@ export apply
 
 -- over a known script, the interpreter dissolves into straight-line code
 local script = {
-    Command.insert(5),
+    Command.insert 5,
     Command.move(Direction.left()),
     Command.move(Direction.left()),
     Command.undo(),
-    Command.insert(2),
+    Command.insert 2,
 }
 local run_script = do(e: Ref Editor): Unit
     for i = 1, #script do
@@ -85,13 +85,13 @@ local run_program = do(e: Ref Editor, prog: Ref Program): Unit
     end
 end
 local demo = do(n: U32): U32
-    local prog: Program = Program {}
-    prog:push(Command.insert(n))
-    prog:push(Command.move(Direction.left()))
-    prog:push(Command.undo())
-    prog:push(Command.move(Direction.right()))
-    local e: Editor = Editor { cursor = 0, length = 0, undos = 0 }
-    run_program(Ref(e), Ref(prog))
+    local prog = Program {}
+    prog:push(Command.insert n)
+    prog:push(Command.move Direction.left())
+    prog:push Command.undo()
+    prog:push(Command.move Direction.right())
+    local e = Editor { cursor = 0, length = 0, undos = 0 }
+    run_program(Ref e, Ref prog)
     return e.cursor * 100 + e.length * 10 + e.undos
 end
 export demo

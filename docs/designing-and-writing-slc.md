@@ -101,7 +101,7 @@ local find_nonzero = do(xs: Slice U32): Found
     local i: U32 = 0
     while i < xs.length do
         if xs[i] ~= 0 then
-            return Found.found(i)
+            return Found.found i
         end
         i = i + 1
     end
@@ -200,7 +200,7 @@ end
 ```lua
 local type_word = do(document: Ref Document, n: U32): U32
     local moved: U32 = 0
-    transaction(document) do(editing...)
+    transaction document do(editing...)
         insert n
         local before = cursor
         move_left()
@@ -220,8 +220,8 @@ An opened field name is the field's place: reading it reads the current value. A
 
 ```lua
 local transaction = do(document: Ref Document, body): Unit
-    local editing: Editing = Editing { ...document }
-    body(Ref(editing))
+    local editing = Editing { ...document }
+    body(Ref editing)
     document = Document { ...editing }
 end
 ```
@@ -259,9 +259,9 @@ uint32_t type_word(Document *document, uint32_t n) {
 
 ```lua
 local import_words = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
-    counted(stats) do
-    counted(stats) do
-    transaction(document) do(editing...)
+    counted stats do
+    counted stats do
+    transaction document do(editing...)
         insert n
     endall
 end
@@ -293,7 +293,7 @@ A dialect is a vocabulary plus an engine. In slc the engine often runs while com
 * **The pure core decides.** Words from values to values are testable while compiling. Applied to known values, a typed word computes in the compiler, and Lua asserts the answer:
 
 ```lua
-assert(host(tab_stop({ tab_width = 8 }, U32(3))) == 8)
+assert(host(tab_stop({ tab_width = 8 }, U32 3)) == 8)
 ```
 
 ## 8. Describe, then run
@@ -311,7 +311,7 @@ local apply = do(document: Ref Document, c: Command): Unit
 Over a description known while compiling, the engine dissolves:
 
 ```lua
-local greeting = { Command.insert(5), Command.move(Direction.left()), Command.insert(1) }
+local greeting = { Command.insert 5, Command.move(Direction.left()), Command.insert 1 }
 local type_greeting = do(document: Ref Document): Unit
     for i = 1, #greeting do
         apply(document, greeting[i])
@@ -334,7 +334,7 @@ void type_greeting(Document *document) {
 Over a description known only at run time, the same engine is a loop with a `switch`:
 
 ```lua
-local replay = do(document: Ref Document, commands: Ref (Grow Command)): Unit
+local replay = do(document: Ref Document, commands: Ref(Grow Command)): Unit
     local i: U32 = 0
     while i < commands.length do
         apply(document, commands[i])
@@ -387,10 +387,10 @@ local line_count = do(workers, path: CString): U32
                             failed = do(e) chunks[s].n = 0 end,
                         }
                         if chunks[s].n == 0 then
-                            chunks:release(s)
+                            chunks:release s
                             more = false
                         else
-                            filled:send(s)
+                            filled:send s
                         end
                     end
                     filled:close()
@@ -400,18 +400,18 @@ local line_count = do(workers, path: CString): U32
                     tasks do(crew)
                         for _ = 1, workers do
                             crew.spawn do
-                                filled:each(do(s)
-                                    counts:send(count_lines(chunks[s]))
-                                    chunks:release(s)
-                                end)
+                                filled:each do(s)
+                                    counts:send(count_lines chunks[s])
+                                    chunks:release s
+                                end
                             end
                         end
                     end
                     counts:close()
                 end
-                counts:each(do(n)
+                counts:each do(n)
                     total = total + n
-                end)
+                end
             end
             io.close(file) { done = do() end, failed = do(e) end }
         end,
@@ -429,8 +429,8 @@ Count what chunking cannot split: a word can straddle two chunks, a newline cann
 
 ```lua
         first_of {
-            recv(replies) do(v) answer = v end,
-            after(seconds(1)) do answer = 0 end,
+            recv replies do(v) answer = v end,
+            after(seconds 1) do answer = 0 end,
             closed = do end,
         }
 ```

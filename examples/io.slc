@@ -49,7 +49,7 @@ local file_roundtrip = do(path: CString): U32
                 done = do(n)
                     local j: U32 = 0
                     while j < n do
-                        sum = sum + U32(back[j])
+                        sum = sum + U32 back[j]
                         j = j + 1
                     end
                 end,
@@ -69,13 +69,13 @@ local timeout_then_data = do(): U32
     io.pipe() {
         done = do(p)
             local buf: Array(U8, 8)
-            io.read(p.reader, buf, 8, { deadline = ms(20) }) {
+            io.read(p.reader, buf, 8, { deadline = ms 20 }) {
                 done = do(n) outcome = 100 end,
                 failed = do(e) outcome = 200 end,
                 timed_out = do() outcome = 1 end,
             }
             io.write(p.writer, "abc") { done = do(n) end, failed = do(e) end }
-            io.read(p.reader, buf, 8, { deadline = seconds(1) }) {
+            io.read(p.reader, buf, 8, { deadline = seconds 1 }) {
                 done = do(n) outcome = outcome + 10 * n end,
                 failed = do(e) end,
                 timed_out = do() end,
@@ -95,7 +95,7 @@ local echo = do(clients: U32): U32
     tasks do(scope...)
         io.listen(io.LOOPBACK, 0) {
             done = do(l)
-                local port: U32 = io.local_port(l)
+                local port: U32 = io.local_port l
                 spawn do
                     local k: U32 = 0
                     while k < clients do
@@ -105,7 +105,8 @@ local echo = do(clients: U32): U32
                                     local buf: Array(U8, 64)
                                     io.read(conn, buf) {
                                         done = do(n)
-                                            io.write(conn, buf, n) { done = do(m) end, failed = do(e) end }
+                                            io.write(conn, buf, n) { done = do(m) end,
+                                                failed = do(e) end }
                                         end,
                                         failed = do(e) end,
                                     }
@@ -122,14 +123,14 @@ local echo = do(clients: U32): U32
                 while c < clients do
                     spawn do
                         local ok: Bool = false
-                        io.connect(io.LOOPBACK, port, { deadline = seconds(5) }) {
+                        io.connect(io.LOOPBACK, port, { deadline = seconds 5 }) {
                             done = do(s)
-                                local msg: Array(U8, 4) = Array(U8, 4) { 112, 105, 110, 103 }    -- "ping"
-                                msg[3] = U8(c)
+                                local msg = Array(U8, 4) { 112, 105, 110, 103 }  -- "ping"
+                                msg[3] = U8 c
                                 io.write(s, msg) { done = do(n) end, failed = do(e) end }
                                 local back: Array(U8, 4)
-                                io.read(s, back, 4, { deadline = seconds(5) }) {
-                                    done = do(n) ok = n == 4 and back[0] == 112 and back[3] == U8(c) end,
+                                io.read(s, back, 4, { deadline = seconds 5 }) {
+                                    done = do(n) ok = n == 4 and back[0] == 112 and back[3] == U8 c end,
                                     failed = do(e) end,
                                     timed_out = do() end,
                                 }
@@ -138,13 +139,14 @@ local echo = do(clients: U32): U32
                             failed = do(e) end,
                             timed_out = do() end,
                         }
-                        results:send(ok)
+                        results:send ok
                     end
                     c = c + 1
                 end
                 local got: U32 = 0
                 while got < clients do
-                    results:recv() { value = do(ok) if ok then good = good + 1 end end, closed = do end }
+                    results:recv() { value = do(ok) if ok then good = good + 1 end end,
+                        closed = do end }
                     got = got + 1
                 end
                 io.close(l) { done = do() end, failed = do(e) end }
@@ -169,7 +171,8 @@ local zero_copy = do(chunks: U32): U32
                 spawn do
                     local k: U32 = 0
                     while k < chunks do
-                        io.write(p.writer, "0123456789abcdef") { done = do(n) end, failed = do(e) end }
+                        io.write(p.writer, "0123456789abcdef") { done = do(n) end,
+                            failed = do(e) end }
                         k = k + 1
                     end
                     io.close(p.writer) { done = do() end, failed = do(e) end }
@@ -184,18 +187,18 @@ local zero_copy = do(chunks: U32): U32
                         }
                         if buffers[s].n == 0 then more = false end
                         if more then
-                            filled:send(s)
+                            filled:send s
                         else
-                            buffers:release(s)
+                            buffers:release s
                         end
                     end
                     filled:close()
                     io.close(p.reader) { done = do() end, failed = do(e) end }
                 end
-                filled:each(do(s)
+                filled:each do(s)
                     total = total + buffers[s].n
-                    buffers:release(s)
-                end)
+                    buffers:release s
+                end
             end,
             failed = do(e) end,
         }

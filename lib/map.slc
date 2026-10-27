@@ -34,7 +34,7 @@ function map.library(T, storage, Entry, Result, string_keys)
     if libraries[T] then return libraries[T] end
     local K, V = T.key, T.elem
     local equal = keys.equal K
-    local digest = string_keys and hash.text or keys.hash(K)
+    local digest = string_keys and hash.text or keys.hash K
     local get, set = storage.get, storage.set
     local read, write = storage.read, storage.write
     local api = {}
@@ -293,26 +293,26 @@ function map.known(K, V, Result, entries)
     local equal = keys.equal K
     local api = {}
     api.find = do(key: K): Result
-        for _, entry in ipairs(entries) do
-            if equal(key, entry[1]) then return Result.found(entry[2]) end
+        for _, entry in ipairs entries do
+            if equal(key, entry[1]) then return Result.found entry[2] end
         end
         return Result.missing()
     end
     api.has = do(key: K): Bool
-        for _, entry in ipairs(entries) do
+        for _, entry in ipairs entries do
             if equal(key, entry[1]) then return true end
         end
         return false
     end
     api.get = do(key: K): V
-        for _, entry in ipairs(entries) do
+        for _, entry in ipairs entries do
             if equal(key, entry[1]) then return entry[2] end
         end
         trap "map-key: missing key in known map"
-        return zero V -- unreachable after the runtime trap
+        return zero V  -- unreachable after the runtime trap
     end
     api.each = do(body): Unit
-        for _, entry in ipairs(entries) do body(entry[1], entry[2]) end
+        for _, entry in ipairs entries do body(entry[1], entry[2]) end
     end
     return api
 end

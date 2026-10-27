@@ -11,7 +11,7 @@ local bump = do(c: Ref Counter, times: U32): Unit
 end
 export bump
 
-local read_counter = do(c: Ref Counter): U64 = c.n:load("acquire")
+local read_counter = do(c: Ref Counter): U64 = c.n:load "acquire"
 export read_counter
 
 -- a spinlock as an activity: acquire, run the body, release; the release
@@ -29,7 +29,7 @@ local Shared = struct { lock: SpinLock, total: U64 }
 local add_locked = do(s: Ref Shared, times: U32): Unit
     local i: U32 = 0
     while i < times do
-        with_lock(Ref(s.lock)) do
+        with_lock(Ref s.lock) do
             s.total = s.total + 1
         end
         i = i + 1
@@ -42,10 +42,10 @@ export add_locked
 local Ring = struct { head: Atomic U32, tail: Atomic U32, mask: U32, slots: Ptr U32 }
 
 local push = do(r: Ref Ring, v: U32): Bool
-    local tail: U32 = r.tail:load("relaxed")
-    local head: U32 = r.head:load("acquire")
+    local tail: U32 = r.tail:load "relaxed"
+    local head: U32 = r.head:load "acquire"
     if tail - head > r.mask then
-        return false                      -- full
+        return false  -- full
     end
     r.slots[band(tail, r.mask)] = v
     r.tail:store(tail + 1, "release")
@@ -55,14 +55,14 @@ export push
 
 local Taken = oneof { empty: Unit, value: U32 }
 local pop = do(r: Ref Ring): Taken
-    local head: U32 = r.head:load("relaxed")
-    local tail: U32 = r.tail:load("acquire")
+    local head: U32 = r.head:load "relaxed"
+    local tail: U32 = r.tail:load "acquire"
     if head == tail then
         return Taken.empty()
     end
     local v: U32 = r.slots[band(head, r.mask)]
     r.head:store(head + 1, "release")
-    return Taken.value(v)
+    return Taken.value v
 end
 
 -- the consumer side as one word: pop until n values arrived, return their sum
@@ -73,7 +73,7 @@ local drain = do(r: Ref Ring, n: U32): U64
         pop(r) {
             empty = do end,
             value = do(v)
-                sum = sum + U64(v)
+                sum = sum + U64 v
                 got = got + 1
             end,
         }

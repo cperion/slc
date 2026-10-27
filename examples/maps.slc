@@ -1,7 +1,7 @@
 -- Fixed-key maps: owned storage, checked places and explicit insertion.
 local Counts = Map(U32, U64)
 local map_tally = do(n: U32): U64
-    local counts: Counts = Counts {}
+    local counts = Counts {}
     for i: U32 = 1, n do
         local k: U32 = i % 17
         counts:ensure(k, 0)
@@ -11,7 +11,7 @@ local map_tally = do(n: U32): U64
     for i: U32 = 0, 16 do
         total = total + counts:find(i) {
             found(v) = v,
-            missing() = U64(0),
+            missing() = U64 0,
         }
     end
     return total
@@ -19,144 +19,144 @@ end
 export map_tally
 
 local edit_counts = do(k: U32): U64
-    local m: Counts = Counts {}
+    local m = Counts {}
     m:put(k, 10)
     m:put(k, 20)
     m:ensure(k, 99)
-    local saved = m:find(k)
+    local saved = m:find k
     m[k] = 30
-    local before: U64 = saved { found(v) = v, missing() = U64(0) }
-    if not m:has(k) then return 999 end
-    if not m:remove(k) then return 998 end
-    if m:remove(k) then return 997 end
-    return before + U64(m.length)
+    local before: U64 = saved { found(v) = v, missing() = U64 0 }
+    if not m:has k then return 999 end
+    if not m:remove k then return 998 end
+    if m:remove k then return 997 end
+    return before + U64 m.length
 end
 export edit_counts
 
-local Label = Chars(16)
+local Label = Chars 16
 local Labels = Map(Label, U32)
 local label_count = do(s: Str): U32
-    local m: Labels = Labels {}
-    m:put(Label("cat"), 3)
-    m:put(Label("dog"), 4)
-    return m:find(Label(s)) { found(v) = v, missing() = U32(0) }
+    local m = Labels {}
+    m:put(Label "cat", 3)
+    m:put(Label "dog", 4)
+    return m:find(Label s) { found(v) = v, missing() = U32 0 }
 end
 export label_count
 
 local absent = do(k: U32): U64
-    local m: Counts = Counts {}
+    local m = Counts {}
     return m[k]
 end
 export absent
 
 -- NAME deliberately resembles a codegen placeholder; it is an ordinary field.
-local Key = struct { NAME: U8, wide: U64, label: Chars(8) }
+local Key = struct { NAME: U8, wide: U64, label: Chars 8 }
 local Payload = struct { count: U32, weight: U64 }
 local Records = Map(Key, Payload)
 local record_keys = do(n: U32): U64
-    local m: Records = Records {}
-    local a: Key = Key { NAME = 7, wide = U64(18446744073709551615ULL), label = Chars(8)("x") }
-    local b: Key = a
-    b.label.bytes[7] = 99 -- outside the text length: not part of key identity
+    local m = Records {}
+    local a = Key { NAME = 7, wide = U64 18446744073709551615ULL, label = Chars 8 "x" }
+    local b = a
+    b.label.bytes[7] = 99  -- outside the text length: not part of key identity
     m:put(a, Payload { count = 3, weight = 40 })
     m[b].count = n
-    return U64(m[a].count) + m[a].weight + U64(m.length)
+    return U64 m[a].count + m[a].weight + U64 m.length
 end
 export record_keys
 
 local Choice = oneof { none: Unit, integer: I64, record: Key }
 local Choices = Map(Choice, U32)
 local sum_keys = do(n: I64): U32
-    local m: Choices = Choices {}
+    local m = Choices {}
     m:put(Choice.none(), 2)
-    m:put(Choice.integer(n), 5)
-    m:put(Choice.record { NAME = 1, wide = 2, label = Chars(8)("a") }, 9)
-    local record = Choice.record { NAME = 1, wide = 2, label = Chars(8)("a") }
-    return m[Choice.none()] + m[Choice.integer(n)] + m[record] + m.length
+    m:put(Choice.integer n, 5)
+    m:put(Choice.record { NAME = 1, wide = 2, label = Chars 8 "a" }, 9)
+    local record = Choice.record { NAME = 1, wide = 2, label = Chars 8 "a" }
+    return m[Choice.none()] + m[Choice.integer n] + m[record] + m.length
 end
 export sum_keys
 
 local Node = struct { value: U32 }
 local Ids = Map(Id Node, U32)
 local id_keys = do(n: U32): U32
-    local nodes: Store Node = Store(Node) {}
-    local ids: Ids = Ids {}
-    local id = nodes:add(Node { value = n })
+    local nodes = Store(Node) {}
+    local ids = Ids {}
+    local id = nodes:add Node { value = n }
     ids:put(id, n)
-    nodes:remove(id) -- IDs compare by identity, not by dereferencing a slot
+    nodes:remove id  -- IDs compare by identity, not by dereferencing a slot
     return ids[id]
 end
 export id_keys
 
 local Owner = struct { generation: U32, entries: Counts }
 local map_field = do(n: U32): U64
-    local owner: Owner = Owner { generation = 7, entries = Counts {} }
+    local owner = Owner { generation = 7, entries = Counts {} }
     owner.entries:put(n, 12)
-    return owner.entries[n] + U64(owner.generation)
+    return owner.entries[n] + U64 owner.generation
 end
 export map_field
 
 local Cells = Map(U32, Payload)
 local checked_map_place = do(k: U32): U64
-    local m: Cells = Cells {}
-    local selected: U32 = k
+    local m = Cells {}
+    local selected = k
     m:put(selected, Payload { count = 7, weight = 100 })
-    local cell = Ref(m[selected])
+    local cell = Ref m[selected]
     selected = selected + 1
     for i: U32 = 1, 300 do
         m:put(k + i, Payload { count = i, weight = 0 })
     end
     cell.count = cell.count + 1
-    m:remove(k)
+    m:remove k
     m:put(k, Payload { count = 19, weight = 200 })
-    return U64(cell.count) + cell.weight
+    return U64 cell.count + cell.weight
 end
 export checked_map_place
 
 local map_each_sum = do(n: U32): U64
-    local m: Counts = Counts {}
-    for i: U32 = 1, n do m:put(i, U64(i)) end
+    local m = Counts {}
+    for i: U32 = 1, n do m:put(i, U64 i) end
     local total: U64 = 0
-    m:each(do(k, v)
+    m:each do(k, v)
         m:put(k, v + 100)
-        m:ensure(k, 999) -- existing key: not a structural change
-        m:remove(0) -- absent key: not a structural change
-        total = total + v -- callback received a snapshot before the replacement
-    end)
-    m:put(0, 1) -- the iteration guard ended
+        m:ensure(k, 999)  -- existing key: not a structural change
+        m:remove 0  -- absent key: not a structural change
+        total = total + v  -- callback received a snapshot before the replacement
+    end
+    m:put(0, 1)  -- the iteration guard ended
     return total + m[0]
 end
 export map_each_sum
 
 local map_each_nested = do(n: U32): U64
-    local m: Counts = Counts {}
+    local m = Counts {}
     m:put(1, 1)
     m:put(2, 2)
     local total: U64 = 0
     for i: U32 = 1, n do
-        m:each(do(k, v)
-            m:each(do(k2, v2)
+        m:each do(k, v)
+            m:each do(k2, v2)
                 total = total + v2
                 if k2 == k then return end
                 total = total + 10
-            end)
+            end
             total = total + v
-        end)
+        end
     end
-    m:remove(1)
-    return total + U64(m.length)
+    m:remove 1
+    return total + U64 m.length
 end
 export map_each_nested
 
 local map_each_mutation = do(mode: U32): U64
-    local m: Counts = Counts {}
+    local m = Counts {}
     m:put(1, 1)
-    local alias = Ref(m)
-    m:each(do(k, v)
+    local alias = Ref m
+    m:each do(k, v)
         if mode == 0 then alias:put(k + 1, v) end
-        if mode == 1 then alias:remove(k) end
+        if mode == 1 then alias:remove k end
         if mode == 2 then alias:ensure(k + 1, v) end
-    end)
+    end
     return m[1]
 end
 export map_each_mutation
@@ -166,17 +166,17 @@ local map_task_each = do(n: U32): U64
     tasks do(scope...)
         local out = channel(U64, 0)
         spawn do
-            local m: Counts = Counts {}
-            for i: U32 = 1, n do m:put(i, U64(i)) end
-            m:each(do(k, v)
-                out:send(v) -- suspends with the iteration guard active
+            local m = Counts {}
+            for i: U32 = 1, n do m:put(i, U64 i) end
+            m:each do(k, v)
+                out:send v  -- suspends with the iteration guard active
                 m[k] = v + 100
-            end)
+            end
             m:put(0, 1)
-            out:send(m[0])
+            out:send m[0]
             out:close()
         end
-        out:each(do(v) total = total + v end)
+        out:each do(v) total = total + v end
     end
     return total
 end
