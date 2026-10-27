@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
 -- Poll backend policy and loop, including queue growth, deadline selection,
--- readiness classification and compaction. C only starts the native thread.
+-- readiness classification and compaction; backend.slc starts the poller thread.
 return function(t)
     local Op, Mutex = t.Op, t.Mutex
     local h = '"slc_io_poll.h"'
@@ -123,4 +123,7 @@ return function(t)
     export slc_poll_prepare
     export slc_poll_submit
     export slc_poll_run
+    local backend = require "runtime.backend"
+    backend { .State, .Mutex, .Op, name = "poll", failure = "cannot start the I/O poller",
+        prepare = slc_poll_prepare, submit = slc_poll_submit, run = slc_poll_run }
 end

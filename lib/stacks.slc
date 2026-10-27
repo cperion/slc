@@ -1,12 +1,22 @@
--- Movable data-stack policy. TLS selection, allocation, byte relocation and
--- trap transfer are foreign mechanisms; growth and lifetime bookkeeping are SLC.
+-- Movable data-stack policy. Allocation and byte relocation are foreign
+-- mechanisms; selection, growth and lifetime bookkeeping are SLC.
 local h = '"slc_rt.h"'
 local Stack = cstruct("slc_stack", h, {
         { "data", Ptr U8 }, { "top", U64 }, { "cap", U64 }, { "map_counter", Ptr U32 },
         { "map_guard_base", U64 }, { "map_guard_token", U64 },
     })
 local Set = cstruct("slc_stackset", h, { { "stacks", Ptr Stack }, { "n", U64 } })
-local current = extern("slc_stacks_current", {}, Ptr Set, { header = h })
+-- the stack set in use on this thread: a task's while a worker runs it, otherwise
+-- the thread's own. Read in place: both are thread-local objects the runtime defines.
+local own = global(Set,
+    { name = "slc_own_stacks", imported = true, thread_local = true, header = h })
+local selected = global(Ptr Set,
+    { name = "slc_cur_stacks", imported = true, thread_local = true, header = h })
+local current = do(): Ptr Set
+    local set = selected[0]
+    if set ~= null Set then return set end
+    return own
+end
 local resize_stacks = extern("realloc", { Ptr Stack, U64 }, Ptr Stack, { header = "<stdlib.h>" })
 local resize_bytes = extern("realloc", { Ptr U8, U64 }, Ptr U8, { header = "<stdlib.h>" })
 local free_stacks = extern("free", { Ptr Stack }, Unit, { header = "<stdlib.h>" })
@@ -16,22 +26,24 @@ local move = extern("memmove", { Ptr U8, Ptr U8, U64 }, Ptr U8, { header = "<str
 local trap = extern("slc_trap", { CString }, Unit, { header = h })
 local maximum = U64 0xffffffffffffffffULL
 local stacks = { .Stack, .Set }
+-- Growing the set of stacks, and a stack's buffer, is the cold path: one
+-- function for the program, not a copy at every access.
+local extend = do(context: Ptr Set, index: U64): Unit
+    local n = context.n
+    if n == 0 then n = 4 end
+    while n <= index do n = n * 2 end
+    local data = resize_stacks(context.stacks, n * size_of Stack)
+    if data == null Stack then trap "out of memory for data stacks" end
+    zero(bytes data[context.n], 0, (n - context.n) * size_of Stack)
+    context.stacks = data
+    context.n = n
+end
 stacks.get = do(index: U64): Ptr Stack
     local context = current()
-    if index >= context.n then
-        local n = context.n
-        if n == 0 then n = 4 end
-        while n <= index do n = n * 2 end
-        local data = resize_stacks(context.stacks, n * size_of Stack)
-        if data == null Stack then trap "out of memory for data stacks" end
-        zero(bytes data[context.n], 0, (n - context.n) * size_of Stack)
-        context.stacks = data
-        context.n = n
-    end
+    if index >= context.n then extend(context, index) end
     return Ptr context.stacks[index]
 end
-local reserve = do(s: Ptr Stack, need: U64): Unit
-    if need <= s.cap then return end
+local expand = do(s: Ptr Stack, need: U64): Unit
     local cap = s.cap
     if cap == 0 then cap = 256 end
     while cap < need do
@@ -42,6 +54,10 @@ local reserve = do(s: Ptr Stack, need: U64): Unit
     if data == null U8 then trap "out of memory for a data stack" end
     s.data = data
     s.cap = cap
+end
+local reserve = do(s: Ptr Stack, need: U64): Unit
+    if need <= s.cap then return end
+    expand(s, need)
 end
 stacks.top = do(index: U64): U64 = stacks.get(index).top
 stacks.begin = do(index: U64): U64

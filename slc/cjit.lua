@@ -615,6 +615,9 @@ function Ctx:global(d)
                     internal = J.GCC_JIT_GLOBAL_INTERNAL }
     g = J.gcc_jit_context_new_global(self.c, nil, kinds[d.kind or 'imported'], self:jt(d.t), d.name)
     if d.tls then J.gcc_jit_lvalue_set_tls_model(g, J.GCC_JIT_TLS_MODEL_GLOBAL_DYNAMIC) end
+    if d.init ~= nil then
+        J.gcc_jit_global_set_initializer_rvalue(g, self:rv(self:int_const(d.t, d.init)))
+    end
     self.globals[d] = g
     return lval(d.t, g)
 end

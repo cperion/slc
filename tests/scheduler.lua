@@ -12,7 +12,7 @@ run('mkdir -p ' .. q(build))
 dofile(root .. '/tests/recursive_foreign.lua')
 local policy = require('slc.runtime_build').source()
 local runtime = ''
-for _, f in ipairs { 'slc_rt.c', 'slc_tasks.c', 'slc_io_posix.c', 'slc_io_poll.c' } do
+for _, f in ipairs { 'slc_rt.c' } do
     runtime = runtime .. ' ' .. q(root .. '/runtime/' .. f)
 end
 local cc = (os.getenv('CC') or 'cc') .. ' -std=c99 -Wall -Wextra -Werror -pedantic -O2 -pthread -I' .. q(root .. '/runtime')

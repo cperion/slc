@@ -108,11 +108,16 @@ end
 
 -- Seed acquisition is platform state; every mix and encoding stays visible to
 -- the specializer. The length prefix is StrMap's canonical key encoding.
-local seed_word = extern("slc_hash_seed_word", { U32 }, U64)
+-- Once the runtime has the process's key, reading it is two loads; the first
+-- use takes the out-of-line path, which fills it or traps.
+local h = '"slc_rt.h"'
+local ready = global(I32, { name = "slc_hash_ready", imported = true, header = h })
+local key0 = global(U64, { name = "slc_hash_key0", imported = true, header = h })
+local key1 = global(U64, { name = "slc_hash_key1", imported = true, header = h })
+local seed_word = extern("slc_hash_seed_word", { U32 }, U64, { header = h })
 hash.process = do(): State
-    local k0 = seed_word 0
-    local k1 = seed_word 1
-    return hash.init k0 k1
+    if atomic_ptr(ready)[0]:load "acquire" == 0 then seed_word 0 end
+    return hash.init(key0[0], key1[0])
 end
 hash.text = do(text: Str): U64
     local h = hash.process()

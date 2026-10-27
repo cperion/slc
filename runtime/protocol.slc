@@ -21,8 +21,7 @@ return function(t)
     local timer_remove = extern("slc_timer_cancel", { Ptr Op }, Unit, options)
     local ticket = extern("slc_select_ticket", {}, U64, options)
     local inside = t.lifetime.inside
-    local channels = cread("slc_channel_chunks", Ptr(Ptr Channel), header)
-    local pools = cread("slc_pool_chunks", Ptr(Ptr Pool), header)
+    local channel_table, pool_table = t.channel_table, t.pool_table
     local read_kind = cconst("SLC_K_READ", I32, '"slc_io.h"')
     local none, closed, pending = I32(-100), I32(-2), I32 1
     local PoolHandle = cstruct("slc_pool", header, { { "idx", U32 }, { "gen", U32 } })
@@ -30,16 +29,17 @@ return function(t)
             { "kind", I32 }, { "chan", Handle }, { "buf", Ptr U8 }, { "ns", U64 },
         })
     local channel_at = do(index: U32): Ptr Channel
-        local chunks = channels()
+        local chunks = channel_table[0]
         return Ptr chunks[index / 256][index % 256]
     end
     local pool_at = do(index: U32): Ptr Pool
-        local chunks = pools()
+        local chunks = pool_table[0]
         return Ptr chunks[index / 256][index % 256]
     end
     local lock_channel = do(handle: Handle): Ptr Channel
-        local chunks = channels()
-        if handle.gen == 0 or handle.idx / 256 >= 4096 or chunks[handle.idx / 256] == null Channel then
+        local chunks = channel_table[0]
+        if chunks == null(Ptr Channel) or handle.gen == 0 or handle.idx / 256 >= 4096
+        or chunks[handle.idx / 256] == null Channel then
             trap "not a channel"
         end
         local r = channel_at handle.idx
@@ -51,8 +51,9 @@ return function(t)
         return r
     end
     local lock_pool = do(index: U32, generation: U32): Ptr Pool
-        local chunks = pools()
-        if generation == 0 or index / 256 >= 4096 or chunks[index / 256] == null Pool then trap "not a pool" end
+        local chunks = pool_table[0]
+        if chunks == null(Ptr Pool) or generation == 0 or index / 256 >= 4096
+        or chunks[index / 256] == null Pool then trap "not a pool" end
         local r = pool_at index
         lock(Ptr r.mu)
         if not r.live or atomic_ptr(Ptr r.m.gen)[0]:load "acquire" ~= generation then

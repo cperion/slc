@@ -47,8 +47,7 @@ os.execute('mkdir -p ' .. TMP)
 -- the runtime as the embedding binary carries it (a prebuilt archive), or the
 -- sources in a development tree
 local RT = os.getenv('SLC_RT') and ('%q'):format(os.getenv('SLC_RT'))
-    or (require('slc.runtime_build').source() .. ' ' .. root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c '
-        .. root .. '/runtime/slc_io_posix.c ' .. root .. '/runtime/slc_io_poll.c')
+    or (require('slc.runtime_build').source() .. ' ' .. root .. '/runtime/slc_rt.c')
 
 local function sh(cmd)
     local p = io.popen('(' .. cmd .. ') 2>&1; echo "__rc=$?"')

@@ -50,6 +50,10 @@ function U:ct(t)
     elseif k == 'unit' then d = C.VOID
     elseif k == 'cstr' then d = C.CHARP
     elseif k == 'ref' or k == 'ptr' then d = C.ptr(self:ct(t.elem))
+    elseif k == 'fn' then
+        local ps = {}
+        for i, p in ipairs(t.params) do ps[i] = self:ct(p) end
+        d = C.ptr(C.fntype(self:ct(t.ret), ps))
     elseif k == 'atomic' then d = self:ct(t.elem)
     elseif k == 'opaque' then
         d = self.scope:find('types', t.cname)
@@ -100,6 +104,19 @@ function U:ct(t)
     end
     if not d then fail('no C type for ' .. tostring(t.display or k)) end
     self.cts[t] = d
+    return d
+end
+
+-- the descriptor of a native global in this unit
+function U:global(g)
+    self.globals = self.globals or {}
+    local d = self.globals[g]
+    if not d then
+        d = { name = S.global_cname(g), t = self:ct(g.T),
+              kind = g.imported and 'imported' or g.exported and 'exported' or 'internal',
+              tls = g.tls, init = g.init }
+        self.globals[g] = d
+    end
     return d
 end
 
@@ -371,6 +388,15 @@ function Fn:expr(e)
         return C.val(t, J.gcc_jit_context_new_struct_constructor(ctx.c, nil, ctx:jt(t), 1, fs, vs))
     elseif op == 'null' then
         return ctx:zero(u:ct(e.T))
+    elseif op == 'gaddr' then
+        return ctx:addr(ctx:global(u:global(e.global)))
+    elseif op == 'fnaddr' then
+        return ctx:addr({ fn = u.fns[e.fn] })
+    elseif op == 'calli' then
+        local args = {}
+        for _, a in ipairs(e.args) do args[#args + 1] = self:expr(a) end
+        if e.a.op == 'fnaddr' then return ctx:call({ fn = u.fns[e.a.fn] }, args) end
+        return ctx:call(self:expr(e.a), args)
     elseif op == 'tagname' then
         for _, a in ipairs(e.sum.alts) do
             if a.name == e.alt then return ctx:int_const(C.UINT, a.tag) end

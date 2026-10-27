@@ -1145,7 +1145,7 @@ local function compare(op, a, b)
         if op == 'ne' then return unary('not', equal) end
         return equal
     end
-    if t.kind == 'ptr' and (op == 'eq' or op == 'ne') then
+    if (t.kind == 'ptr' or t.kind == 'fn') and (op == 'eq' or op == 'ne') then
         local av = value_of(a, t, 'comparison')
         local bv = value_of(b, t, 'comparison')
         return dyn(types.Bool, { op = 'cmp', o = op, a = ex(av), b = ex(bv), T = types.Bool })
@@ -1418,6 +1418,10 @@ Type.__call = function(t, x)
     if t.kind == 'cstr' then
         if type(x) == 'string' then return known(t, x) end
         if is_staged(x) and x.T == t then return value_of(x, t) end
+        if is_staged(x) then
+            local v = value_of(x, nil, 'CString(...)')
+            if v.T.kind == 'ptr' then return dyn(t, { op = 'conv', a = ex(v), T = t }) end
+        end
         fail('CString(...) takes a Lua string, got ' .. describe(x), 2)
     end
     if t.kind == 'opaque' then
@@ -1459,7 +1463,9 @@ Type.__call = function(t, x)
     end
     if t.kind == 'ptr' then
         local v = is_staged(x) and value_of(x, nil, t.display .. '(...)')
-        if not v or v.T.kind ~= 'ptr' then
+        -- a C string is a pointer to characters: converting between the two
+        -- reinterprets an address, never an integer
+        if not v or (v.T.kind ~= 'ptr' and v.T.kind ~= 'cstr') then
             fail(t.display .. '(...) requires a pointer; integer-pointer conversion is not offered', 2)
         end
         if v.T == t then return v end
@@ -3998,13 +4004,123 @@ local function match(s, handlers)
 end
 S.match = match
 
+-- Fn values: C function pointers --------------------------------------------------------
+-- fnptr(word) materializes the word as a residual function and is its address.
+-- Calling an Fn value is a call through it; when the value is a known function
+-- the call is direct. A function whose address is taken starts its data stacks
+-- at 0, as an export does.
+
+function S.fnptr(w)
+    if not is_word(w) then fail('fnptr(word) takes a native word, got ' .. describe(w), 2) end
+    local args, ptypes = {}, {}
+    for i, p in ipairs(w.params) do
+        if w.supplied[i] then
+            args[i] = w.supplied[i]
+        elseif p.static then
+            fail(("fnptr: compile-time parameter '%s' must be supplied first"):format(p.name), 2)
+        else
+            if p.T.kind == 'ref' then
+                args[i] = setmetatable({ T = p.T, k = 'ref', place = { pk = 'deref' } }, V)
+            else
+                args[i] = dyn(p.T, { op = 'param', name = p.name, T = p.T })
+            end
+            ptypes[#ptypes + 1] = p.T
+        end
+    end
+    local key = spec_key(w, args)
+    local fn = module.by_key[key] or build_function(w, args, key)
+    fn.addr_taken = true
+    local ft = types.fn(ptypes, w.ret)
+    return dyn(ft, { op = 'fnaddr', fn = fn, T = ft })
+end
+
+-- null(Fn(...)) is the null function pointer
+local function call_fn(x, ...)
+    local ft = x.T
+    local n = select('#', ...)
+    if n ~= #ft.params then
+        fail(('%s takes %d arguments, got %d'):format(ft.display, #ft.params, n), 3)
+    end
+    local b = cur()
+    local cargs = {}
+    for i, t in ipairs(ft.params) do
+        cargs[i] = b:call_arg(coerce((select(i, ...)), t, ('argument %d of %s'):format(i, ft.display)))
+    end
+    local call = { op = 'calli', a = ex(x), args = cargs, T = ft.ret }
+    b:bump_checked()
+    if ft.ret.kind == 'unit' then
+        b:emit { op = 'expr', e = call, what = 'a call through a function pointer' }
+        return nil
+    end
+    local t = b:new_temp(ft.ret)
+    b:emit { op = 'let', place = t, e = call, what = 'a call through a function pointer' }
+    return dyn(ft.ret, read_expr(t))
+end
+
 V.__call = function(x, ...)
     if x.T.kind == 'sum' then return match(x, ...) end
+    if x.T.kind == 'fn' then return call_fn(x, ...) end
     fail(('a %s value is not callable'):format(x.T.display), 2)
 end
 P.__call = function(x, ...)
     if x.T.kind == 'sum' then return match(x, ...) end
+    if x.T.kind == 'fn' then return call_fn(cur():read(x), ...) end
     fail(('a %s place is not callable'):format(x.T.display), 2)
+end
+
+-- Native globals ---------------------------------------------------------------------------
+-- global(T, { name, thread_local, exported, imported, init }) is static storage
+-- for the whole program; `imported` names an object another unit defines (a
+-- header declares it). It is the Ptr T of a C object: g[0] (or g.field) is the place,
+-- so reads and writes are memory operations in source order. `exported` gives the C
+-- object external linkage under `name` (a header may declare it); `init` is a
+-- scalar the object starts with, otherwise it is zero.
+
+function S.global(t, opts)
+    if not is_type(t) then fail('global(T, opts) takes a type, got ' .. describe(t), 2) end
+    if t.resizable or t.kind == 'unit' or t.kind == 'opaque' or t.kind == 'ref' or t.kind == 'chan'
+        or rawget(t, 'slice_elem') then
+        fail('global: a ' .. t.display .. ' cannot be static storage', 2)
+    end
+    opts = opts or {}
+    if (opts.exported or opts.imported) and not opts.name then fail('global: an exported or imported global needs a name', 2) end
+    if opts.exported and opts.imported then fail('global: a global is exported or imported, not both', 2) end
+    if opts.init ~= nil and not (types.is_scalar(t) and type(opts.init) == 'number') then
+        fail('global: init is a number for an integer or float global', 2)
+    end
+    local g = { T = t, name = opts.name or 'global', exported = opts.exported and true or nil,
+                imported = opts.imported and true or nil, header = opts.header,
+                tls = opts.thread_local and true or nil, init = opts.init }
+    local pt = types.ptr(t)
+    return dyn(pt, { op = 'gaddr', global = g, T = pt })
+end
+
+local global_names = setmetatable({}, { __mode = 'k' })
+-- the C name of a global in the module being emitted
+function S.global_cname(g)
+    local names = global_names[g]
+    if not names then names = setmetatable({}, { __mode = 'k' }); global_names[g] = names end
+    local name = names[module]
+    if not name then
+        if g.exported or g.imported then
+            -- the same C object may be defined once and declared by several users
+            local seen = module.global_names and module.global_names[g.name]
+            if seen == nil then
+                if module.names[g.name] then error('global ' .. g.name .. ': the C name is already in use', 0) end
+                module.names[g.name] = true
+                module.global_names = module.global_names or {}
+                module.global_names[g.name] = { exported = g.exported }
+            elseif g.exported then
+                if seen.exported then error('global ' .. g.name .. ': defined twice', 0) end
+                seen.exported = true
+            end
+            name = g.name
+        else
+            name = unique(module.names, g.name)
+        end
+        names[module] = name
+    end
+    return name
 end
 
 -- raw pointers -------------------------------------------------------------------------------------
@@ -4089,6 +4205,7 @@ end
 
 function S.null(t)
     if not is_type(t) then fail('null(T) takes a type', 2) end
+    if t.kind == 'fn' then return dyn(t, { op = 'null', T = t }) end
     local pt = types.ptr(t)
     return dyn(pt, { op = 'null', T = pt })
 end

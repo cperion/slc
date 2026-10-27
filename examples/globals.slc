@@ -1,0 +1,60 @@
+-- Native globals (static and thread-local storage) and function values.
+-- A global is the Ptr of a C object: g[0] is the place.
+local hits = global(U32, { name = 'hits' })
+local per_thread = global(U32, { name = 'per_thread', thread_local = true })
+local seed = global(U32, { name = 'seed', init = 100 })
+
+local bump = do(n: U32): U32
+    hits[0] = hits[0] + n
+    return hits[0]
+end
+export bump
+
+local bump_local = do(n: U32): U32
+    per_thread[0] = per_thread[0] + n
+    return per_thread[0]
+end
+export bump_local
+
+local read_seed = do(): U32 = seed[0]
+export read_seed
+
+-- a global of a struct type: fields are places through the pointer
+local Counter = struct { total: U32, calls: U32 }
+local counter = global(Counter, { name = 'counter' })
+local record = do(n: U32): U32
+    counter.total = counter.total + n
+    counter.calls = counter.calls + 1
+    return counter.total * 1000 + counter.calls
+end
+export record
+
+-- Fn(U32): U32 is a C function pointer
+local Op = Fn({ U32 }, U32)
+local double = do(x: U32): U32 = x * 2
+local square = do(x: U32): U32 = x * x
+
+local apply = do(f: Op, x: U32): U32 = f x
+export apply
+
+local pick = do(which: U32): Op
+    if which == 0 then return fnptr double end
+    if which == 1 then return fnptr square end
+    return null Op
+end
+export pick
+
+-- a table of operations in a global, filled once, called through the table
+local Table = struct { first: Op, second: Op }
+local table_of = global(Table, { name = 'table_of' })
+local fill = do(): Unit
+    table_of.first = fnptr double
+    table_of.second = fnptr square
+end
+export fill
+
+local through = do(which: U32, x: U32): U32
+    if which == 0 then return table_of.first x end
+    return table_of.second x
+end
+export through

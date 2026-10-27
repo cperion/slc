@@ -1,0 +1,53 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Starting an I/O backend: its state, its poller thread and the entry the
+-- scheduler submits operations through. The backend's own loop, queues and
+-- policy are SLC words; this only makes the thread.
+return function(t)
+    local State, Mutex, Op = t.State, t.Mutex, t.Op
+    local Void = opaque "void"
+    local Once = cstruct("pthread_once_t", "<pthread.h>", {})
+    local Thread = cstruct("pthread_t", "<pthread.h>", {})
+    local ThreadAttr = cstruct("pthread_attr_t", "<pthread.h>", {})
+    local MutexAttr = opaque "pthread_mutexattr_t"
+    local posix = "<pthread.h>"
+    local io = '"slc_io.h"'
+    local mutex_init = extern("pthread_mutex_init",
+        { Ptr Mutex, Ptr MutexAttr }, I32, { header = posix })
+    local pthread_once = extern("pthread_once", { Ptr Once, Fn({}, Unit) }, I32, { header = posix })
+    local pthread_create = extern("pthread_create",
+        { Ptr Thread, Ptr ThreadAttr, Fn({ Ptr Void }, Ptr Void), Ptr Void },
+        I32, { header = posix })
+    local attr_init = extern("pthread_attr_init", { Ptr ThreadAttr }, I32, { header = posix })
+    local attr_detach = extern("pthread_attr_setdetachstate",
+        { Ptr ThreadAttr, I32 }, I32, { header = posix })
+    local attr_destroy = extern("pthread_attr_destroy", { Ptr ThreadAttr }, I32, { header = posix })
+    local detached = cconst("PTHREAD_CREATE_DETACHED", I32, posix)
+    local trap = extern("slc_trap", { CString }, Unit, { header = io })
+    local state = global State
+    local once = global Once
+    local poller = do(arg: Ptr Void): Ptr Void
+        t.run((Ptr State)(arg))
+        return null Void
+    end
+    local poller_fn = fnptr poller
+    local start = do(): Unit
+        local thread = Thread {}
+        local attr = ThreadAttr {}
+        mutex_init(Ptr state.mu, null MutexAttr)
+        t.prepare state
+        attr_init(Ptr attr)
+        attr_detach(Ptr attr, detached)
+        if pthread_create(Ptr thread, Ptr attr, poller_fn, (Ptr Void)(state)) ~= 0 then
+            trap t.failure
+        end
+        attr_destroy(Ptr attr)
+    end
+    local start_fn = fnptr start
+    local slc_io_backend = do(): CString = t.name
+    local slc_backend_submit = do(op: Ptr Op): Unit
+        pthread_once(once, start_fn)
+        t.submit(state, op)
+    end
+    export slc_io_backend
+    export slc_backend_submit
+end

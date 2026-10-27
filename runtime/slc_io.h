@@ -2,7 +2,7 @@
 /* slc runtime: the interface between the scheduler and an I/O backend.
  *
  * A backend file (slc_io_poll.c, slc_io_uring.c or slc_io_kqueue.c) is linked
- * with slc_tasks.c. The scheduler hands it operation records; the backend
+ * with the generated runtime unit. The scheduler hands it operation records; the backend
  * calls slc_io_complete exactly once per record, from any thread. */
 #ifndef SLC_IO_H
 #define SLC_IO_H
@@ -23,8 +23,5 @@ uint64_t slc_now_ns(void);
 /* Submission/completion accounting is synchronized by the scheduler. */
 void slc_io_publish(slc_op *op);
 void slc_io_notify(slc_task *task);
-/* Internal mutable-pointer entries behind the public const-pointer ABI. */
-int32_t slc_io_write_bytes(slc_task *, slc_op *, int32_t, void *, uint32_t, int64_t, uint64_t, int64_t *, const char *);
-int32_t slc_io_open_path(slc_task *, slc_op *, void *, int32_t, uint32_t, int64_t *, const char *);
 /* deadline of an operation: absolute monotonic nanoseconds, or 0 */
 #endif

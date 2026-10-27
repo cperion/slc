@@ -25,12 +25,24 @@ local function ctype(t)
     end
     if t.kind == 'ref' then return ctype(t.elem) .. ' *' end
     if t.kind == 'ptr' then return ctype(t.elem) .. ' *' end
+    if t.kind == 'fn' then
+        local ps = {}
+        for i, p in ipairs(t.params) do ps[i] = ctype(p) end
+        if #ps == 0 then ps[1] = 'void' end
+        return (t.ret.kind == 'unit' and 'void' or ctype(t.ret)) .. ' (*)(' .. table.concat(ps, ', ') .. ')'
+    end
     if t.ctype then return t.ctype() end
     return t.cname
 end
 G.ctype = ctype
 
 local function decl_of(t, name)
+    if t.kind == 'fn' then
+        local ps = {}
+        for i, p in ipairs(t.params) do ps[i] = ctype(p) end
+        if #ps == 0 then ps[1] = 'void' end
+        return (t.ret.kind == 'unit' and 'void' or ctype(t.ret)) .. ' (*' .. name .. ')(' .. table.concat(ps, ', ') .. ')'
+    end
     local ct = ctype(t)
     if ct:sub(-1) == '*' then return ct .. name end
     return ct .. ' ' .. name
@@ -593,7 +605,8 @@ function Fn:pname(p)
         if p.pk == 'temp' then base = rawget(p, 'hint') or 't' end
         n = S.sanitize(base)
         local cand, k = n, 1
-        while self.used[cand] do k = k + 1; cand = n .. k end
+        -- a local must not hide a function, type or global it could call
+        while self.used[cand] or S.module.names[cand] do k = k + 1; cand = n .. k end
         self.used[cand] = true
         if self.task_mode then
             -- a task's locals live in its frame
@@ -612,10 +625,16 @@ function Fn:place(p)
         return self.task_mode and ('f->' .. p.name) or p.name, self.task_mode and PREC.postfix or PREC.atom
     end
     if p.pk == 'index' then
-        return self:expr(rawp(p, 'base'), PREC.postfix) .. '[' .. self:expr(rawp(p, 'idx'), 0) .. ']', PREC.postfix
+        local base, idx = rawp(p, 'base'), rawp(p, 'idx')
+        -- element 0 of a global is the object itself
+        if base.op == 'gaddr' and idx.op == 'const' and idx.v == 0 then
+            return S.global_cname(base.global), PREC.atom
+        end
+        return self:expr(base, PREC.postfix) .. '[' .. self:expr(idx, 0) .. ']', PREC.postfix
     end
     if p.pk == 'deref' then
         local ptr = rawp(p, 'ptr')
+        if ptr.op == 'gaddr' then return S.global_cname(ptr.global), PREC.atom end
         local s = self:expr(ptr, PREC.unary)
         return '*' .. s, PREC.unary
     end
@@ -623,7 +642,9 @@ function Fn:place(p)
         local parent = rawp(p, 'parent')
         local member = G.cfield(parent.T, rawp(p, 'fname'))
         if parent.pk == 'deref' then
-            return self:expr(rawp(parent, 'ptr'), PREC.postfix) .. '->' .. member, PREC.postfix
+            local ptr = rawp(parent, 'ptr')
+            if ptr.op == 'gaddr' then return S.global_cname(ptr.global) .. '.' .. member, PREC.postfix end
+            return self:expr(ptr, PREC.postfix) .. '->' .. member, PREC.postfix
         end
         local s = self:place_text(parent, PREC.postfix)
         return s .. '.' .. member, PREC.postfix
@@ -748,6 +769,15 @@ function Fn:expr(e, need)
         return paren(s .. ' }', PREC.postfix, need)
     elseif op == 'null' then
         return 'NULL'
+    elseif op == 'gaddr' then
+        return paren('&' .. S.global_cname(e.global), PREC.unary, need)
+    elseif op == 'fnaddr' then
+        return e.fn.cname
+    elseif op == 'calli' then
+        local args = {}
+        for i, a in ipairs(e.args) do args[i] = self:expr(a, 2) end
+        local callee = e.a.op == 'fnaddr' and e.a.fn.cname or ('(*' .. self:expr(e.a, PREC.unary) .. ')')
+        return callee .. '(' .. table.concat(args, ', ') .. ')'
     elseif op == 'tagname' then
         return ctype(e.sum) .. '_' .. e.alt
     elseif op == 'call' then
@@ -1161,6 +1191,15 @@ local function signature(fn)
     for _, p in ipairs(fn.params) do ps[#ps + 1] = decl_of(p.T, p.name) end
     if fn.gs then table.insert(ps, 1, 'size_t gs_sp') end
     if #ps == 0 then ps[1] = 'void' end
+    if fn.ret.kind == 'fn' then
+        -- a function returning a function pointer: ret (*name(params))(fparams)
+        local ft = fn.ret
+        local fps = {}
+        for i, p in ipairs(ft.params) do fps[i] = ctype(p) end
+        if #fps == 0 then fps[1] = 'void' end
+        return (fn.exported and '' or 'static ') .. (ft.ret.kind == 'unit' and 'void' or ctype(ft.ret))
+            .. ' (*' .. fn.cname .. '(' .. table.concat(ps, ', ') .. '))(' .. table.concat(fps, ', ') .. ')'
+    end
     local ret = fn.ret.kind == 'unit' and 'void' or ctype(fn.ret)
     local head = (fn.exported and '' or 'static ') .. ret
     if ret:sub(-1) ~= '*' then head = head .. ' ' end
@@ -1232,7 +1271,7 @@ local function plan_stacks(fns)
     end
     for _, fn in ipairs(fns) do
         fn.needs_gs = need[fn]
-        fn.gs = need[fn] and not fn.exported
+        fn.gs = need[fn] and not fn.exported and not fn.addr_taken
     end
     -- a call inside a recursive cycle must not move the base: each round would
     -- keep more data stacks live
@@ -1370,6 +1409,14 @@ local function emit_function(fn, out)
         end
     end
     f:block(fn.body)
+    -- a value-returning function that ends in a loop with no way out never
+    -- reaches its end; say so for compilers that do not see it (a worker's loop)
+    local last = fn.body[#fn.body]
+    if fn.ret.kind ~= 'unit' and last and last.op == 'loop' then
+        local leaves = false
+        walk_block(last.body, function(st) if st.op == 'ret' or st.op == 'break' then leaves = true end end)
+        if not leaves then f:line('__builtin_unreachable();') end
+    end
     out[#out + 1] = '}'
 end
 
@@ -1448,7 +1495,7 @@ local function reachable(mod)
         walk_block(fn.body, function(st)
             if st.task then visit(st.task) end
         end, function(e)
-            if e.op == 'call' and e.fn then visit(e.fn) end
+            if (e.op == 'call' or e.op == 'fnaddr') and e.fn then visit(e.fn) end
         end)
         order[#order + 1] = fn
     end
@@ -1506,12 +1553,35 @@ local function collect_structs(fns)
 end
 G.collect_structs = collect_structs
 
+-- the C definition of a native global
+function G.global_decl(g)
+    local name = S.global_cname(g)
+    local text = (g.exported and '' or 'static ') .. (g.tls and '__thread ' or '') .. decl_of(g.T, name)
+    if g.init ~= nil then text = text .. ' = ' .. fold.c_literal(g.T, g.init) end
+    return text .. ';'
+end
+
 -- the residual program as every backend sees it: reachable functions, cleaned
 -- up, with data stacks planned, given back at every exit, and a yield point in
 -- every loop round of a task. Done once per module, whichever backends run.
 function G.prepare(mod)
     local fns = reachable(mod)
     if mod.prepared and #fns == mod.prepared_n then return fns end
+    -- A parameter hides a function of the same name in C. A function nobody
+    -- exports can be renamed, so no parameter ever hides one it could call.
+    local params = {}
+    for _, fn in ipairs(fns) do
+        for _, p in ipairs(fn.params) do params[p.name] = true end
+    end
+    for _, fn in ipairs(fns) do
+        if not fn.exported and params[fn.cname] then
+            local name = fn.cname .. '_fn'
+            local n = 1
+            while mod.names[name] or params[name] do n = n + 1; name = fn.cname .. '_fn' .. n end
+            mod.names[name] = true
+            fn.cname = name
+        end
+    end
     -- cleanup first: it can only remove uses
     for _, fn in ipairs(fns) do G.cleanup(fn) end
     plan_stacks(fns)
@@ -1576,6 +1646,11 @@ function G.emit(mod, opts)
             if e.op == 'call' and e.ext and e.ext.header and not externs[e.ext] then
                 externs[e.ext] = true
                 externs[#externs + 1] = e.ext
+            end
+            -- an imported global brings the header that declares it
+            if e.op == 'gaddr' and e.global.imported and e.global.header and not externs[e.global] then
+                externs[e.global] = true
+                externs[#externs + 1] = e.global
             end
         end)
     end
@@ -1655,6 +1730,25 @@ function G.emit(mod, opts)
         end
     end
     if protos then out[#out + 1] = '' end
+
+    -- native globals (static storage), in first-use order
+    local globals, seen_globals = {}, {}
+    for _, fn in ipairs(fns) do
+        walk_block(fn.body, nil, function(e)
+            if e.op == 'gaddr' and not seen_globals[e.global] then
+                seen_globals[e.global] = true
+                globals[#globals + 1] = e.global
+            end
+        end)
+    end
+    local defined = 0
+    for _, g in ipairs(globals) do
+        if not g.imported then
+            out[#out + 1] = G.global_decl(g)
+            defined = defined + 1
+        end
+    end
+    if defined > 0 then out[#out + 1] = '' end
 
     -- prototypes for internal functions (recursion, any order)
     local any_static = false

@@ -40,6 +40,7 @@ The resolutions, in the order they matter:
 25. **Text (§39)**: `Str` views, `Text` built in place with formatting decided while compiling, `Chars(n)` values; the text words are slc, so known text folds and known needles unroll. Range facts now include lower bounds by constants, and an arm that cannot fall through lends its facts to what follows. Field and method access in typed bodies no longer collides with the evaluator's own keys (a struct field named `name` used to read the local's name).
 
 26. **Library-defined types (§41)**: a type's layout is a `struct`; what `x.f`, `x[k]`, a conversion, an operator or a comparison means on it is a hook, a Lua function or native word run while specializing. The built-in kinds are served by the same hooks, so a library can define a fixed-point number, a ring buffer or a struct-of-arrays with no compiler change.
+28. **Native globals and function values (§42)**: `global(T, opts)` is static (or thread-local) storage reached as a `Ptr T`; `Fn(params): ret` is a C function pointer and `fnptr(word)` materializes a word as one. With them the whole runtime is SLC: the scheduler, tasks, workers, registries, timers, blocking threads, entropy and the I/O bootstraps compile with the program's other SLC words; C keeps `setjmp` traps, address location in a data stack and the io_uring kernel ABI. The data-stack set and the hash key are read in place by programs.
 27. **Field shorthand (§3.3)**: `.name` in a table constructor is `name = name`.
 
 ---
@@ -2282,6 +2283,8 @@ Pointers follow Let's `syntax.md` §8.5 and slices its §8.4. **`Ptr` is the edg
 
 There is no other arithmetic, no ordering and no conversion to or from integers; `p[i]` is the only arithmetic, so one thing has one spelling. `Ref(p)` is rejected: an unchecked address must not become a checked borrow. Pointers may be stored in structs, returned and passed freely.
 
+A `CString` and a raw pointer convert to each other the same way: `(Ptr U8)(s)` reads a C string's address as a byte pointer and `CString(p)` reads a byte pointer's address as text, where a foreign interface needs one for the other. No integer takes part.
+
 `Ptr(T)(p)` accepts only an existing `Ptr U`. It preserves the address and does not copy or reinterpret a value, check alignment or bounds, transfer ownership, extend a lifetime, or create a borrow. The programmer must satisfy the foreign ABI, alignment and aliasing rules before dereferencing the result. Converting back to the original pointer type preserves its address; null stays null. Pointer conversions are never implicit. For example, a POSIX `Ptr sockaddr_in` can explicitly become a `Ptr sockaddr` for `connect`, and a raw operation buffer can explicitly recover its declared slot-pointer type. Both backends lower this through the ordinary prepared-IR conversion operation.
 
 ```lua
@@ -3260,7 +3263,7 @@ The `failed` arms the program left empty disappeared; the match is the branch on
 
 ## 36.8 The runtime
 
-The compiler emits calls to a small C interface; everything system-specific sits behind it.
+The compiler emits calls to the runtime's exported words; everything system-specific sits behind them. The runtime is SLC (`runtime/*.slc`, §42), generated to C once per I/O backend; C holds only what C alone expresses (§42.3).
 
 * **Workers.** N threads, one per core by default (`SLC_WORKERS` overrides), run runnable tasks from a run queue: a task's step runs until it returns `WAIT`, `YIELD` or `DONE`. Plain threads blocked in a wait run tasks too. One locked queue; work stealing can come later without changing anything above it.
 * **Handoffs stay on one thread.** A task woken by the task running on a thread runs there next, Go's `runnext`: a producer and its consumer pass values without crossing threads.
@@ -3268,7 +3271,7 @@ The compiler emits calls to a small C interface; everything system-specific sits
 * **Channels and pools.** A lock and queues of operation records each, for waiting senders, receivers and takers. A waiting party is an operation record, and waking it means scheduling its task. Only idle threads sleep in the operating system, each on its own condition variable, so a wake-up reaches exactly the thread it is for.
 * **Timers.** A heap of deadlines; idle threads wait until the nearest one.
 * **Blocking threads.** A pool that grows on demand runs `blocking` blocks and a readiness backend's file work; a blocking job counts as outstanding for deadlock detection.
-* **I/O backends.** One file per system: `slc_io_poll.c`, `slc_io_uring.c` (raw system calls, no liburing) and `slc_io_kqueue.c`, over shared POSIX pieces in `slc_io_posix.c`. Each has one poller thread; a completion makes its task runnable. Outstanding I/O counts for deadlock detection, so a task waiting on I/O is never reported as deadlocked.
+* **I/O backends.** One per system: poll (`runtime/poll.slc`) and kqueue (`runtime/kqueue.slc`) are SLC, over shared POSIX words in `runtime/posix.slc`; io_uring is SLC policy over `slc_io_uring.c` (raw system calls, no liburing, because the kernel takes addresses as integers). Each has one poller thread; a completion makes its task runnable. Outstanding I/O counts for deadlock detection, so a task waiting on I/O is never reported as deadlocked.
 
 ## 36.9 Deadlocks, determinism, failure
 
@@ -3721,6 +3724,90 @@ view lifetime; a library view is a `Slice` or `Str`.
 Implemented in `slc/stage.lua`; see [type-hooks.md](type-hooks.md) and the
 examples `examples/user_types.slc` and `examples/ring.slc`.
 
+# 42. Native globals and function values
+
+Two capabilities that the runtime needed and that any native program may use.
+
+## 42.1 Globals
+
+`global(T, opts)` is static storage for the whole program. It is the `Ptr T` of a C object, so `g[0]` is its place (and `g.field` a field of a record), read and written as memory in source order, never kept pending:
+
+```lua
+local hits = global(U32, { name = "hits" })
+local per_thread = global(U32, { name = "per_thread", thread_local = true })
+local seed = global(U32, { name = "seed", init = 100 })
+
+local bump = do(n: U32): U32
+    hits[0] = hits[0] + n
+    return hits[0]
+end
+```
+
+```c
+static uint32_t hits;
+static __thread uint32_t per_thread;
+static uint32_t seed = 100u;
+
+uint32_t bump(uint32_t n) {
+    hits = hits + n;
+    return hits;
+}
+```
+
+| Option | Meaning |
+|---|---|
+| `name` | the C name (made unique at file scope); required for `exported` and `imported` |
+| `thread_local` | one object per thread (`__thread`) |
+| `init` | a number the object starts with; otherwise it is zero |
+| `exported` | external linkage: another unit, or a header, can name it |
+| `imported`, `header` | defined elsewhere and declared by `header`, which the program includes |
+
+A global cannot be Unit, opaque, a reference, a channel, resizable storage or a view. Both backends emit it from the same IR (`gccjit` creates an internal, exported or imported global, with the TLS model for `thread_local`). An imported and an exported global of one name are one object.
+
+## 42.2 Function values
+
+`Fn(params): ret` is a C function pointer; `Fn({ U32 }, U32)` takes and returns a `U32`. `fnptr(word)` materializes a native word as a residual function with its declared parameter types and is that function's address. Compile-time parameters are supplied first, by partial application. Calling an `Fn` value calls through it; when the value is a known function the call is direct. `null(Fn(...))` is the null pointer, and `==` and `~=` compare addresses. An `Fn` can be a parameter, result, field, local, global or extern argument (`pthread_create` takes one):
+
+```lua
+local Op = Fn({ U32 }, U32)
+local double = do(x: U32): U32 = x * 2
+local square = do(x: U32): U32 = x * x
+
+local pick = do(which: U32): Op
+    if which == 0 then return fnptr(double) end
+    if which == 1 then return fnptr(square) end
+    return null(Op)
+end
+```
+
+```c
+uint32_t (*pick(uint32_t which))(uint32_t) {
+    if (which == 0u) {
+        return double_;
+    }
+    if (which == 1u) {
+        return square;
+    }
+    return NULL;
+}
+```
+
+A function whose address is taken starts its data stacks at index 0, as an export does, so it takes no hidden base parameter.
+
+## 42.3 The runtime in SLC
+
+With globals and function values the runtime's remaining C is SLC. [process.slc](../runtime/process.slc) holds the data-stack set a thread uses (thread-local `slc_own_stacks` and `slc_cur_stacks`), store tokens and the hash key; [tasks.slc](../runtime/tasks.slc) holds workers, plain-thread waits, scopes, the channel and pool registries, timers and blocking threads, with `pthread_create` taking `fnptr` of the thread bodies; [backend.slc](../runtime/backend.slc) starts the poll and kqueue pollers. Mutexes are zero-initialized objects initialized once through `pthread_once`.
+
+Because programs and runtime are SLC, a program reads some runtime state in place. `lib/stacks.slc` reads the thread-local stack set as imported globals, so a data-stack access is two loads instead of a call; `lib/hash.slc` reads the process hash key the same way once it exists, taking the out-of-line path only on first use.
+
+What stays C, and why:
+
+| File | Why |
+|---|---|
+| `runtime/slc_rt.c` | `slc_trap` and `slc_try` use `setjmp`/`longjmp`, a function that returns twice; `slc_gs_pin` locates a pointer in a data stack by address comparison, and SLC has no pointer subtraction |
+| `runtime/slc_io_uring.c` | the kernel takes addresses as integers (`sqe->addr`, `user_data`); SLC has no integer-pointer conversions |
+| `slc_rt.h` | the shared ABI: record layouts, constants, prototypes and inline accessors such as `slc_slot_at` |
+
 # Appendix A. The prototype
 
 The prototype (`slc`) implements this document except where marked. It needs LuaJIT, LPeg and a C99 compiler; the second backend (§38) also needs libgccjit.
@@ -3753,12 +3840,13 @@ luajit tests/run.lua                  compile, check and run every example, on b
 | What only a header knows: constants, layouts, variables | `slc/probe.lua` |
 | Run it now: runtime library, `native`, `slc.load` | `slc/native.lua` |
 | Text: `Str`, `Text`, `Chars(n)`; the text words | `slc/strings.lua`, `lib/str.slc` |
-| Runtime: data stacks, traps, tokens, slice checks | `runtime/slc_rt.h`, `runtime/slc_rt.c` |
-| Runtime: scheduler, tasks, channels, pools, timers | `runtime/slc_tasks.c` |
-| Runtime: I/O backends (link one) | `runtime/slc_io_poll.c`, `runtime/slc_io_uring.c`, `runtime/slc_io_kqueue.c`, over `runtime/slc_io_posix.c` |
+| Runtime: ABI, record layouts, inline slot checks | `runtime/slc_rt.h`, `runtime/slc_io.h` |
+| Runtime: traps and data-stack source location (C) | `runtime/slc_rt.c` |
+| Runtime: scheduler, tasks, channels, pools, timers, process state | `runtime/scheduler.slc`, `runtime/tasks.slc`, `runtime/protocol.slc`, `runtime/lifecycle.slc`, `runtime/bookkeeping.slc`, `runtime/process.slc` |
+| Runtime: I/O backends (selected by `SLC_IO`) | `runtime/poll.slc`, `runtime/kqueue.slc`, `runtime/uring.slc` (with `runtime/slc_io_uring.c`), over `runtime/posix.slc`, `runtime/io.slc`, `runtime/backend.slc` |
 | Bundled `require "slc.*"` libraries | `lib/` (`libc.slc`, `posix.slc`, `io.slc`) |
 | Driver | `slc.lua` |
 
-Generated C includes `slc_rt.h` when it needs the runtime; link `runtime/slc_rt.c`, and for tasks `runtime/slc_tasks.c`, `runtime/slc_io_posix.c` and one backend with `-pthread` (kqueue on Linux: `-I/usr/include/kqueue -lkqueue`). The examples in `examples/` contain every program in this document; their harnesses in `tests/` link the generated C and check results (including against reference implementations, and under UBSan and ASan). `tests/errors.lua` holds programs that must be rejected, each with its expected diagnostic and line.
+Generated C includes `slc_rt.h` when it needs the runtime; link `runtime/slc_rt.c` and the generated runtime unit (`make runtime` prints its path; `SLC_IO` selects the backend), plus `runtime/slc_io_uring.c` for io_uring, with `-pthread` (kqueue on Linux: `-I/usr/include/kqueue -lkqueue`). The examples in `examples/` contain every program in this document; their harnesses in `tests/` link the generated C and check results (including against reference implementations, and under UBSan and ASan). `tests/errors.lua` holds programs that must be rejected, each with its expected diagnostic and line.
 
 Limits worth knowing: the inline fuel is 400 nested applications, the known-loop fuel 100 000 iterations, and a pending value may hold up to 24 expression nodes before it is stored.

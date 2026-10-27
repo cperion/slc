@@ -14,6 +14,15 @@ Runtime policy is ordinary SLC, built from [the runtime entry](scheduler.slc).
   composition, retries, socket setup and failure cleanup.
 - [Poll](poll.slc), [kqueue](kqueue.slc) and [io_uring](uring.slc): backend queue,
   deadline, submission and completion policy, including the event loops.
+- [Tasks](tasks.slc): workers, plain-thread waits, wake transitions, scopes, the
+  channel and pool registries, timers, blocking threads and the I/O accounting,
+  under the scheduler lock, with the thread bodies passed to `pthread_create` as
+  `fnptr` words. Its state is native globals (`global`, spec §42), thread-local
+  where it belongs to a thread.
+- [Process](process.slc): the data-stack set a thread uses (thread-local
+  `slc_own_stacks` and `slc_cur_stacks`), store tokens and the hash key.
+- [Backend](backend.slc): the poller thread and submission entry of the poll and
+  kqueue backends.
 - [Stacks](../lib/stacks.slc) and [storage layout](../lib/storage_layout.slc):
   data-stack growth/access/unwinding and Store, Grow, Id, Map and StrMap record
   access. The runtime entry exports both sets, so programs and the runtime share
@@ -26,18 +35,17 @@ claim-before-transfer, successful-path adoption, capture-next-before-wake and
 atomic memory orders are preserved. Protocol words can explicitly lock, unlock
 and wake; leaf queue/heap/transfer words rely on their caller's transaction.
 
-C retains native thread/function-pointer callbacks, the TLS stack-set selector,
-the const-pointer ABI adapters, lock/park/wakeup transitions, clock reads and
-registry synchronization envelopes. io_uring additionally retains Linux
-setup/mmap and integer-address kernel ABI marshalling. The language deliberately
-offers no integer-pointer conversion. Some scheduler state bookkeeping and
-deadlock diagnostics remain C and are still audit candidates; this is not a
-blanket exemption for runtime code.
+C retains `slc_trap` and `slc_try` (`setjmp`/`longjmp` return twice) and `slc_gs_pin`
+(SLC has no pointer subtraction), in [slc_rt.c](slc_rt.c). io_uring additionally
+retains Linux setup/mmap and integer-address kernel ABI marshalling in
+[slc_io_uring.c](slc_io_uring.c). The language deliberately offers no integer-pointer
+conversion. Nothing else in the runtime is C: locks, parking, wake-ups, clock reads,
+thread creation and the deadlock report are SLC calling libc and pthreads.
 
 `make runtime` compiles the selected policy and prints its generated C path.
 `SLC_IO=poll` (default), `uring` or `kqueue` selects the backend. External C builds
-must link that generated unit with the corresponding runtime C sources and
-`-Iruntime`, plus the selected platform's headers/libraries. Generated C enables
+must link that generated unit with `runtime/slc_rt.c` (and `runtime/slc_io_uring.c` for
+io_uring) and `-Iruntime -pthread`, plus the selected platform's headers/libraries. Generated C enables
 POSIX feature declarations before system headers. It lives under `SLC_CACHE` or
 `build/runtime`, never as checked-in source.
 

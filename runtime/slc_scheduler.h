@@ -82,8 +82,6 @@ void slc_retire_channel_sync(uint32_t index);
 void slc_retire_pool_sync(uint32_t index);
 void slc_wait_wake(slc_op *list, int32_t plain, int32_t selected, bool clear);
 void slc_scope_retire(slc_scope *scope);
-extern struct chan_rec *slc_channel_chunks[4096];
-extern struct pool_rec *slc_pool_chunks[4096];
 void slc_timer_register(slc_op *op);
 void slc_timer_cancel(slc_op *op);
 uint64_t slc_select_ticket(void);

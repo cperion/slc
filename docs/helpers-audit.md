@@ -119,10 +119,10 @@ a mechanism, not a policy the SLC modules could own today:
 
 | File | What it does | Why it is C |
 |---|---|---|
-| [slc_rt.c](../runtime/slc_rt.c) | thread-local data-stack sets, `slc_trap`/`slc_try` (setjmp), stack pinning, process entropy for map seeds | `__thread`, `setjmp`/`longjmp`, `getrandom` and `pthread_once` are the platform; bounds checks around them trap |
-| [slc_tasks.c](../runtime/slc_tasks.c) | task records, spawn, worker and plain-thread parking, wake transitions under the scheduler lock, timer heap driver, deadlock report, trap recovery | mutex/condvar transitions and the lock envelope around wake-ups; heap ordering, queue selection and random choice are [SLC](../runtime/scheduler.slc) |
-| [slc_io_posix.c](../runtime/slc_io_posix.c) | two callback adapters: hand a blocking job to `slc_run_blocking` | the operation policy and the `openat`/`read`/`write`/`close`/`accept`/`connect` composition are [posix.slc](../runtime/posix.slc) |
-| [slc_io_poll.c](../runtime/slc_io_poll.c), [slc_io_uring.c](../runtime/slc_io_uring.c), [slc_io_kqueue.c](../runtime/slc_io_kqueue.c) | thread bootstrap, ring/kevent mapping and the kernel ABI | syscalls, `mmap`, integer address ABI; the poll loop, submission and operation policy are SLC |
+| [slc_rt.c](../runtime/slc_rt.c) | `slc_trap`/`slc_try` (setjmp), data-stack source location, the const-pointer write adapter | `setjmp`/`longjmp` return twice; SLC has no pointer subtraction. Thread-local stack sets, store tokens and the hash key are [process.slc](../runtime/process.slc) |
+| ~~slc_tasks.c~~ | **Moved.** Task records, spawn, workers and plain-thread parking, wake transitions, scopes, registries, timers, blocking threads and the deadlock report are [tasks.slc](../runtime/tasks.slc) over native globals and `fnptr` thread bodies (spec §42). | None: mutex and condition-variable transitions are libc calls from SLC. |
+| ~~slc_io_posix.c~~ | **Moved.** The blocking-job adapters are words in [posix.slc](../runtime/posix.slc) handed to `slc_run_blocking` as `fnptr`. | None. |
+| ~~slc_io_poll.c~~, ~~slc_io_kqueue.c~~, [slc_io_uring.c](../runtime/slc_io_uring.c) | **Moved for poll and kqueue:** the poller thread and submission entry are [backend.slc](../runtime/backend.slc). io_uring keeps its C. | io_uring's kernel ABI takes addresses as integers (`sqe->addr`, `user_data`) and needs `mmap`; SLC has no integer-pointer conversions. The kqueue backend is built by the same words but was not run in this tree (no libkqueue). |
 | [slc_rt.h](../runtime/slc_rt.h) | record layouts, constants, prototypes, and `static inline` accessors (`slc_slot_at`, `slc_store`, `slc_grow`, ...) | the shared ABI both backends read; no policy algorithm lives there any more |
 | build-time [policy C](../slc/runtime_build.lua) | compile of `runtime/*.slc` into the policy object | it *is* the SLC modules |
 

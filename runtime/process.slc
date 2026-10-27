@@ -1,0 +1,73 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Per-process and per-thread runtime state: the data-stack set a thread uses,
+-- store tokens and the entropy behind map hashing. Only the system calls are foreign.
+return function(t)
+    local stacks = t.stacks
+    local Set = stacks.Set
+    local h = '"slc_rt.h"'
+    local trap = extern("slc_trap", { CString }, Unit, { header = h })
+    local Once = cstruct("pthread_once_t", "<pthread.h>", {})
+    local pthread_once = extern("pthread_once",
+        { Ptr Once, Fn({}, Unit) }, I32, { header = "<pthread.h>" })
+
+    -- the stack set in use on this thread: a task's while a worker runs it,
+    -- otherwise (null) the thread's own
+    local own = global(Set, { name = "slc_own_stacks", exported = true, thread_local = true })
+    local current = global(Ptr Set,
+        { name = "slc_cur_stacks", exported = true, thread_local = true })
+    local slc_stacks_use = do(set: Ptr Set): Unit
+        current[0] = set
+    end
+    local slc_stacks_current = do(): Ptr Set
+        if current[0] ~= null Set then return current[0] end
+        return own
+    end
+    export slc_stacks_use
+    export slc_stacks_current
+
+    -- a store token that no other store, live or dead, has had
+    local counter = global(U64, { init = 1 })
+    local slc_next_token = do(): U64
+        local token = atomic_ptr(counter)[0]:add(1, "relaxed")
+        if token == U64 0xffffffffffffffffULL then trap "store tokens exhausted" end
+        return token
+    end
+    export slc_next_token
+
+    -- Only process entropy lives here; key encoding and SipHash are SLC words.
+    local errno = cread("errno", I32, "<errno.h>")
+    local interrupted = cconst("EINTR", I32, "<errno.h>")
+    local getrandom = extern("getrandom", { Ptr U8, U64, U32 }, I64, { header = "<sys/random.h>" })
+    local key0 = global(U64, { name = "slc_hash_key0", exported = true })
+    local key1 = global(U64, { name = "slc_hash_key1", exported = true })
+    local ready = global(I32, { name = "slc_hash_ready", exported = true })
+    local failed = global I32
+    local once = global Once
+    local seed = do(): Unit
+        local words = Array(U64, 2) { 0, 0 }
+        local bytes = (Ptr U8)(Ptr words)
+        local at = U64 0
+        while at < 16 do
+            local n = getrandom(Ptr bytes[at], 16 - at, 0)
+            if n < 0 and errno() == interrupted then continue end
+            -- Do not trap inside pthread_once: a recoverable longjmp would leave
+            -- its initialization unfinished. Publish the failure, then report it.
+            if n <= 0 then failed[0] = 1; return end
+            at = at + U64 n
+        end
+        key0[0] = words[0]
+        key1[0] = words[1]
+        atomic_ptr(ready)[0]:store(1, "release")
+    end
+    local seed_fn = fnptr seed
+    local slc_hash_seed_word = do(index: U32): U64
+        if index > 1 then trap "Map: invalid hash seed word" end
+        if pthread_once(once, seed_fn) ~= 0 or failed[0] ~= 0 then
+            trap "Map: cannot obtain a random hash seed"
+        end
+        if index == 0 then return key0[0] end
+        return key1[0]
+    end
+    export slc_hash_seed_word
+    return { .own, .current }
+end

@@ -74,7 +74,9 @@ function N.runtime()
         return rt
     end
     local backend = os.getenv('SLC_IO') or 'poll'
-    local files = { 'slc_rt.c', 'slc_tasks.c', 'slc_io_posix.c', 'slc_io_' .. backend .. '.c' }
+    -- poll and kqueue are SLC; only io_uring has C (the kernel's integer ABI)
+    local files = { 'slc_rt.c' }
+    if backend == 'uring' then files[#files + 1] = 'slc_io_uring.c' end
     local text = {}
     for _, f in ipairs { 'slc_rt.h', 'slc_io.h', 'slc_io_posix.h', 'slc_scheduler.h', 'slc_io_poll.h', 'slc_io_kqueue.h', 'slc_io_uring.h' } do text[#text + 1] = read(RT .. '/' .. f) or '' end
     local srcs = {}

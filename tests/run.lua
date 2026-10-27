@@ -97,8 +97,7 @@ check = function(name, ok, detail)
 end
 
 local function sources(p, backend)
-    return p .. ' ' .. root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c '
-        .. root .. '/runtime/slc_io_posix.c ' .. root .. '/runtime/' .. (backend or 'slc_io_poll.c')
+    return p .. ' ' .. root .. '/runtime/slc_rt.c' .. (backend and (' ' .. root .. '/runtime/' .. backend) or '')
 end
 local rt_sources = sources(policy)
 
@@ -195,11 +194,12 @@ do
             elseif name == 'strmaps' or name == 'maps' then
                 local generated = assert(io.open(c))
                 local source = generated:read('*a'); generated:close()
-                local word = name == 'maps' and 'edit_counts' or 'strmap_lookup'
-                local body = source:match(word .. '%b()%s*(%b{})')
-                local staged = body and body:find('slc_hash_seed_word', 1, true)
+                -- the hash is SLC words in the program: it reads the process key in
+                -- place and runs the rounds itself (in a function `call` shares or
+                -- in the user's word), never an opaque C helper
+                local staged = source:find('slc_hash_key0', 1, true) and source:find('slc_hash_key1', 1, true)
                 for _, helper in ipairs { 'begin', 'init', 'bytes', 'u64', 'end' } do
-                    if body and body:find('slc_hash_' .. helper .. '(', 1, true) then staged = false end
+                    if source:find('slc_hash_' .. helper .. '(', 1, true) then staged = false end
                 end
                 check(name .. ': hashing is SLC, not an opaque C helper', not not staged)
                 local native_algorithm = false
@@ -217,18 +217,19 @@ do
                     and not source:find('slc_strmap_new', 1, true))
             end
             if name == 'io' then
-                local base = root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c ' .. root .. '/runtime/slc_io_posix.c '
+                local base = root .. '/runtime/slc_rt.c'
                 local backends = { { 'io_uring', 'slc_io_uring.c', '' } }
                 if io.open('/usr/include/kqueue/sys/event.h') then
-                    backends[#backends + 1] = { 'kqueue', 'slc_io_kqueue.c', '-I/usr/include/kqueue -lkqueue' }
+                    backends[#backends + 1] = { 'kqueue', nil, '-I/usr/include/kqueue -lkqueue' }
                 end
                 for _, be in ipairs(backends) do
-                    local src = policy_for(be[1] == 'io_uring' and 'uring' or be[1]) .. ' ' .. base .. root .. '/runtime/' .. be[2]
+                    local src = policy_for(be[1] == 'io_uring' and 'uring' or be[1]) .. ' ' .. base
+                        .. (be[2] and (' ' .. root .. '/runtime/' .. be[2]) or '')
                     add(name .. ': run on ' .. be[1],
                         ('%s %s %s %s -pthread %s -o %s.%s && %s.%s'):format(CC, c, main, src, be[3],
                             sq(c), be[1], sq(c), be[1]))
                 end
-                local src = policy_for('poll') .. ' ' .. base .. root .. '/runtime/slc_io_poll.c'
+                local src = policy_for('poll') .. ' ' .. base
                 add(name .. ': run on poll',
                     ('%s %s %s %s -pthread -o %s.poll && %s.poll'):format(CC, c, main, src, sq(c), sq(c)))
                 if clang then
@@ -268,8 +269,7 @@ do
     local function add(label, cmd) cmds[#cmds + 1] = cmd; apply[#apply + 1] = label end
     for _, harness in ipairs(harnesses) do
         local sources_text = { sq(policy) }
-        for _, f in ipairs { 'tests/' .. harness .. '_main.c', 'runtime/slc_rt.c', 'runtime/slc_tasks.c',
-            'runtime/slc_io_posix.c', 'runtime/slc_io_poll.c' } do
+        for _, f in ipairs { 'tests/' .. harness .. '_main.c', 'runtime/slc_rt.c' } do
             sources_text[#sources_text + 1] = sq(root .. '/' .. f)
         end
         local input = table.concat(sources_text, ' ') .. ' -pthread -I' .. sq(root .. '/runtime')
@@ -290,8 +290,7 @@ end
 -- Keep pointer comparisons separate from UBSan's pointer-overflow instrumentation.
 -- Pointer-subtract instrumentation also flags intentional uintptr_t address math.
 do
-    local rt = policy .. ' ' .. root .. '/runtime/slc_rt.c ' .. root .. '/runtime/slc_tasks.c '
-        .. root .. '/runtime/slc_io_posix.c ' .. root .. '/runtime/slc_io_poll.c'
+    local rt = policy .. ' ' .. root .. '/runtime/slc_rt.c'
     local main = root .. '/tests/text_runtime_main.c'
     local bin = build .. '/slc_text_runtime'
     local cmds = { ('%s %s %s -pthread -o %s && %s'):format(CC, main, rt, sq(bin), sq(bin)) }

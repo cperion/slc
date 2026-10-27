@@ -52,7 +52,7 @@ function T.runtime_archive()
     if archive then return archive end
     local in_process = os.getenv('SLC_RT')
     if in_process and read(in_process) then archive = in_process; return archive end
-    local names = { 'slc_rt.c', 'slc_tasks.c', 'slc_io_posix.c', 'slc_io_poll.c' }
+    local names = { 'slc_rt.c' }
     local text = {}
     for _, n in ipairs(names) do text[#text + 1] = read(RT .. '/' .. n) or '' end
     for _, n in ipairs { 'slc_rt.h', 'slc_io.h', 'slc_io_posix.h', 'slc_scheduler.h', 'slc_io_poll.h' } do

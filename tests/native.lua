@@ -35,6 +35,18 @@ local Document = g.types.Document
 local doc = Document { length = 3, cursor = 3, edits = 0 }
 check('type_word through a Ref', g.type_word(doc, 4) == 1 and doc.length == 7 and doc.cursor == 6 and doc.edits == 1)
 
+-- native globals and function values
+local gl = slc.load(root .. '/examples/globals.slc')
+check('global counter', gl.bump(2) == 2 and gl.bump(3) == 5)
+check('global initializer', gl.read_seed() == 100)
+check('global struct fields', gl.record(4) == 4001 and gl.record(6) == 10002)
+check('thread-local global', gl.bump_local(7) == 7 and gl.bump_local(1) == 8)
+check('function pointer parameter', gl.apply(ffi.cast('uint32_t (*)(uint32_t)', function(x) return x * 3 end), 7) == 21)
+local function op(p) return ffi.cast('uint32_t (*)(uint32_t)', p) end   -- the FFI sees a function pointer as void *
+check('function pointer result', op(gl.pick(0))(6) == 12 and op(gl.pick(1))(6) == 36 and gl.pick(2) == nil)
+gl.fill()
+check('functions in a global table', gl.through(0, 5) == 10 and gl.through(1, 5) == 25)
+
 -- tasks, channels, pools, blocking
 local ch = slc.load(root .. '/examples/channels.slc')
 local sq = 0

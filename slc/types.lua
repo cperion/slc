@@ -177,6 +177,37 @@ function T.struct(name, fields)
     return t
 end
 
+-- function values ---------------------------------------------------------------------
+-- Fn(params...): ret is a C function pointer. Parameters and result are fixed
+-- by the signature; the pointee is a residual function (spec 41.3).
+
+local fn_ids, fn_types = setmetatable({}, { __mode = 'k' }), {}
+local function fn_id(t)
+    local id = fn_ids[t]
+    if not id then id = (fn_ids.n or 0) + 1; fn_ids.n = id; fn_ids[t] = id end
+    return id
+end
+function T.fn(params, ret)
+    local key = { 'r' .. fn_id(ret) }
+    local names = {}
+    for i, p in ipairs(params) do
+        check_type(p, 'Fn')
+        if p.kind == 'unit' or p.kind == 'opaque' or p.resizable then
+            error('Fn parameter ' .. i .. ' cannot be ' .. p.display, 2)
+        end
+        key[#key + 1] = 'p' .. fn_id(p)
+        names[i] = p.display
+    end
+    check_type(ret, 'Fn')
+    if ret.kind == 'opaque' or ret.resizable then error('Fn cannot return ' .. ret.display, 2) end
+    local k = table.concat(key, ',')
+    if not fn_types[k] then
+        fn_types[k] = new { kind = 'fn', params = params, ret = ret,
+            display = 'Fn(' .. table.concat(names, ', ') .. '): ' .. ret.display }
+    end
+    return fn_types[k]
+end
+
 -- atomics ----------------------------------------------------------------------------------------
 -- Atomic T: accessed only by atomic operations. In C it is a plain T accessed
 -- with the __atomic builtins, so layouts stay the same as C's and the kernel's.

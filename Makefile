@@ -76,9 +76,10 @@ dist: dirs
 	@mkdir -p build/dist
 	$(LUA) -e 'package.path = "./?.lua;" .. package.path; local f = assert(io.open(require("slc.runtime_build").source("poll"))); io.write(f:read("*a"))' > $(DIST_POLICY)
 	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -pedantic -pthread -I'./runtime' -c \
-		runtime/slc_rt.c runtime/slc_tasks.c runtime/slc_io_posix.c runtime/slc_io_poll.c $(DIST_POLICY)
-	ar rcs $(DIST_RT) slc_rt.o slc_tasks.o slc_io_posix.o slc_io_poll.o policy.o
-	rm -f slc_rt.o slc_tasks.o slc_io_posix.o slc_io_poll.o policy.o
+		runtime/slc_rt.c $(DIST_POLICY)
+	rm -f $(DIST_RT)
+	ar rcs $(DIST_RT) slc_rt.o policy.o
+	rm -f slc_rt.o policy.o
 	rm -f build/dist/probe-record.txt
 	@for f in examples/*.slc; do \
 		SLC_PROBE_RECORD=$(CURDIR)/build/dist/probe-record.txt $(LUA) slc.lua --gccjit -o build/dist/probe.o "$$f" >/dev/null 2>&1 || true; \

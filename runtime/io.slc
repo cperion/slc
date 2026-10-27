@@ -39,7 +39,7 @@ return function(t)
         offset: I64, deadline: U64, value: Ptr I64, site: CString): I32
         return start task ops read_kind fd buf n offset deadline value site
     end
-    local slc_io_write_bytes = do(task: Ptr Task, ops: Ptr Op, fd: I32, buf: Ptr Void, n: U32,
+    local slc_io_write = do(task: Ptr Task, ops: Ptr Op, fd: I32, buf: Ptr Void, n: U32,
         offset: I64, deadline: U64, value: Ptr I64, site: CString): I32
         return start task ops write_kind fd buf n offset deadline value site
     end
@@ -51,9 +51,9 @@ return function(t)
         ops: Ptr Op, host: U32, port: U32, deadline: U64, value: Ptr I64, site: CString): I32
         return start(task, ops, connect_kind, -1, null Void, port, I64 host, deadline, value, site)
     end
-    local slc_io_open_path = do(task: Ptr Task,
-        ops: Ptr Op, path: Ptr Void, flags: I32, mode: U32, value: Ptr I64, site: CString): I32
-        return start(task, ops, open_kind, flags, path, mode, -1, 0, value, site)
+    local slc_io_open = do(task: Ptr Task,
+        ops: Ptr Op, path: CString, flags: I32, mode: U32, value: Ptr I64, site: CString): I32
+        return start(task, ops, open_kind, flags, (Ptr Void)(path), mode, -1, 0, value, site)
     end
     local slc_io_close = do(task: Ptr Task, ops: Ptr Op, fd: I32, value: Ptr I64, site: CString): I32
         return start(task, ops, close_kind, fd, null Void, 0, -1, 0, value, site)
@@ -66,10 +66,10 @@ return function(t)
         notify task
     end
     export slc_io_read
-    export slc_io_write_bytes
+    export slc_io_write
     export slc_io_accept
     export slc_io_connect
-    export slc_io_open_path
+    export slc_io_open
     export slc_io_close
     export slc_io_complete
     return { complete = slc_io_complete }

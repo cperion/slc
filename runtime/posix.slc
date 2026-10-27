@@ -193,6 +193,16 @@ return function(types)
         if getsockname(fd, AP(Ptr a), Ptr len) < 0 then return 0 end
         return U32(ntohs a.port)
     end
+    -- Blocking work runs on a blocking thread; the thread body is the SLC word.
+    local run_blocking = extern("slc_run_blocking",
+        { Fn({ VP }, Unit), VP }, Unit, { header = '"slc_io.h"' })
+    local open_close_job = do(arg: VP): Unit = slc_posix_open_close((Ptr Op)(arg))
+    local file_io_job = do(arg: VP): Unit = slc_posix_file_io((Ptr Op)(arg))
+    local open_close_fn, file_io_fn = fnptr open_close_job, fnptr file_io_job
+    local slc_posix_submit_open_close = do(op: Ptr Op): Unit = run_blocking(open_close_fn, (VP)(op))
+    local slc_posix_submit_file = do(op: Ptr Op): Unit = run_blocking(file_io_fn, (VP)(op))
+    export slc_posix_submit_open_close
+    export slc_posix_submit_file
     export slc_io_nonblocking
     export slc_posix_open_close
     export slc_posix_file_io

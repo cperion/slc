@@ -139,6 +139,9 @@ slc_grow slc_map_iter_new(size_t stack, slc_map *m);
 
 /* Platform boundary used by SLC hashing; no hashing algorithm in this accessor. */
 uint64_t slc_hash_seed_word(uint32_t index);
+/* Once slc_hash_ready is set the key is final: user code reads it in place. */
+extern int32_t slc_hash_ready;
+extern uint64_t slc_hash_key0, slc_hash_key1;
 
 /* StrMap entries begin with this complete key header, followed by a typed
  * value. Offsets survive arena movement; there are no retained byte pointers. */
@@ -149,7 +152,7 @@ typedef struct slc_strmap {
 } slc_strmap;
 slc_strmap slc_strmap_new(size_t table_stack, size_t arena_stack, size_t width);
 
-/* tasks, channels, timers (slc_tasks.c) ---------------------------------------------------
+/* tasks, channels, timers (runtime/tasks.slc) ---------------------------------------------------
  * A task is a frame whose first member is an slc_task, and a step function the
  * compiler generated: it runs to its next wait and returns. A wait starts an
  * operation: it completes now (SLC_NOW), or later (SLC_PENDING), when whoever
@@ -240,14 +243,15 @@ typedef struct slc_slot_meta { uint64_t owner; uint32_t gen, next_free; } slc_sl
 typedef struct slc_pool_meta { uint32_t gen, n; size_t elem; unsigned char *data; slc_slot_meta *slots; } slc_pool_meta;
 #define SLC_POOL_CHUNK 256u
 #define SLC_POOL_CHUNKS 4096u
-extern slc_pool_meta *slc_pool_metas[SLC_POOL_CHUNKS];
+extern slc_pool_meta **slc_pool_metas;     /* SLC_POOL_CHUNKS pointers, made when the runtime starts */
 /* a failed slot check: names what failed, then traps */
 SLC_COLD void slc_slot_fault(slc_task *me, slc_slot s);
 
 /* the slot's contents, checked at every access: this party owns the slot.
  * Inline and lock-free; only a failure leaves the fast path. */
 static inline void *slc_slot_at(slc_task *me, slc_slot s) {
-    slc_pool_meta *chunk = s.pool / SLC_POOL_CHUNK < SLC_POOL_CHUNKS ? slc_pool_metas[s.pool / SLC_POOL_CHUNK] : NULL;
+    slc_pool_meta *chunk = slc_pool_metas && s.pool / SLC_POOL_CHUNK < SLC_POOL_CHUNKS
+        ? slc_pool_metas[s.pool / SLC_POOL_CHUNK] : NULL;
     if (chunk && s.pgen) {
         slc_pool_meta *m = &chunk[s.pool % SLC_POOL_CHUNK];
         if (__atomic_load_n(&m->gen, __ATOMIC_ACQUIRE) == s.pgen && s.index < m->n) {
@@ -273,7 +277,7 @@ void slc_slot_adopt(slc_task *me, slc_slot s);
 #define SLC_IO_TIMED_OUT 2
 int32_t slc_io_read(slc_task *t, slc_op *ops, int32_t fd, void *buf, uint32_t n, int64_t offset, uint64_t deadline,
                     int64_t *value, const char *site);
-int32_t slc_io_write(slc_task *t, slc_op *ops, int32_t fd, const void *buf, uint32_t n, int64_t offset,
+int32_t slc_io_write(slc_task *t, slc_op *ops, int32_t fd, void *buf, uint32_t n, int64_t offset,
                      uint64_t deadline, int64_t *value, const char *site);
 int32_t slc_io_accept(slc_task *t, slc_op *ops, int32_t fd, uint64_t deadline, int64_t *value, const char *site);
 int32_t slc_io_connect(slc_task *t, slc_op *ops, uint32_t host, uint32_t port, uint64_t deadline, int64_t *value,

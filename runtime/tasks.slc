@@ -1,0 +1,728 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later WITH GCC-exception-3.1
+-- Tasks, workers, plain-thread waits, scopes and registries, timers and
+-- blocking jobs (spec 36). Tasks are compiled state machines. Workers run
+-- them from one run queue; a plain thread blocked in a wait helps run them too,
+-- so with no workers at all (deterministic mode) everything runs on the blocked
+-- thread.
+--
+-- A wait is a set of operation records living in the waiting frame. Whoever
+-- completes a waiting task must first claim it, so exactly one operation of a
+-- first_of happens; the task withdraws its other records before it runs again.
+--
+-- Lock order: a channel's lock, then the scheduler's. The scheduler's lock is
+-- never held while taking a channel's. Channel records live in a registry that
+-- only grows, so a stale handle always reaches a live record whose generation
+-- says the channel is gone.
+return function(t)
+    local Task, Op, Scope, Queue, Heap = t.Task, t.Op, t.Scope, t.Queue, t.Heap
+    local Channel, Pool, PoolMeta, Mutex = t.Channel, t.Pool, t.PoolMeta, t.Mutex
+    local Handle, PoolHandle, Waiters = t.Handle, t.PoolHandle, t.Waiters
+    local Set, channel_table, pool_table, pool_metas = t.Set, t.channel_table, t.pool_table, t.pool_metas
+    local current_stacks = t.current_stacks
+    local h = '"slc_scheduler.h"'
+    local options = { header = h }
+    local posix = "<pthread.h>"
+
+    local Void = opaque "void"
+    local File = opaque "FILE"
+    local Cond = cstruct("pthread_cond_t", posix, {})
+    local CondAttr = cstruct("pthread_condattr_t", posix, {})
+    local Thread = cstruct("pthread_t", posix, {})
+    local ThreadAttr = cstruct("pthread_attr_t", posix, {})
+    local Once = cstruct("pthread_once_t", posix, {})
+    local MutexAttr = opaque "pthread_mutexattr_t"
+    local Timespec = cstruct("struct timespec",
+        "<time.h>", { { "tv_sec", I64 }, { "tv_nsec", I64 } })
+    local JobFn = Fn({ Ptr Void }, Unit)
+    local Idler = cstruct("struct idler", h, function(Self)
+            return { { "cv", Cond }, { "next", Ptr Self }, { "listed", I32 }, { "ready", I32 } }
+        end)
+    local Job = cstruct("struct bjob", h, function(Self)
+            return { { "fn", JobFn }, { "arg", Ptr Void }, { "next", Ptr Self } }
+        end)
+
+    local function foreign(name, params, result, header, variadic)
+        return extern(name, params, result, { .header, .variadic })
+    end
+    local lock = foreign("pthread_mutex_lock", { Ptr Mutex }, I32, posix)
+    local unlock = foreign("pthread_mutex_unlock", { Ptr Mutex }, I32, posix)
+    local mutex_init = foreign("pthread_mutex_init", { Ptr Mutex, Ptr MutexAttr }, I32, posix)
+    local cond_init = foreign("pthread_cond_init", { Ptr Cond, Ptr CondAttr }, I32, posix)
+    local cond_signal = foreign("pthread_cond_signal", { Ptr Cond }, I32, posix)
+    local cond_wait = foreign("pthread_cond_wait", { Ptr Cond, Ptr Mutex }, I32, posix)
+    local cond_timedwait = foreign("pthread_cond_timedwait",
+        { Ptr Cond, Ptr Mutex, Ptr Timespec }, I32, posix)
+    local condattr_init = foreign("pthread_condattr_init", { Ptr CondAttr }, I32, posix)
+    local condattr_setclock = foreign("pthread_condattr_setclock",
+        { Ptr CondAttr, I32 }, I32, posix)
+    local condattr_destroy = foreign("pthread_condattr_destroy", { Ptr CondAttr }, I32, posix)
+    local pthread_once = foreign("pthread_once", { Ptr Once, Fn({}, Unit) }, I32, posix)
+    local pthread_create = foreign("pthread_create",
+        { Ptr Thread, Ptr ThreadAttr, Fn({ Ptr Void }, Ptr Void), Ptr Void }, I32, posix)
+    local attr_init = foreign("pthread_attr_init", { Ptr ThreadAttr }, I32, posix)
+    local attr_detach = foreign("pthread_attr_setdetachstate", { Ptr ThreadAttr, I32 }, I32, posix)
+    local attr_destroy = foreign("pthread_attr_destroy", { Ptr ThreadAttr }, I32, posix)
+    local detached = cconst("PTHREAD_CREATE_DETACHED", I32, posix)
+    local clock_gettime = foreign("clock_gettime", { I32, Ptr Timespec }, I32, "<time.h>")
+    local monotonic = cconst("CLOCK_MONOTONIC", I32, "<time.h>")
+    local fprintf = foreign("fprintf", { Ptr File, CString }, I32, "<stdio.h>", true)
+    local fflush = foreign("fflush", { Ptr File }, I32, "<stdio.h>")
+    local abort = foreign("abort", {}, Unit, "<stdlib.h>")
+    local stderr = cread("stderr", Ptr File, "<stdio.h>")
+    local alloc_task = foreign("calloc", { U64, U64 }, Ptr Task, "<stdlib.h>")
+    local free_task = foreign("free", { Ptr Task }, Unit, "<stdlib.h>")
+    local alloc_job = foreign("malloc", { U64 }, Ptr Job, "<stdlib.h>")
+    local free_job = foreign("free", { Ptr Job }, Unit, "<stdlib.h>")
+    local alloc_table = foreign("calloc", { U64, U64 }, Ptr(Ptr Channel), "<stdlib.h>")
+    local alloc_pool_table = foreign("calloc", { U64, U64 }, Ptr(Ptr Pool), "<stdlib.h>")
+    local alloc_meta_table = foreign("calloc", { U64, U64 }, Ptr(Ptr PoolMeta), "<stdlib.h>")
+
+    local trap = extern("slc_trap", { CString }, Unit, options)
+    -- policy words in the other runtime modules, by their C names
+    local sched_random = extern("slc_sched_random", { Ptr U64 }, U64, options)
+    local sched_push = extern("slc_sched_push", { Ptr Queue, Ptr Task }, Unit, options)
+    local sched_next = extern("slc_sched_next", { Ptr Queue, Ptr U64, Bool }, Ptr Task, options)
+    local heap_add = extern("slc_timer_add", { Ptr Heap, Ptr Op }, Bool, options)
+    local heap_remove = extern("slc_timer_remove", { Ptr Heap, Ptr Op }, Unit, options)
+    local heap_fire = extern("slc_timer_fire", { Ptr Heap, U64 }, Bool, options)
+    local idler_signal = extern("slc_idler_signal", { Ptr(Ptr Idler) }, Unit, options)
+    local idler_enqueue = extern("slc_idler_enqueue", { Ptr(Ptr Idler), Ptr Idler }, Unit, options)
+    local idler_remove = extern("slc_idler_remove", { Ptr(Ptr Idler), Ptr Idler }, Unit, options)
+    local task_attach = extern("slc_task_attach", { Ptr(Ptr Task), Ptr Task }, Unit, options)
+    local task_detach = extern("slc_task_detach", { Ptr(Ptr Task), Ptr Task }, Ptr Task, options)
+    local blocked_remove = extern("slc_blocked_remove", { Ptr(Ptr Task), Ptr Task }, Unit, options)
+    local job_enqueue = extern("slc_job_enqueue",
+        { Ptr(Ptr Job), Ptr(Ptr Job), Ptr Job }, Unit, options)
+    local job_dequeue = extern("slc_job_dequeue", { Ptr(Ptr Job), Ptr(Ptr Job) }, Ptr Job, options)
+    local scope_allocate = extern("slc_scope_allocate", { Ptr Task }, Ptr Scope, options)
+    local scope_record = extern("slc_scope_record",
+        { Ptr(Ptr U32), Ptr U64, Ptr U64, U64, U32 }, Bool, options)
+    local scope_retire = extern("slc_scope_retire", { Ptr Scope }, Unit, options)
+    local channel_acquire = extern("slc_channel_acquire",
+        { Ptr(Ptr Channel), Ptr U32, Ptr U32 }, I32, options)
+    local channel_initialize = extern("slc_channel_initialize",
+        { Ptr Channel, U64, U32 }, Bool, options)
+    local channel_retire = extern("slc_channel_retire", { Ptr Channel }, Ptr Op, options)
+    local channel_recycle = extern("slc_channel_recycle_record",
+        { Ptr Channel, Ptr U32, U32 }, Unit, options)
+    local pool_acquire = extern("slc_pool_acquire",
+        { Ptr(Ptr Pool), Ptr(Ptr PoolMeta), Ptr U32, Ptr U32, U32, U64 }, I32, options)
+    local pool_initialize = extern("slc_pool_initialize",
+        { Ptr Pool, Ptr Scope, U64, U32 }, Bool, options)
+    local pool_retire = extern("slc_pool_retire", { Ptr Pool }, Ptr Op, options)
+    local pool_recycle = extern("slc_pool_recycle_record",
+        { Ptr Pool, Ptr U32, U32 }, Unit, options)
+    local wait_wake = extern("slc_wait_wake", { Ptr Op, I32, I32, Bool }, Unit, options)
+    local resume_wait = extern("slc_resume_wait", { Ptr Task }, Bool, options)
+    local workers_init = extern("slc_workers_init", { Ptr I32, Ptr U64 }, Unit, options)
+    local io_complete = extern("slc_io_complete",
+        { Ptr Op, I32, I64 }, Unit, { header = '"slc_io.h"' })
+    local backend_submit = extern("slc_backend_submit", { Ptr Op }, Unit, { header = '"slc_io.h"' })
+    local stacks_use = extern("slc_stacks_use", { Ptr Set }, Unit, { header = '"slc_rt.h"' })
+    local stacks_free = extern("slc_stacks_free", { Ptr Set }, Unit, { header = '"slc_rt.h"' })
+
+    local RUN_QUEUED, RUN_RUNNING, RUN_PARKED, RUN_NOTIFIED = I32 0, I32 1, I32 2, I32 3
+    local WAIT, YIELD, DONE = I32 1, I32 2, I32 0
+    local PENDING, NOW = I32 1, I32 0
+    local BUDGET = I32 1024
+    local STALE = I32(-4)
+    local blocking_kind = cconst("SLC_K_BLOCKING", I32, '"slc_io.h"')
+    local io_done = cconst("SLC_IO_DONE", I32, '"slc_io.h"')
+    local none = U32 0xffffffff
+
+    -- the scheduler (everything here is under `sched`) ------------------------------------------
+    local sched = global Mutex
+    local registry = global Mutex
+    local once = global Once
+    local run_queue = global Queue
+    local all_tasks = global(Ptr Task)
+    local blocked = global(Ptr Task)
+    local nrunning, nparked, nblocked = global I32, global I32, global I32
+    local nactive_plain, nio, det_mode, nlocal = global I32, global I32, global I32, global I32
+    local rng = global U64
+    local timers = global Heap
+    local idlers = global(Ptr Idler)
+    local next_id = global(U64, { init = 2 })
+    local rotate = global U32
+    -- thread-local: the task a worker is running, the task woken by it (run
+    -- next, as in Go), the stub standing for a plain thread, its idler record
+    local in_task = global(I32, { thread_local = true })
+    local runnext = global(Ptr Task, { thread_local = true })
+    local self_stub = global(Task, { thread_local = true })
+    local self_init = global(I32, { thread_local = true })
+    local me = global(Idler, { thread_local = true })
+    -- registries
+    local nrecs, free_head = global U32, global U32
+    local npools, pfree_head = global U32, global U32
+    -- blocking threads
+    local bmu = global Mutex
+    local bcv = global Cond
+    local bhead, btail = global(Ptr Job), global(Ptr Job)
+    local bidle, bthreads = global I32, global I32
+
+    local new_id = do(): U64 = atomic_ptr(next_id)[0]:add(1, "relaxed")
+
+    local slc_now_ns = do(): U64
+        local ts = Timespec { tv_sec = 0, tv_nsec = 0 }
+        clock_gettime(monotonic, Ptr ts)
+        return U64 ts.tv_sec * 1000000000 + U64 ts.tv_nsec
+    end
+    export slc_now_ns
+
+    local init_me = do(): Unit
+        if me.ready == 0 then
+            local attr = CondAttr {}
+            condattr_init(Ptr attr)
+            condattr_setclock(Ptr attr, monotonic)
+            cond_init(Ptr me.cv, Ptr attr)
+            condattr_destroy(Ptr attr)
+            me.ready = 1
+        end
+    end
+
+    local init = do(): Unit
+        mutex_init(sched, null MutexAttr)
+        mutex_init(registry, null MutexAttr)
+        mutex_init(bmu, null MutexAttr)
+        cond_init(bcv, null CondAttr)
+        channel_table[0] = alloc_table(4096, size_of(Ptr Channel))
+        pool_table[0] = alloc_pool_table(4096, size_of(Ptr Pool))
+        pool_metas[0] = alloc_meta_table(4096, size_of(Ptr PoolMeta))
+        if channel_table[0] == null(Ptr Channel) or pool_table[0] == null(Ptr Pool)
+        or pool_metas[0] == null(Ptr PoolMeta) then
+            trap "out of memory for the runtime registries"
+        end
+        free_head[0] = none
+        pfree_head[0] = none
+        rng[0] = U64 88172645463325252ULL
+        workers_init(det_mode, rng)
+    end
+    local init_fn = fnptr init
+    local ensure = do(): Unit
+        pthread_once(once, init_fn)
+    end
+
+    local set_claimable = do(task: Ptr Task): Unit
+        atomic_ptr(Ptr task.claimed)[0]:store(0, "release")
+    end
+    local set_claimed = do(task: Ptr Task): Unit
+        atomic_ptr(Ptr task.claimed)[0]:store(1, "release")
+    end
+    local wake_one_idler = do(): Unit = idler_signal idlers
+
+    local push = do(task: Ptr Task): Unit
+        task.run = RUN_QUEUED
+        sched_push(run_queue, task)
+        wake_one_idler()
+    end
+
+    local pop = do(): Ptr Task
+        if runnext[0] ~= null Task then
+            local task = runnext[0]
+            runnext[0] = null Task
+            nlocal[0] = nlocal[0] - 1
+            return task
+        end
+        return sched_next(run_queue, rng, det_mode[0] ~= 0)
+    end
+
+    -- a plain thread counts as active (able to act on channels) while it runs
+    -- inside a scope, or has been woken and has not yet gone back to its code
+    local set_active = do(task: Ptr Task, on: I32): Unit
+        if task.active == on then return end
+        task.active = on
+        if on ~= 0 then nactive_plain[0] = nactive_plain[0] + 1 else nactive_plain[0] = nactive_plain[0] - 1 end
+    end
+
+    -- make a claimed task runnable (sched held)
+    local slc_wake_locked = do(task: Ptr Task): Unit
+        if task.blocking ~= 0 then
+            if task.run == RUN_PARKED then
+                blocked_remove(blocked, task)
+                nblocked[0] = nblocked[0] - 1
+                set_active(task, 1)
+            end
+            task.run = RUN_RUNNING
+            task.woken = 1
+            cond_signal((Ptr Cond)(task.park))
+        elseif task.run == RUN_RUNNING then
+            task.run = RUN_NOTIFIED
+        elseif task.run == RUN_PARKED then
+            nparked[0] = nparked[0] - 1
+            if in_task[0] ~= 0 and runnext[0] == null Task then
+                task.run = RUN_QUEUED
+                runnext[0] = task
+                nlocal[0] = nlocal[0] + 1
+            else
+                push task
+            end
+        end
+    end
+    export slc_wake_locked
+
+    local slc_task_wake = do(task: Ptr Task): Unit
+        ensure()
+        lock sched
+        slc_wake_locked task
+        unlock sched
+    end
+    export slc_task_wake
+
+    -- timers: allocation/growth, heap ordering and cancellation are policy words;
+    -- the wakeup stays inside the scheduler's synchronization envelope
+    local timer_add = do(op: Ptr Op): Unit
+        if heap_add(timers, op) then wake_one_idler() end
+    end
+    local timer_remove = do(op: Ptr Op): Unit = heap_remove(timers, op)
+    local fire_timers = do(): Bool = heap_fire(timers, slc_now_ns())
+
+    local begin = do(task: Ptr Task, ops: Ptr Op, n: I32, site: CString): Unit
+        task.ops = ops
+        task.nops = n
+        task.site = site
+    end
+
+    local slc_timer_register = do(op: Ptr Op): Unit
+        ensure()
+        lock sched
+        timer_add op
+        unlock sched
+    end
+    export slc_timer_register
+
+    local slc_timer_cancel = do(op: Ptr Op): Unit
+        ensure()
+        lock sched
+        timer_remove op
+        unlock sched
+    end
+    export slc_timer_cancel
+
+    local slc_select_ticket = do(): U64
+        ensure()
+        if det_mode[0] ~= 0 then
+            lock sched
+            local value = sched_random rng
+            unlock sched
+            return value
+        end
+        return U64 atomic_ptr(rotate)[0]:add(1, "relaxed")
+    end
+    export slc_select_ticket
+
+    -- scopes and registries ----------------------------------------------------------------------
+    local channel_at = do(index: U32): Ptr Channel
+        return Ptr channel_table[0][index / 256][index % 256]
+    end
+    local pool_at = do(index: U32): Ptr Pool
+        return Ptr pool_table[0][index / 256][index % 256]
+    end
+
+    local slc_scope_new = do(me_task: Ptr Task): Ptr Scope
+        ensure()
+        local scope = scope_allocate me_task
+        if scope == null Scope then trap "out of memory for a tasks scope" end
+        if me_task.blocking ~= 0 then
+            lock sched
+            me_task.depth = me_task.depth + 1
+            set_active(me_task, 1)
+            unlock sched
+        end
+        return scope
+    end
+    export slc_scope_new
+
+    local slc_retire_channel_sync = do(index: U32): Unit
+        ensure()
+        local r = channel_at index
+        lock(Ptr r.mu)
+        local list = channel_retire r
+        unlock(Ptr r.mu)
+        wait_wake(list, STALE, STALE, false)
+        lock registry
+        channel_recycle(r, free_head, index)
+        unlock registry
+    end
+    export slc_retire_channel_sync
+
+    local slc_retire_pool_sync = do(index: U32): Unit
+        ensure()
+        local r = pool_at index
+        lock(Ptr r.mu)
+        local list = pool_retire r
+        unlock(Ptr r.mu)
+        wait_wake(list, STALE, STALE, false)
+        lock registry
+        pool_recycle(r, pfree_head, index)
+        unlock registry
+    end
+    export slc_retire_pool_sync
+
+    local slc_pool_new = do(scope: Ptr Scope, elem: U64, n: U32): PoolHandle
+        ensure()
+        if n == 0 then trap "a pool needs at least one slot" end
+        lock registry
+        local acquired = pool_acquire(pool_table[0], pool_metas[0], pfree_head, npools, n, elem)
+        if acquired < 0 then
+            unlock registry
+            if acquired == -1 then trap "too many pools" end
+            trap "out of memory for pools"
+        end
+        local index = U32 acquired
+        unlock registry
+        local r = pool_at index
+        lock(Ptr r.mu)
+        if not pool_initialize(r, scope, elem, n) then
+            unlock(Ptr r.mu)
+            trap "out of memory for a pool"
+        end
+        local gen = r.m.gen
+        unlock(Ptr r.mu)
+        lock sched
+        if not scope_record(Ptr scope.pools, Ptr scope.npools, Ptr scope.cap_pools, 4, index) then
+            unlock sched
+            trap "out of memory for a pool"
+        end
+        unlock sched
+        return PoolHandle { idx = index, .gen }
+    end
+    export slc_pool_new
+
+    local slc_scope_end = do(task: Ptr Task, ops: Ptr Op, scope: Ptr Scope, site: CString): I32
+        ensure()
+        task.cur_scope = scope.parent
+        lock sched
+        if task.blocking ~= 0 then
+            task.depth = task.depth - 1
+            if task.depth == 0 then set_active(task, 0) end
+        end
+        task.result = 0
+        if scope.live == 0 then
+            unlock sched
+            scope_retire scope
+            return NOW
+        end
+        begin(task, ops, 0, site)
+        set_claimable task
+        scope.waiter = task
+        unlock sched
+        return PENDING
+    end
+    export slc_scope_end
+
+    local slc_chan_new = do(scope: Ptr Scope, elem: U64, cap: U32): Handle
+        ensure()
+        lock registry
+        local acquired = channel_acquire(channel_table[0], free_head, nrecs)
+        if acquired < 0 then
+            unlock registry
+            if acquired == -1 then trap "too many channels" end
+            trap "out of memory for channels"
+        end
+        local index = U32 acquired
+        unlock registry
+        local r = channel_at index
+        lock(Ptr r.mu)
+        if not channel_initialize(r, elem, cap) then
+            unlock(Ptr r.mu)
+            trap "out of memory for a channel"
+        end
+        local gen = r.gen
+        unlock(Ptr r.mu)
+        lock sched
+        if not scope_record(Ptr scope.chans, Ptr scope.nchans, Ptr scope.cap_chans, 8, index) then
+            unlock sched
+            trap "out of memory for a channel"
+        end
+        unlock sched
+        return Handle { idx = index, .gen }
+    end
+    export slc_chan_new
+
+    -- running tasks ------------------------------------------------------------------------------
+    local deadlock = do(): Unit
+        fprintf(stderr(), "slc: deadlock: every task is waiting\n")
+        local task = all_tasks[0]
+        while task ~= null Task do
+            if task.run == RUN_PARKED then fprintf(stderr(), "    a task waits at %s\n", task.site) end
+            task = task.all_next
+        end
+        task = blocked[0]
+        while task ~= null Task do
+            fprintf(stderr(), "    a thread waits at %s\n", task.site)
+            task = task.next
+        end
+        fflush stderr()
+        abort()
+    end
+
+    -- nothing runs, nothing can fire, nobody outside can act: nothing will ever wake
+    local check_deadlock = do(): Unit
+        if nrunning[0] == 0 and run_queue.len == 0 and nlocal[0] == 0 and timers.len == 0
+        and nio[0] == 0 and nactive_plain[0] == 0 and nparked[0] + nblocked[0] > 0 then
+            deadlock()
+        end
+    end
+
+    -- wait for work or a timer (sched held)
+    local idle = do(): Unit
+        init_me()
+        -- a fired timer may have woken this very thread: let the caller look again
+        if fire_timers() then return end
+        if run_queue.len ~= 0 or runnext[0] ~= null Task then return end
+        check_deadlock()
+        idler_enqueue(idlers, me)
+        if timers.len ~= 0 then
+            local deadline = timers.data[0].deadline
+            local ts = Timespec { tv_sec = I64(deadline / 1000000000),
+                tv_nsec = I64(deadline % 1000000000) }
+            cond_timedwait(Ptr me.cv, sched, Ptr ts)
+        else
+            cond_wait(Ptr me.cv, sched)
+        end
+        idler_remove(idlers, me)
+    end
+
+    local finish = do(task: Ptr Task): Unit
+        local scope = task.scope
+        lock sched
+        local waiter = task_detach(all_tasks, task)
+        unlock sched
+        stacks_free(Ptr task.stacks)
+        free_task task
+        if waiter ~= null Task then
+            scope_retire scope
+            slc_task_wake waiter
+        end
+    end
+
+    -- run one step of a task taken from the queue (sched held on entry and exit)
+    local step_task = do(task: Ptr Task): Unit
+        task.run = RUN_RUNNING
+        nrunning[0] = nrunning[0] + 1
+        unlock sched
+        set_claimed task
+        local r = WAIT
+        if resume_wait task then
+            local was = in_task[0]
+            in_task[0] = 1
+            stacks_use(Ptr task.stacks)
+            task.budget = BUDGET
+            r = task.step task
+            stacks_use(null Set)
+            in_task[0] = was
+        end
+        if r == DONE then
+            finish task
+            lock sched
+            nrunning[0] = nrunning[0] - 1
+            return
+        end
+        lock sched
+        nrunning[0] = nrunning[0] - 1
+        if r == YIELD or task.run == RUN_NOTIFIED then
+            push task
+        else
+            task.run = RUN_PARKED
+            nparked[0] = nparked[0] + 1
+        end
+    end
+
+    local worker = do(arg: Ptr Void): Ptr Void
+        lock sched
+        while true do
+            local task = pop()
+            if task ~= null Task then step_task task else idle() end
+        end
+        return null Void
+    end
+    local worker_fn = fnptr worker
+
+    -- starts a worker thread; called while the runtime initializes, so it does not ensure
+    local slc_worker_start = do(): Unit
+        local thread = Thread {}
+        local attr = ThreadAttr {}
+        attr_init(Ptr attr)
+        attr_detach(Ptr attr, detached)
+        if pthread_create(Ptr thread, Ptr attr, worker_fn, null Void) ~= 0 then trap "cannot start a worker" end
+        attr_destroy(Ptr attr)
+    end
+    export slc_worker_start
+
+    local slc_spawn = do(scope: Ptr Scope, frame: U64, step: Fn({ Ptr Task }, I32)): Ptr Task
+        ensure()
+        local task = alloc_task(1, frame)
+        if task == null Task then trap "out of memory for a task" end
+        task.step = step
+        task.scope = scope
+        task.cur_scope = scope
+        set_claimed task
+        task.id = new_id()
+        lock sched
+        task_attach(all_tasks, task)
+        unlock sched
+        return task
+    end
+    export slc_spawn
+
+    local slc_start = do(task: Ptr Task): Unit
+        ensure()
+        lock sched
+        push task
+        unlock sched
+    end
+    export slc_start
+
+    local slc_trap_recoverable = do(): I32
+        if in_task[0] ~= 0 then return 0 end
+        if current_stacks[0] ~= null Set then return 0 end
+        if self_init[0] ~= 0 and self_stub.cur_scope ~= null Scope then return 0 end
+        return 1
+    end
+    export slc_trap_recoverable
+
+    local slc_self = do(): Ptr Task
+        if in_task[0] ~= 0 then trap "a blocking wait inside a task" end
+        if self_init[0] == 0 then
+            self_stub.blocking = 1
+            self_stub.id = new_id()
+            self_stub.run = RUN_RUNNING
+            self_stub.claimed = 1
+            init_me()
+            self_stub.park = (Ptr Void)(Ptr me.cv)
+            self_init[0] = 1
+        end
+        return self_stub
+    end
+    export slc_self
+
+    -- a plain thread waits; meanwhile it runs tasks
+    local slc_block = do(task: Ptr Task): Unit
+        ensure()
+        while true do
+            lock sched
+            if task.woken == 0 then
+                task.run = RUN_PARKED
+                task.next = blocked[0]
+                blocked[0] = task
+                nblocked[0] = nblocked[0] + 1
+                set_active(task, 0)
+            end
+            while task.woken == 0 do
+                local other = pop()
+                if other ~= null Task then step_task other else idle() end
+            end
+            task.woken = 0
+            unlock sched
+            set_claimed task
+            if resume_wait task then
+                lock sched
+                local on = I32 0
+                if task.depth > 0 then on = 1 end
+                set_active(task, on)
+                unlock sched
+                return
+            end
+        end
+    end
+    export slc_block
+
+    -- I/O ----------------------------------------------------------------------------------------
+    -- Only synchronized accounting remains here.
+    local slc_io_notify = do(task: Ptr Task): Unit
+        ensure()
+        lock sched
+        nio[0] = nio[0] - 1
+        slc_wake_locked task
+        unlock sched
+    end
+    export slc_io_notify
+
+    local slc_io_publish = do(op: Ptr Op): Unit
+        ensure()
+        set_claimable op.task
+        lock sched
+        nio[0] = nio[0] + 1
+        unlock sched
+        backend_submit op
+    end
+    export slc_io_publish
+
+    -- blocking threads --------------------------------------------------------------------------
+    -- Calls into C that may block run here, not on a worker: one thread per job
+    -- in flight, made on demand and kept for reuse.
+    local blocking_thread = do(arg: Ptr Void): Ptr Void
+        lock bmu
+        while true do
+            while bhead[0] == null Job do
+                bidle[0] = bidle[0] + 1
+                cond_wait(bcv, bmu)
+                bidle[0] = bidle[0] - 1
+            end
+            local job = job_dequeue(bhead, btail)
+            unlock bmu
+            job.fn job.arg
+            free_job job
+            lock bmu
+        end
+        return null Void
+    end
+    local blocking_fn = fnptr blocking_thread
+
+    local slc_run_blocking = do(fn: JobFn, arg: Ptr Void): Unit
+        ensure()
+        local job = alloc_job(size_of Job)
+        if job == null Job then trap "out of memory for blocking work" end
+        job.fn = fn
+        job.arg = arg
+        lock bmu
+        job_enqueue(bhead, btail, job)
+        if bidle[0] > 0 then
+            cond_signal bcv
+        else
+            local thread = Thread {}
+            local attr = ThreadAttr {}
+            attr_init(Ptr attr)
+            attr_detach(Ptr attr, detached)
+            if pthread_create(Ptr thread, Ptr attr, blocking_fn, null Void) ~= 0 then
+                unlock bmu
+                trap "cannot start a blocking thread"
+            end
+            attr_destroy(Ptr attr)
+            bthreads[0] = bthreads[0] + 1
+        end
+        unlock bmu
+    end
+    export slc_run_blocking
+
+    -- a task's blocking block: run on its own data stacks, then wake the task
+    local run_task_job = do(arg: Ptr Void): Unit
+        local op = (Ptr Op)(arg)
+        stacks_use(Ptr op.task.stacks)
+        op.job((Ptr Void)(op.buf))
+        stacks_use(null Set)
+        io_complete(op, io_done, 0)
+    end
+    local run_task_job_fn = fnptr run_task_job
+
+    local slc_blocking = do(task: Ptr Task, ops: Ptr Op, job: JobFn, env: Ptr Void, site: CString): I32
+        ensure()
+        local op = Ptr ops[0]
+        begin(task, ops, 1, site)
+        op.task = task
+        op.kind = blocking_kind
+        op.index = -1
+        op.queued = 0
+        op.job = job
+        op.buf = (Ptr U8)(env)
+        op.value = Ptr op.offset
+        op.deadline = 0
+        set_claimable task
+        lock sched
+        nio[0] = nio[0] + 1  -- outstanding: not a deadlock while it runs
+        unlock sched
+        slc_run_blocking(run_task_job_fn, (Ptr Void)(op))
+        return PENDING
+    end
+    export slc_blocking
+end

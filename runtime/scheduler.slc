@@ -32,14 +32,17 @@ export slc_map_at
 export slc_strmap_new
 export slc_map_iter_new
 local header = '"slc_scheduler.h"'
+local Void = opaque "void"
+local Set = stacks.Set
 local Mutex = cstruct("pthread_mutex_t", "<pthread.h>", {})
 local Handle = cstruct("slc_chan", header, { { "idx", U32 }, { "gen", U32 } })
 local Scope, Op
 local Task = cstruct("slc_task", header, function(Self)
         Scope = cstruct("slc_scope", header, function(ScopeSelf)
                 return { { "parent", Ptr ScopeSelf }, { "chans", Ptr U32 }, { "nchans", U64 },
-                    { "pools", Ptr U32 },
-                    { "npools", U64 }, { "live", I32 }, { "waiter", Ptr Self } }
+                    { "cap_chans", U64 }, { "pools", Ptr U32 },
+                    { "npools", U64 },
+                    { "cap_pools", U64 }, { "live", I32 }, { "waiter", Ptr Self } }
             end)
         Op = cstruct("slc_op", header, function(Operation)
                 return {
@@ -48,10 +51,13 @@ local Task = cstruct("slc_task", header, function(Self)
                     { "buf", Ptr U8 }, { "chan", Handle },
                     { "fd", I32 }, { "len", U32 }, { "offset", I64 },
                     { "value", Ptr I64 }, { "backend", Ptr U8 },
+                    { "job", Fn({ Ptr Void }, Unit) },
                 }
             end)
         return { { "next", Ptr Self }, { "claimed", I32 }, { "result", I32 }, { "id", U64 },
-            { "cur_scope", Ptr Scope },
+            { "cur_scope", Ptr Scope }, { "budget", I32 }, { "woken", I32 }, { "blocking", I32 },
+            { "depth", I32 }, { "active", I32 }, { "park", Ptr Void },
+            { "step", Fn({ Ptr Self }, I32) }, { "stacks", Set },
             { "scope", Ptr Scope }, { "ops", Ptr Op }, { "nops", I32 }, { "site", CString },
             { "all_prev", Ptr Self }, { "all_next", Ptr Self }, { "run", I32 } }
     end)
@@ -332,11 +338,28 @@ local lifetime = lifecycle { .Scope, .Task, .Op, .Channel, .Pool,
     .SlotMeta, .PoolMeta, .Mutex,
     .claim_waiter, .Waiters }
 
+-- process state: the data-stack set a thread uses, store tokens, hash entropy
+local process = require "runtime.process"
+local process_state = process { .stacks }
+local current_stacks = process_state.current
+
+-- the registries: tables of record chunks, reached through pointers so the
+-- inline slot check in slc_rt.h can read the metadata table
+local channel_table = global(Ptr(Ptr Channel))
+local pool_table = global(Ptr(Ptr Pool))
+local pool_metas = global(Ptr(Ptr PoolMeta), { name = "slc_pool_metas", exported = true })
+
 local protocol = require "runtime.protocol"
 protocol { .Task, .Op, .Channel, .Pool, .Slot, .lifetime,
     .Handle, .Mutex, .Scope, .receive, .send,
     .take, .enqueue, .unlink, .claim, .has_waiter,
-    .claim_waiter, .recycle, .done_result }
+    .claim_waiter, .recycle, .done_result, .channel_table, .pool_table }
+
+local PoolHandle = cstruct("slc_pool", header, { { "idx", U32 }, { "gen", U32 } })
+local tasks = require "runtime.tasks"
+tasks { .Task, .Op, .Scope, .Queue, .Heap, .Channel, .Pool, .PoolMeta, .Mutex,
+    .Handle, .PoolHandle, .Waiters, .Set, .channel_table, .pool_table, .pool_metas,
+    .current_stacks }
 
 local io_policy = require "runtime.io"
 local io = io_policy { .Op, .Task, .claim }

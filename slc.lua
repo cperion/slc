@@ -84,6 +84,13 @@ function slc.prelude()
     env.bytes = S.bytes
     env.size_of = S.size_of
     env.rawmember = S.rawmember
+    env.global = S.global
+    env.fnptr = S.fnptr
+    env.Fn = function(params, ret)
+        local ok, r = pcall(T.fn, params, ret)
+        if not ok then S.fail((tostring(r):gsub('^[^:]+:%d+: ', '')), 2) end
+        return r
+    end
     env.cformat = S.cformat
     env.Args = S.args_type()
     env.test = S.test

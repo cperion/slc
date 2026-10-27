@@ -205,4 +205,7 @@ return function(t)
     export slc_kqueue_prepare
     export slc_kqueue_submit
     export slc_kqueue_run
+    local backend = require "runtime.backend"
+    backend { .State, .Mutex, .Op, name = "kqueue", failure = "cannot start the kqueue poller",
+        prepare = slc_kqueue_prepare, submit = slc_kqueue_submit, run = slc_kqueue_run }
 end
