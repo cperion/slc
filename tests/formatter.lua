@@ -35,6 +35,83 @@ formatted('result suffix', 'local r=f(x).value', 'local r = f(x).value\n')
 formatted('nil argument', 'local r=f(nil)', 'local r = f(nil)\n')
 formatted('empty call', 'local r=f()', 'local r = f()\n')
 formatted('preserve calls', 'local r=Ref(h)', 'local r = Ref(h)\n', { call_style = 'preserve' })
+formatted('type repeated by its constructor', [[local f = do(n: U32): U32
+    local p: P = P { x = n }
+    local a: U32 = U32(0)
+    local g: Grow U32 = (Grow U32) {}
+    return a
+end
+]], [[local f = do(n: U32): U32
+    local p = P { x = n }
+    local a = U32 0
+    local g = (Grow U32) {}
+    return a
+end
+]])
+formatted('annotations that select a type stay', [[local f = do(n: U32): U32
+    local k: U64 = U64(n) + 1
+    local i: U32 = n
+    local z: U32 = 0
+    local q: U8 = U32 0
+    return i
+end
+]], [[local f = do(n: U32): U32
+    local k: U64 = U64 n + 1
+    local i = n
+    local z: U32 = 0
+    local q: U8 = U32 0
+    return i
+end
+]])
+formatted('type repeated by a name of that type', [[local f = do(n: U32, r: Ref U32, s: Str): U32
+    local i: U32 = n
+    local j: U32 = r
+    local t: Str = s
+    local k: U32 = i
+    for m: U32 = 1, n do
+        local q: U32 = m
+    end
+    local w: U64 = n
+    return i + k
+end
+]], [[local f = do(n: U32, r: Ref U32, s: Str): U32
+    local i = n
+    local j: U32 = r
+    local t: Str = s
+    local k = i
+    for m: U32 = 1, n do
+        local q = m
+    end
+    local w: U64 = n
+    return i + k
+end
+]])
+formatted('a name out of scope or shadowed keeps the annotation', [[local f = do(a: U32): U32
+    if a > 0 then
+        local n: U32 = a
+    end
+    local x: U32 = n
+    local g = do(n: U64): U32
+        local y: U32 = n
+        return y
+    end
+    return x
+end
+]], [[local f = do(a: U32): U32
+    if a > 0 then
+        local n = a
+    end
+    local x: U32 = n
+    local g = do(n: U64): U32
+        local y: U32 = n
+        return y
+    end
+    return x
+end
+]])
+formatted('type_style preserve keeps annotations', 'local f = do(): U32\n    local a: U32 = U32(0)\n    return a\nend\n',
+    'local f = do(): U32\n    local a: U32 = U32 0\n    return a\nend\n', { type_style = 'preserve' })
+formatted('a host binding keeps its annotation-free form', 'local a = U32(0)\n', 'local a = U32 0\n')
 formatted('unary operators', 'local r = - x + # xs', 'local r = -x + #xs\n')
 formatted('minus cannot become comment', 'local r=- -x', 'local r = - -x\n')
 formatted('integer suffix', 'local r=U64(0xffffffffffffffffULL)', 'local r = U64 0xffffffffffffffffULL\n')
@@ -170,7 +247,7 @@ end
 export ping
 ]], [[local ping = do(n: U64): U64
     with_eventfd do(counter...)
-        local value: U64 = n
+        local value = n
         with_epoll do(poll...)
             watch fd
         endall
@@ -212,7 +289,7 @@ local function protected(text)
 end
 check('literal and comment bytes unchanged', protected(literal) == protected(out))
 check('comments in calls keep parentheses', fmt.format('local r = f( -- why\nx)\n'):find('f(  -- why', 1, true) ~= nil)
-for _, settings in ipairs { { indent_width = 0 }, { column_width = 10 }, { call_style = 'lua' }, { surprise = true }, { indent_width = false }, { spine_style = 'flat' } } do
+for _, settings in ipairs { { indent_width = 0 }, { column_width = 10 }, { call_style = 'lua' }, { surprise = true }, { indent_width = false }, { spine_style = 'flat' }, { type_style = 'always' } } do
     local ok = pcall(fmt.format, 'local x=1', settings)
     check('reject invalid config', not ok)
 end

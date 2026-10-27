@@ -2,7 +2,8 @@
 
 `slc fmt` keeps SLC's word-oriented style without treating it as ordinary Lua.
 It uses the compiler's parser and the lossless lexer; it does not execute the
-source, resolve imports, or remove type annotations.
+source or resolve imports. The one annotation it removes is a repeated
+constructor type (see `type_style`).
 
 ## Commands
 
@@ -39,6 +40,7 @@ return {
     column_width = 100,
     call_style = "minimal",
     spine_style = "pure",
+    type_style = "inferred",
 }
 ```
 
@@ -54,9 +56,45 @@ file, not arbitrary downloaded Lua code.
 | `indent_width` | integer 1–8 | Spaces per block or continued delimited list. |
 | `column_width` | integer 20–240 | Soft wrapping target, not a hard limit. |
 | `call_style` | `"minimal"`, `"preserve"` | Remove safe call parentheses (and fold a spine's closers), or retain call spelling. |
+| `type_style` | `"inferred"`, `"preserve"` | Drop a local's annotation when its initializer is an application of that same type (below), or keep every annotation. |
 | `spine_style` | `"pure"`, `"all"`, `"none"` | Which link bodies of an `endall` spine lose their indent. |
 
 Unknown settings and invalid values are errors, not silently ignored options.
+
+## Inferred types
+
+A native local takes its type from its initializer (spec §8.1), so
+`local p: Point = Point { x = 1 }` repeats itself. With `type_style = "inferred"`
+the annotation is removed when the initializer is exactly an application of the
+annotated type expression:
+
+```lua
+local p: Point = Point { x = 1 }          -- local p = Point { x = 1 }
+local count: U32 = U32(0)                 -- local count = U32 0
+local out: Grow U32 = (Grow U32) {}       -- local out = (Grow U32) {}
+```
+
+It is also removed when the initializer is a name whose declared type is the same
+bare type name: a typed parameter, an earlier annotated local, a numeric `for`
+variable, or a local initialized by a constructor. The name must resolve to that
+declaration (scopes and shadowing are followed), and `Str` and `Text` are never
+dropped.
+
+```lua
+local f = do(n: U32): U32
+    local i: U32 = n                      -- local i = n
+    local j: U32 = i                      -- local j = i
+    return j
+end
+```
+
+The formatter never evaluates the program, so it decides only what the syntax
+shows. These keep their annotation: `local w: U64 = n` (a different type),
+`local j: U32 = r` with `r: Ref U32` (a reference keeps write-through),
+`local k: U64 = U64(n) + 1` (an expression, not the constructor itself),
+`local z: U32 = 0` (a host number), `local q: U8 = U32 0` (a different type),
+a name it cannot resolve to a typed declaration, and `for i: U32 = 1, n`. The rewrite is applied only when the reparsed program equals
+the original with exactly those annotations removed.
 
 ## Default style
 

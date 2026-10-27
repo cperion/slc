@@ -3,7 +3,8 @@
 local lexer = require 'macro.lexer'
 local syntax = require 'slc.syntax'
 local M = {}
-M.defaults = { indent_width = 4, column_width = 100, call_style = 'minimal', spine_style = 'pure' }
+M.defaults = { indent_width = 4, column_width = 100, call_style = 'minimal', spine_style = 'pure',
+               type_style = 'inferred' }
 
 function M.options(options)
     local out = {}
@@ -22,6 +23,9 @@ function M.options(options)
     end
     if out.call_style ~= 'minimal' and out.call_style ~= 'preserve' then
         error('fmt: call_style must be "minimal" or "preserve"', 0)
+    end
+    if out.type_style ~= 'inferred' and out.type_style ~= 'preserve' then
+        error('fmt: type_style must be "inferred" or "preserve"', 0)
     end
     if out.spine_style ~= 'pure' and out.spine_style ~= 'all' and out.spine_style ~= 'none' then
         error('fmt: spine_style must be "pure", "all" or "none"', 0)
@@ -91,6 +95,7 @@ local function parse(source, filename)
     local p = syntax.parser(r)
     local ranges, calls, colons, unary, chains = {}, {}, {}, {}, {}
     local lambdas, body_ranges = {}, {}
+    local typespans, locals = {}, {}
     local suffixed_from = p.suffixed_from
     function p:suffixed_from(...)
         local first = #calls + 1
@@ -180,8 +185,11 @@ local function parse(source, filename)
         return result
     end
     function p:typeexpr()
+        local colon = last
         if ts[last] and ts[last].v == ':' then colons[last] = true end
-        return typeexpr(self)
+        local result = typeexpr(self)
+        typespans[result] = { colon, last }
+        return result
     end
     function p:funcbody(name, at, opts)
         local nesting, j = 0, 1
@@ -224,7 +232,12 @@ local function parse(source, filename)
             end
             return { k = 'export', path = path, alias = alias }
         end
-        return statement(self)
+        local result = statement(self)
+        -- annotations are only meaningful in native (typed) bodies
+        if native_depth > 0 and type(result) == 'table' and result.k == 'local' then
+            locals[#locals + 1] = result
+        end
+        return result
     end
     local ast = p:block()
     r:expect('eof')
@@ -263,7 +276,7 @@ local function parse(source, filename)
         end
     end
     return { ast = ast, tokens = ts, ranges = ranges, calls = calls, colons = colons, commas = commas,
-             unary = unary, chains = chains, lambdas = lambdas }
+             unary = unary, chains = chains, lambdas = lambdas, typespans = typespans, locals = locals }
 end
 
 -- Source locations and application spelling do not affect the parsed program.
@@ -343,6 +356,123 @@ local function fold_spines(source, info, filename, signature)
     end
     local ok, reparsed = pcall(parse, candidate, filename)
     if ok and fingerprint(reparsed.ast) == signature then return candidate end
+    return source
+end
+
+-- A native local takes its type from its initializer (spec 8.1), so an
+-- annotation can repeat what the syntax already shows. Two cases are decided
+-- here, and nothing else, because the formatter does not know what any other
+-- initializer evaluates to:
+--   * the initializer is exactly an application of the annotated type
+--     expression: `local p: Point = Point { ... }`
+--   * the initializer is a name whose declared type is the same bare type
+--     name: `local i: U32 = n` with `n: U32` a parameter or earlier local
+local function unparen(e)
+    while type(e) == 'table' and e.k == 'paren' do e = e.e end
+    return e
+end
+
+-- text views stay explicit: inference does not copy a borrowed view
+local KEEP_TYPES = { Str = true, Text = true }
+
+local function drop_inferred(source, info, filename)
+    local native = {}
+    for _, stat in ipairs(info.locals) do native[stat] = true end
+    local edits, dropped = {}, {}
+    local scopes = {}
+    local function declare(name, fact) scopes[#scopes].names[name] = fact end
+    local function lookup(name)
+        for i = #scopes, 1, -1 do
+            local fact = scopes[i].names[name]
+            if fact ~= nil then return fact end
+        end
+    end
+    local function push() scopes[#scopes + 1] = { names = {} } end
+    local function pop() scopes[#scopes] = nil end
+    local function typefp(t) return fingerprint(unparen(t)) end
+
+    local walk
+    local function walk_children(node)
+        local keys = {}
+        for k in pairs(node) do
+            if k ~= 'line' and k ~= 'end_line' then keys[#keys + 1] = k end
+        end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        for _, k in ipairs(keys) do walk(node[k]) end
+    end
+    function walk(node)
+        if type(node) ~= 'table' then return end
+        local k = node.k
+        if k == 'local' then
+            for _, e in ipairs(node.exprs) do walk(e) end
+            local pairwise = #node.exprs == #node.names
+            for i, entry in ipairs(node.names) do
+                local init = pairwise and node.exprs[i] or nil
+                local span = entry.type and info.typespans[entry.type]
+                local fact = false
+                if entry.type then fact = typefp(entry.type) end
+                if native[node] and span and type(init) == 'table' then
+                    local same = false
+                    if init.k == 'call' and typefp(init.fn) == fact then same = true end
+                    local t = unparen(entry.type)
+                    if init.k == 'name' and t.k == 'name' and not KEEP_TYPES[t.name]
+                        and lookup(init.name) == fact then same = true end
+                    if same then
+                        edits[#edits + 1] = { info.tokens[span[1]].first, info.tokens[span[2]].last }
+                        dropped[#dropped + 1] = entry
+                    end
+                elseif not entry.type and type(init) == 'table' and init.k == 'call' then
+                    fact = typefp(init.fn)
+                end
+                declare(entry.name, fact)
+            end
+        elseif k == 'localfunction' then
+            declare(node.name, false)
+            walk(node.fn)
+        elseif k == 'open' then
+            walk(node.init)
+            declare(node.name, false)
+        elseif k == 'numfor' then
+            walk(node.lo); walk(node.hi); walk(node.step)
+            push()
+            declare(node.var, node.type and typefp(node.type) or false)
+            walk(node.body)
+            pop()
+        elseif k == 'genfor' then
+            for _, e in ipairs(node.exprs) do walk(e) end
+            push()
+            for _, n in ipairs(node.names) do declare(n, false) end
+            walk(node.body)
+            pop()
+        elseif k == nil and node.params and node.body then
+            push()
+            for _, prm in ipairs(node.params) do
+                declare(prm.name, (prm.type and not prm.opened) and typefp(prm.type) or false)
+            end
+            walk(node.body)
+            pop()
+        elseif k == nil and #node > 0 then
+            push()
+            for _, child in ipairs(node) do walk(child) end
+            pop()
+        else
+            walk_children(node)
+        end
+    end
+    push()
+    walk(info.ast)
+    if #edits == 0 then return source end
+    table.sort(edits, function(a, b) return a[1] > b[1] end)
+    local candidate = source
+    for _, edit in ipairs(edits) do
+        candidate = candidate:sub(1, edit[1] - 1) .. candidate:sub(edit[2] + 1)
+    end
+    local types = {}
+    for i, entry in ipairs(dropped) do types[i] = entry.type; entry.type = nil end
+    local expected = fingerprint(info.ast)
+    for i, entry in ipairs(dropped) do entry.type = types[i] end
+    local ok, reparsed = pcall(parse, candidate, filename)
+    if ok and fingerprint(reparsed.ast) == expected then return candidate end
     return source
 end
 
@@ -467,6 +597,10 @@ function M.format(source, options, filename)
         source = source:sub(#prefix + 1)
     end
     local info = parse(source, filename)
+    if options.type_style == 'inferred' then
+        source = drop_inferred(source, info, filename)
+        info = parse(source, filename)
+    end
     local signature = fingerprint(info.ast)
     if options.call_style == 'minimal' then
         -- Remove call parentheses first: a sole `do` block argument carries no
