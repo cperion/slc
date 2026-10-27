@@ -1,0 +1,63 @@
+-- Library-defined types: a layout plus compile-time hooks. The hooks run while
+-- specializing, so the user semantics folds and residualizes with the caller.
+
+-- Fixed point with 16 fractional bits: operators and conversion from numbers.
+local Fixed = struct { raw: I32 }
+
+function Fixed.__cast(v)
+    if type(v) == 'number' then
+        return Fixed { raw = I32(v * 65536) }
+    end
+end
+
+function Fixed.__add(a: Fixed, b: Fixed): Fixed
+    return Fixed { raw = a.raw + b.raw }
+end
+
+function Fixed.__mul(a: Fixed, b: Fixed): Fixed
+    local wide = I64(a.raw) * I64(b.raw)
+    return Fixed { raw = I32(wide / 65536) }
+end
+
+function Fixed.__lt(a: Fixed, b: Fixed): Bool
+    return a.raw < b.raw
+end
+
+local scale = do(x: Fixed, y: Fixed): Fixed
+    return x * 1.5 + y
+end
+export scale
+
+local below = do(x: Fixed, y: Fixed): Bool
+    return x < y
+end
+export below
+
+local to_raw = do(x: Fixed): I32
+    return x.raw
+end
+export to_raw
+
+-- A ring of four values: x[i] is the i-th oldest, wrapping around.
+local Window = struct { items: Array(U32, 4), head: U32 }
+
+function Window.__index(w, i)
+    return w.items[(w.head + i) % 4]
+end
+
+function Window.__newindex(w, i, v)
+    w.items[(w.head + i) % 4] = v
+end
+
+function Window.__member(w, name)
+    if name == 'newest' then
+        return w.items[(w.head + 3) % 4]
+    end
+end
+
+local window_sum = do(a: U32, b: U32): U32
+    local w = Window { items = Array(U32, 4) { a, b, a + b, a * b }, head = 2 }
+    w[0] = w[0] + 1
+    return w[0] + w[1] + w[2] + w[3] + w.newest
+end
+export window_sum

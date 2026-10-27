@@ -95,7 +95,8 @@ local function decorate(t)
     for name, fn in pairs(ms) do S.arity[fn] = (name == 'put' or name == 'ensure') and 3 or 2 end
     t.builtin_methods = ms
     t.properties = { length = function(self) return storage.get(self, 'len') end }
-    t.index_place = function(self, k)
+    S.member_tables(t)
+    t.__index = function(self, k)
         local p, kv = receiver(self), capture_key(key(k))
         local function resolve()
             local slot = library().borrow(S.Ref(p), kv)

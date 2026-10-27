@@ -347,7 +347,7 @@ end
 -- s[id] and g[i]: an element as a place whose address is computed (and checked:
 -- the Id is current, the index in range) at every use, so storage that moves
 -- when it grows is found again each time
-local function index_place(t)
+local function index_hook(t)
     local n = cname_of(t)
     return function(x, key)
         local p = receiver(x, t.kind == 'store' and n .. '[id]' or n .. '[i]')
@@ -403,8 +403,9 @@ local function decorate(t)
         local ar = { add = 2, remove = 2, has = 2 }
         for k, f in pairs(ms) do S.arity[f] = ar[k] end
         rawset(t, 'builtin_methods', merge_methods(t, ms))
-        rawset(t, 'index_place', index_place(t))
+        rawset(t, '__index', index_hook(t))
         rawset(t, 'properties', merge_properties(t, { length = length }))
+        S.member_tables(t)
         rawset(t, 'construct', function(x)
             if type(x) ~= 'table' or S.is_staged(x) or next(x) ~= nil then
                 fail(t.display .. ' {} takes no fields')
@@ -416,8 +417,9 @@ local function decorate(t)
         local ar = { push = 2, view = 2 }
         for k, f in pairs(ms) do S.arity[f] = ar[k] end
         rawset(t, 'builtin_methods', merge_methods(t, ms))
-        rawset(t, 'index_place', index_place(t))
+        rawset(t, '__index', index_hook(t))
         rawset(t, 'properties', merge_properties(t, { length = length }))
+        S.member_tables(t)
         rawset(t, 'construct', function(x)
             if type(x) ~= 'table' or S.is_staged(x) or next(x) ~= nil then
                 fail(t.display .. ' {} takes no fields')

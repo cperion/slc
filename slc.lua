@@ -83,6 +83,7 @@ function slc.prelude()
     env.atomic_ptr = S.atomic_ptr
     env.bytes = S.bytes
     env.size_of = S.size_of
+    env.rawmember = S.rawmember
     env.cformat = S.cformat
     env.Args = S.args_type()
     env.test = S.test

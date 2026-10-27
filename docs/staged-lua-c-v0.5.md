@@ -39,6 +39,8 @@ The resolutions, in the order they matter:
 24. **A second backend, in process (§38)**: the same prepared IR built with libgccjit, which mirrors the C emitter call for call and reads the C the compiler contains (runtime header, helpers, templates) instead of copying it. `native(word)` compiles a word into executable memory now and returns it as a Lua function, so values that exist only at start-up can be specialized on; `slc run` runs a program that way.
 25. **Text (§39)**: `Str` views, `Text` built in place with formatting decided while compiling, `Chars(n)` values; the text words are slc, so known text folds and known needles unroll. Range facts now include lower bounds by constants, and an arm that cannot fall through lends its facts to what follows. Field and method access in typed bodies no longer collides with the evaluator's own keys (a struct field named `name` used to read the local's name).
 
+26. **Library-defined types (§41)**: a type's layout is a `struct`; what `x.f`, `x[k]`, a conversion, an operator or a comparison means on it is a hook, a Lua function or native word run while specializing. The built-in kinds are served by the same hooks, so a library can define a fixed-point number, a ring buffer or a struct-of-arrays with no compiler change.
+
 ---
 
 # 1. Vision
@@ -3613,6 +3615,109 @@ borrow lifetime checks. Native runtime primitives provide allocation, checked
 byte spans/copies, relocation offsets, entropy and trapping—not map algorithms.
 Mutable maps remain runtime storage even when their arguments are known. Known
 descriptions have no mutable compile-time heap.
+
+# 41. Library-defined types
+
+A type is a layout plus what the language's operations mean on it. The layout is
+a `struct`. The meaning is a set of **hooks**: Lua functions or native words stored
+on the type under `__`-names. A hook runs while specializing and returns staged
+values, places or words, so whatever it builds folds and residualizes with the
+caller. No runtime dispatch, inheritance or object model is involved (§26).
+
+| Hook | Runs for | Returns |
+|---|---|---|
+| `__member(x, name)` | `x.name`, `x:name(...)` | a value, place or word; `nil` falls back to fields, then methods |
+| `__index(x, key)` | `x[key]` | a value or a place; a word may return a `Ref` |
+| `__newindex(x, key, v)` | `x[key] = v` | nothing |
+| `__cast(v, T)` | a host value or other-typed value where a `T` is expected, and `T(v)` | a `T`, or `nil` to refuse |
+| `__add` `__sub` `__mul` `__div` `__mod` `__unm` | arithmetic | a `T`; the other operand is first converted through `__cast` |
+| `__eq` `__lt` `__le` | comparisons; `~=`, `>` and `>=` derive from them | a `Bool` |
+
+A hook is stored on the type, so it is written with a dot:
+`function Fixed.__add(a, b)`. The hooks whose first argument is the receiver,
+`__index` and `__newindex`, may also be methods: `function R:__index(i: U32): Ref E`.
+The others take no receiver (`__cast` converts a value that is not yet a `T`; an
+operator's operands are both `T`, and either may be the converted one), so
+writing one as a method is an error.
+
+While a type's hook runs, that type's hooks are not consulted again, so a hook
+reads its own representation with ordinary field access; `rawmember(x, name)` does
+the same outside a hook. Comparisons are staged only in typed bodies (§6.2, §7),
+so a hook that compares is a native word. Assigning to a native field or element
+works in plain Lua code as well as in typed bodies.
+
+```lua
+local Fixed = struct { raw: I32 }                    -- 16 fractional bits
+
+function Fixed.__cast(v)
+    if type(v) == 'number' then return Fixed { raw = I32(v * 65536) } end
+end
+
+function Fixed.__mul(a: Fixed, b: Fixed): Fixed
+    local wide = I64(a.raw) * I64(b.raw)
+    return Fixed { raw = I32(wide / 65536) }
+end
+
+function Fixed.__add(a: Fixed, b: Fixed): Fixed
+    return Fixed { raw = a.raw + b.raw }
+end
+
+local scale = do(x: Fixed, y: Fixed): Fixed = x * 1.5 + y
+```
+
+The literal `1.5` goes through `Fixed.__cast` while compiling, so `scale` is two
+integer operations on the representation.
+
+Containers follow the same way. A generic type is a Lua function (§3.2), its
+storage is a field of an existing resizable kind (`Grow`, `Store`), and `[]` is a
+hook that returns the element's place:
+
+```lua
+local Ring = do(E, capacity)
+    local R = struct { head: U32, len: U32, items: Grow E }
+
+    function R:push(v: E): Unit
+        if self.len < capacity then
+            self.items:push v
+            self.len = self.len + 1
+        else
+            self.items[self.head] = v
+            self.head = (self.head + 1) % capacity
+        end
+    end
+
+    function R:__index(i: U32): Ref E
+        if i >= self.len then trap "ring index out of range" end
+        return self.items[(self.head + i) % capacity]
+    end
+
+    return R
+end
+```
+
+A type that holds a resizable field is itself resizable (§15), so ownership,
+creation in place and give-back are the existing rules; nothing is declared
+about them. The `Ref` returned by `__index` borrows from `self` (§17.1).
+
+## 41.1 The built-in kinds
+
+`Str`, `Chars(n)` and the `x[k]` places of Store, Grow, Map and StrMap register
+their hooks on their types. `Ptr`, `Slice`, `Atomic`, `Chan`, `Array`, `Pool` and
+`Slot` register once per family. Types with computed members and built-in methods
+(`properties`, `builtin_methods`) serve them through the same `__member` hook. A
+Lua string where a `Str` is expected is `Str.__cast`. What remains outside the
+hooks is the default: struct fields, struct methods, and the error for a sum.
+
+## 41.2 What this does not provide
+
+Hooks do not hide a representation: a struct's fields stay visible unless its
+`__member` refuses them. There are no declared roles; a type is copyable,
+storable or sendable by the rules of the layout it is built from (§15, §17.2,
+§36). There is no scalar newtype, no read-only static data and no user-defined
+view lifetime; a library view is a `Slice` or `Str`.
+
+Implemented in `slc/stage.lua`; see [type-hooks.md](type-hooks.md) and the
+examples `examples/user_types.slc` and `examples/ring.slc`.
 
 # Appendix A. The prototype
 

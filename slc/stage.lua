@@ -892,6 +892,42 @@ local function type_of(x)
     return nil
 end
 
+-- Library-defined type hooks (__member, __index, __cast, operators) are Lua
+-- functions run while specializing. While a type's hook runs, the same type's
+-- hooks are not consulted again, so a hook reads its own representation with
+-- ordinary field access.
+local in_hook = {}
+local function run_hook(t, h, ...)
+    local saved = in_hook[t]
+    in_hook[t] = true
+    local ok, a = pcall(h, ...)
+    in_hook[t] = saved
+    if not ok then error(a, 0) end
+    return a
+end
+-- Built-in kinds are served by the same hooks, registered per family below.
+local family_hooks = {}
+S.family_hooks = family_hooks
+-- hooks whose first argument is the receiver may also be written as methods
+local receiver_hooks = { __index = true, __newindex = true }
+S.receiver_hooks = receiver_hooks
+local function type_hook(x, name)
+    local t = type_of(x)
+    if t and t.kind == 'ref' then t = t.elem end
+    if is_value(x) and x.k == 'ref' then t = x.T.elem end
+    if not t then return end
+    if not in_hook[t] then
+        local h = rawget(t, name)
+        if not h and receiver_hooks[name] then
+            local m = rawget(t, 'methods')
+            h = m and m[name]
+        end
+        if h then return h, t end
+    end
+    local fh = family_hooks[rawget(t, 'slice_elem') and 'slice' or t.kind]
+    if fh and fh[name] then return fh[name], t, true end
+end
+
 local function describe(x)
     if is_value(x) then return x.T.display .. ' value' end
     if is_place(x) then return x.T.display .. ' place' end
@@ -903,7 +939,13 @@ end
 -- the value of anything usable as an operand of type t (t may be nil: infer)
 local function value_of(x, t, what)
     -- a Lua string where text is expected: a Str literal
-    if type(x) == 'string' and t and rawget(t, 'is_str') then return S.str_literal(x) end
+    if t and t.kind == 'struct' and not in_hook[t] then
+        local hc = rawget(t, '__cast')
+        if hc and type_of(x) ~= t and not (is_value(x) and x.k == 'ref' and x.T.elem == t) then
+            local r = run_hook(t, hc, x, t)
+            if r ~= nil then x = r end
+        end
+    end
     if is_place(x) then
         x = cur():read(x)
     end
@@ -991,7 +1033,23 @@ local OPSYM = { add = '+', sub = '-', mul = '*', div = '/', mod = '%', band = '&
 local function is_zero(v) return v.k == 'known' and v.v == 0 end
 local function is_one(v) return v.k == 'known' and v.v == 1 end
 
+-- operator hooks (__add, __mul, ...): the other operand is converted to the
+-- hooked type through its __cast
+local function operator_hook(name, a, b, swap)
+    local h, t = type_hook(a, name)
+    if not h then h, t = type_hook(b, name) end
+    if not h then return nil end
+    local av = value_of(a, t, 'left operand of ' .. name)
+    local bv = value_of(b, t, 'right operand of ' .. name)
+    if swap then av, bv = bv, av end
+    return true, run_hook(t, h, av, bv)
+end
+
 local function binary(op, a, b)
+    do
+        local ok, r = operator_hook('__' .. op, a, b)
+        if ok then return r end
+    end
     -- A shift's result type comes from its left operand; the independently
     -- checked integer count must not first pass ordinary operand unification.
     local shift = op == 'shl' or op == 'shr'
@@ -1042,6 +1100,10 @@ end
 S.binary = binary
 
 local function unary(op, a)
+    do
+        local h, ht = type_hook(a, op == 'neg' and '__unm' or '__' .. op)
+        if h then return run_hook(ht, h, a) end
+    end
     local t = type_of(a)
     if is_value(a) and a.k == 'ref' then t = a.T.elem end
     local av = value_of(a, t, 'operand')
@@ -1058,6 +1120,21 @@ local function compare(op, a, b)
         if op == 'eq' then return a == b elseif op == 'ne' then return a ~= b
         elseif op == 'lt' then return a < b elseif op == 'le' then return a <= b
         elseif op == 'gt' then return a > b else return a >= b end
+    end
+    do
+        -- __eq, __lt, __le; ~=, > and >= derive from them
+        local ok, r
+        if op == 'eq' or op == 'lt' or op == 'le' then
+            ok, r = operator_hook('__' .. op, a, b)
+        elseif op == 'ne' then
+            ok, r = operator_hook('__eq', a, b)
+            if ok then return unary('not', r) end
+        elseif op == 'gt' then
+            ok, r = operator_hook('__lt', a, b, true)
+        elseif op == 'ge' then
+            ok, r = operator_hook('__le', a, b, true)
+        end
+        if ok then return r end
     end
     local t = operand_type(a, b, 'comparison')
     if t.kind == 'id' and (op == 'eq' or op == 'ne') then
@@ -1163,27 +1240,22 @@ end
 
 local member_ptr, member_slice
 
+local raw_member
 local function member(x, key)
+    local h, t, family = type_hook(x, '__member')
+    if h then
+        local r
+        if family then r = h(x, key) else r = run_hook(t, h, x, key) end
+        if r ~= nil then return r end
+    end
+    return raw_member(x, key)
+end
+S.rawmember = function(x, key) return raw_member(x, key) end
+
+function raw_member(x, key)
     local t = struct_of(x)
-    if t.kind == 'ptr' then return member_ptr(x, key) end
-    if t.kind == 'atomic' then return S.atomic_method(x, key) end
-    if t.kind == 'chan' then return S.chan_method(x, key) end
-    if t.kind == 'array' then return S.array_member(x, key) end
-    if t.kind == 'pool' then
-        if is_staged(key) then return S.pool_index(x, key) end
-        return S.pool_method(x, key)
-    end
-    if t.kind == 'slot' then
-        fail(("%s is a handle: its contents are addressed through its pool, pool[slot]"):format(t.display), 3)
-    end
-    local ip = rawget(t, 'index_place')
+    local ip = rawget(t, '__index')
     if ip and (type(key) == 'number' or is_staged(key)) then return ip(x, key) end
-    if rawget(t, 'is_str') then return S.member_str(x, key) end
-    if rawget(t, 'chars_cap') then
-        local m = S.member_chars(x, key)
-        if m ~= nil then return m end
-    end
-    if rawget(t, 'slice_elem') then return member_slice(x, key) end
     if t.kind == 'sum' then
         fail(("%s is a sum: its payload is reached by matching (s { %s = do(p) ... end, ... }), "
             .. "not by selecting '%s'"):format(t.display, t.alts[1].name, tostring(key)), 3)
@@ -1202,12 +1274,32 @@ local function member(x, key)
     end
     local m = rawget(t, 'methods') and t.methods[key]
     if m then return m end
-    local props = rawget(t, 'properties')
-    if props and props[key] then return props[key](x) end
-    local bm = rawget(t, 'builtin_methods')
-    if bm and bm[key] then return bm[key] end
     fail(("%s has no field or method '%s'"):format(t.display, tostring(key)), 3)
 end
+
+-- A type with `properties` (computed members) and `builtin_methods` serves them
+-- through __member; the tables stay live so a later decoration can extend them.
+function S.member_tables(t)
+    rawset(t, '__member', function(x, key)
+        local props = rawget(t, 'properties')
+        if props and props[key] then return props[key](x) end
+        local bm = rawget(t, 'builtin_methods')
+        if bm and bm[key] then return bm[key] end
+    end)
+end
+
+family_hooks.ptr = { __member = function(x, key) return member_ptr(x, key) end }
+family_hooks.slice = { __member = function(x, key) return member_slice(x, key) end }
+family_hooks.atomic = { __member = function(x, key) return S.atomic_method(x, key) end }
+family_hooks.chan = { __member = function(x, key) return S.chan_method(x, key) end }
+family_hooks.array = { __member = function(x, key) return S.array_member(x, key) end }
+family_hooks.pool = { __member = function(x, key)
+    if is_staged(key) then return S.pool_index(x, key) end
+    return S.pool_method(x, key)
+end }
+family_hooks.slot = { __member = function(x)
+    fail(("%s is a handle: its contents are addressed through its pool, pool[slot]"):format(struct_of(x).display), 3)
+end }
 
 -- obj.key and obj:key(...) in typed bodies: a native value's members (whatever
 -- their names), or an ordinary Lua index
@@ -1219,8 +1311,8 @@ end
 -- "put", or any internal evaluator field name, without shadowing the API.
 function S.index(obj, key)
     if is_staged(obj) then
-        local ip = rawget(struct_of(obj), 'index_place')
-        if ip then return ip(obj, key) end
+        local h, t = type_hook(obj, '__index')
+        if h then return run_hook(t, h, obj, key) end
     end
     -- Host descriptions can distinguish checked indexing from API members,
     -- including when a native key is still dynamic. No native storage is implied.
@@ -1238,14 +1330,41 @@ end
 V.__index = function(x, key) return member(x, key) end
 P.__index = function(x, key) return member(x, key) end
 
+-- An assignment in plain Lua code (an untyped word, a hook) to a native field
+-- or element stores to the place instead of setting a field of the Lua object.
+-- Evaluator-internal keys stay ordinary Lua fields.
+P.__newindex = function(x, key, v)
+    local t = struct_of(x)
+    if type(key) == 'number' or is_staged(key) or (t.kind == 'struct' and t.index[key]) then
+        return S.setindex(x, key, v, type(key) ~= 'string')
+    end
+    rawset(x, key, v)
+end
+V.__newindex = function(x, key, v)
+    local t = struct_of(x)
+    if type(key) == 'number' or is_staged(key) or (t.kind == 'struct' and t.index[key]) then
+        fail(('cannot assign to a field of a %s value; assign to a place'):format(t.display), 2)
+    end
+    rawset(x, key, v)
+end
+
 function S.setindex(obj, key, v, bracket)
     if is_staged(obj) then
         local t = struct_of(obj)
-        if bracket and rawget(t, 'index_place') then
-            S.set(t.index_place(obj, key), v)
+        local hn = bracket and type_hook(obj, '__newindex')
+        if hn then
+            run_hook(t, hn, obj, key, v)
             return
         end
-        if (t.kind == 'pool' or rawget(t, 'index_place')) and is_staged(key) or (rawget(t, 'index_place') and type(key) == 'number') then
+        local h = bracket and type_hook(obj, '__index')
+        if h then
+            -- a word that returns a Ref names the place it borrowed
+            local target = run_hook(t, h, obj, key)
+            if is_value(target) and target.k == 'ref' then target = target.place end
+            S.set(target, v)
+            return
+        end
+        if (t.kind == 'pool' or rawget(t, '__index')) and is_staged(key) or (rawget(t, '__index') and type(key) == 'number') then
             S.set(member(obj, key), v)
             return
         end
@@ -1308,6 +1427,9 @@ Type.__call = function(t, x)
         or (type(x) == 'table' and next(x) == nil)) then
         -- Chars(n) from text (slc.strings)
         return rawget(t, 'construct')(x)
+    end
+    if t.kind == 'struct' and rawget(t, '__cast') and type(x) ~= 'table' and not in_hook[t] then
+        return value_of(x, t, t.display)
     end
     if t.kind == 'struct' then
         if getmetatable(x) == S.Keyed then
@@ -3333,6 +3455,10 @@ function S.method(t, name, spec)
         fail(('method %s: %s is not a struct type'):format(name, describe(t)), 2)
     end
     if t.index[name] then fail(("%s already has a field '%s'"):format(t.display, name), 2) end
+    if name:sub(1, 2) == '__' and not S.receiver_hooks[name] then
+        fail(("%s is a hook, not a method: write function %s.%s(...) with explicit operands")
+            :format(name, t.display, name), 2)
+    end
     local params = { { 'self', types.ref(t) } }
     for _, p in ipairs(spec.params) do params[#params + 1] = p end
     spec.params = params
@@ -3904,7 +4030,7 @@ local function index_value(i)
     return value_of(i, types.U32, 'index')
 end
 
-local function index_place(pv, iv, elem)
+local function __index(pv, iv, elem)
     local base = ex(pv)
     local idx = iv
     -- an element of `&p[a]` is an element of p: the offsets add
@@ -3929,7 +4055,7 @@ function member_ptr(x, key)
     local pv = ptr_value(x)
     local elem = pv.T.elem
     if type(key) == 'number' or is_staged(key) then
-        return index_place(pv, index_value(key), elem)
+        return __index(pv, index_value(key), elem)
     end
     if elem.kind == 'struct' and elem.index[key] then
         local e = ex(pv)
@@ -4067,7 +4193,7 @@ h.slice_get = function(s, key)
     bound_check(iv, len, 'index')
     local value = h.array_pointer_read(ptr, iv)
     if value then return value end
-    return cur():read(index_place(ptr, iv, ptr.T.elem))
+    return cur():read(__index(ptr, iv, ptr.T.elem))
 end
 
 h.slice_sub = function(s, a, b_)
@@ -4095,7 +4221,7 @@ h.slice_sub = function(s, a, b_)
         p2 = S.array_pointer(ptr.place, binary('add', ptr.offset, av), ptr.builder)
     elseif not (av.k == 'known' and av.v == 0) then
         local pt = ptr.T
-        p2 = dyn(pt, { op = 'addr', place = index_place(ptr, av, pt.elem), T = pt })
+        p2 = dyn(pt, { op = 'addr', place = __index(ptr, av, pt.elem), T = pt })
     end
     return make_slice(t, p2, cur():bind(bv - av), view)
 end
@@ -4568,7 +4694,8 @@ function S.args_type()
     local strlen = S.extern('strlen', { types.CString }, types.U32, { header = '<string.h>' })
     t.properties = t.properties or {}
     t.properties.length = function(x) return S.dot(x, 'count') end
-    t.index_place = function(x, key)
+    S.member_tables(t)
+    t.__index = function(x, key)
         local i = index_value(key)
         if i.T ~= types.U32 then i = types.U32(i) end
         local argv = S.dot(x, 'argv')

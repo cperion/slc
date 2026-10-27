@@ -1,0 +1,49 @@
+-- A bounded ring buffer written as a library: a layout (counters and a Grow)
+-- plus hooks. Nothing in the compiler knows about it.
+local Ring = do(E, capacity)
+    local R = struct { head: U32, len: U32, items: Grow E }
+
+    function R:push(v: E): Unit
+        if self.len < capacity then
+            self.items:push v
+            self.len = self.len + 1
+        else
+            self.items[self.head] = v
+            self.head = (self.head + 1) % capacity
+        end
+    end
+
+    -- r[i] is the i-th oldest element, checked against the live length
+    function R:__index(i: U32): Ref E
+        if i >= self.len then trap "ring index out of range" end
+        return self.items[(self.head + i) % capacity]
+    end
+
+    return R
+end
+
+local Ints = Ring(U32, 4)
+
+local ring_sum = do(n: U32): U32
+    local r = Ints { head = 0, len = 0, items = (Grow U32) {} }
+    for i: U32 = 1, n do
+        r:push(i * i)
+    end
+    local total = U32 0
+    for i: U32 = 0, r.len - 1 do
+        total = total + r[i]
+    end
+    r[0] = r[0] + 1000
+    return total * 10000 + r[0]
+end
+export ring_sum
+
+local Bytes = Ring(U8, 2)
+local ring_bytes = do(a: U8, b: U8, c: U8): U32
+    local r = Bytes { head = 0, len = 0, items = (Grow U8) {} }
+    r:push(a)
+    r:push(b)
+    r:push(c)
+    return U32(r[0]) * 256 + U32(r[1])
+end
+export ring_bytes

@@ -1366,12 +1366,7 @@ local function emit_function(fn, out)
     end
     for _, p in ipairs(order) do
         if f.hoisted[p] then
-            local t = p.T
-            if t.kind == 'store' or t.kind == 'grow' then
-                f:line(decl_of(t, f:pname(p)) .. ';')
-            else
-                f:line(decl_of(t, f:pname(p)) .. ';')
-            end
+            f:line(decl_of(p.T, f:pname(p)) .. ';')
         end
     end
     f:block(fn.body)
@@ -1584,19 +1579,17 @@ function G.emit(mod, opts)
             end
         end)
     end
-    for _, x in ipairs(mod.externs) do
+    -- Which externs the module recorded depends on which library words were
+    -- already specialized in this process, so the header order is canonical.
+    local names = {}
+    for _, x in ipairs(externs) do
         if x.header and not headers[x.header] then
             headers[x.header] = true
-            out[#out + 1] = '#include ' .. x.header
+            names[#names + 1] = x.header
         end
     end
-    for i = #mod.externs + 1, #externs do
-        local x = externs[i]
-        if x.header and not headers[x.header] then
-            headers[x.header] = true
-            out[#out + 1] = '#include ' .. x.header
-        end
-    end
+    table.sort(names)
+    for _, header in ipairs(names) do out[#out + 1] = '#include ' .. header end
     if need_rt then out[#out + 1] = '#include "slc_rt.h"' end
     out[#out + 1] = ''
 

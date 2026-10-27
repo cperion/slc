@@ -347,7 +347,7 @@ Do not maintain a second, hand-specialized implementation. Read the C to confirm
 
 ## 9. Arithmetic and operators
 
-Arithmetic is C's, exactly: folding while compiling follows C's widths, wraparound and conversions, and undefined behavior (signed overflow, division by zero, oversized shifts) is rejected where it is known. Operators belong to numbers. Bitwise operations are words (`band`, `bor`, `shr`) because Lua's operators cannot be staged for them. I/O, sending and matching are named words, never symbols.
+Arithmetic is C's, exactly: folding while compiling follows C's widths, wraparound and conversions, and undefined behavior (signed overflow, division by zero, oversized shifts) is rejected where it is known. Operators belong to numbers, including a library's own (a fixed-point type defines `__add`, `__mul` and `__cast`; spec §41). Bitwise operations are words (`band`, `bor`, `shr`) because Lua's operators cannot be staged for them. I/O, sending and matching are named words, never symbols.
 
 ## 10. Concurrency
 

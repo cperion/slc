@@ -21,7 +21,8 @@ uint32_t entry(uint32_t x) {
 Start with [Designing and writing SLC](docs/designing-and-writing-slc.md).
 [The specification](docs/staged-lua-c-v0.5.md) owns the language and ABI rules.
 [Maps and immutable lookup descriptions](docs/staged-lua-c-v0.5.md#40-maps-and-known-lookup-descriptions)
-are implemented in ordinary SLC. [The alpha roadmap](docs/alpha-design.md) covers
+are implemented in ordinary SLC, and [library-defined types](docs/staged-lua-c-v0.5.md#41-library-defined-types)
+use the same hooks as the built-in ones. [The alpha roadmap](docs/alpha-design.md) covers
 broader fuzzing and the single-binary distribution; [the SLC-first inventory](docs/slc-first.md)
 tracks the remaining library migrations.
 

@@ -171,6 +171,12 @@ function S.member_str(x, key)
         .. "parse and cstring; not '%s'"):format(tostring(key)), 3)
 end
 
+rawset(T, '__member', S.member_str)
+-- a Lua string where text is expected is a Str literal
+rawset(T, '__cast', function(x)
+    if type(x) == 'string' then return S.str_literal(x) end
+end)
+
 -- Str.of: a view of a Slice U8, an Array of bytes, or a C string
 function Str.of(x)
     local v = S.is_staged(x) and S.value_of(x, nil, 'Str.of') or nil
@@ -202,6 +208,7 @@ function Str.Chars(n)
     if not ok then fail((tostring(t):gsub('^[^:]+:%d+: ', '')), 2) end
     if not rawget(t, 'construct_text') then
         rawset(t, 'construct_text', true)
+        rawset(t, '__member', S.member_chars)
         -- Chars(n) "text" or Chars(n)(s): filled from text; Chars(n)() is empty
         rawset(t, 'construct', function(x)
             if x == nil or (type(x) == 'table' and not S.is_staged(x) and next(x) == nil) then

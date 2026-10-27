@@ -770,6 +770,14 @@ export f
 end
 export f
 ]] },
+    { name = 'an operator hook written as a method', expect = '__add is a hook, not a method',
+      src = [[local N = struct { v: U32 }
+function N:__add(other: N): N
+    return N { v = self.v + other.v }
+end
+local f = do(a: N, b: N): N = a + b
+export f
+]] },
     { name = 'text compared with ==', expect = 'text is compared with words, not operators',
       src = [[local f = do(a: Str): Bool = a == "x"
 export f
