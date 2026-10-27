@@ -513,6 +513,7 @@ L1:;
 | `word()` | nullary invocation |
 | trailing block | scopes, iteration, activities |
 | headed braces | construction (`Document { ... }`) or handlers (`s { ... }`) |
+| `.name` in braces | a field named after the value that fills it: `Point { .x, .y }` is `Point { x = x, y = y }` |
 | `do(x) = e` | a small expression lambda |
 | `do(x) ... end` | a callback with statements |
 | `endall` | the closing run of a trailing-block spine |

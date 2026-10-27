@@ -115,4 +115,47 @@ M.define('export', function (get)
     return result(pad(text, reader, start), reader:leftovers())
 end)
 
+-- `.name` in a table constructor is `name = name`. A `.` never follows `{`, `,`
+-- or `;` in valid Lua, so no existing program changes. It is rewritten in the
+-- token list, so typed bodies, macros and plain Lua code around them all see
+-- the long form. Source tools (slc fmt) read the raw tokens and keep `.name`.
+local ENTRY_START = { ['{'] = true, [','] = true, [';'] = true }
+local ENTRY_END = { [','] = true, [';'] = true, ['}'] = true }
+
+local function significant_before(tokens, i)
+    i = i - 1
+    while i >= 1 and (tokens[i][1] == 'space' or tokens[i][1] == 'comment') do i = i - 1 end
+    return i >= 1 and tokens[i][1] or nil
+end
+
+local function significant_after(tokens, i)
+    i = i + 1
+    while tokens[i] and (tokens[i][1] == 'space' or tokens[i][1] == 'comment') do i = i + 1 end
+    return tokens[i] and tokens[i][1] or nil
+end
+
+local scan_lua_tokenlist = lexer.scan_lua_tokenlist
+function lexer.scan_lua_tokenlist(input)
+    local tokens = scan_lua_tokenlist(input)
+    local out, i = {}, 1
+    while i <= #tokens do
+        local tk, nx = tokens[i], tokens[i + 1]
+        if tk[1] == '.' and nx and nx[1] == 'iden'
+            and ENTRY_START[significant_before(tokens, i)]
+            and ENTRY_END[significant_after(tokens, i + 1)] then
+            local line = tk[3]
+            out[#out + 1] = { 'iden', nx[2], line }
+            out[#out + 1] = { 'space', ' ', line }
+            out[#out + 1] = { '=', '=', line }
+            out[#out + 1] = { 'space', ' ', line }
+            out[#out + 1] = { 'iden', nx[2], line }
+            i = i + 2
+        else
+            out[#out + 1] = tk
+            i = i + 1
+        end
+    end
+    return out
+end
+
 return M

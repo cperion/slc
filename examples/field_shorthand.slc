@@ -1,0 +1,23 @@
+-- `.name` in a table constructor is `name = name`.
+local Point = struct { x: U32, y: U32 }
+
+local make = do(x: U32, y: U32): Point
+    return Point { .x, .y }
+end
+export make
+
+local shifted = do(x: U32): Point
+    local y = x + 1
+    return Point { .x, .y }
+end
+export shifted
+
+-- mixed with other entries, and in plain Lua code around the words
+local x, y = U32 3, U32 4
+local fixed = Point { .x, .y }
+local options = { .x, scale = 2 }
+
+local fixed_sum = do(z: U32): U32
+    return fixed.x + fixed.y + z * options.scale
+end
+export fixed_sum

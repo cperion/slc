@@ -40,6 +40,7 @@ The resolutions, in the order they matter:
 25. **Text (§39)**: `Str` views, `Text` built in place with formatting decided while compiling, `Chars(n)` values; the text words are slc, so known text folds and known needles unroll. Range facts now include lower bounds by constants, and an arm that cannot fall through lends its facts to what follows. Field and method access in typed bodies no longer collides with the evaluator's own keys (a struct field named `name` used to read the local's name).
 
 26. **Library-defined types (§41)**: a type's layout is a `struct`; what `x.f`, `x[k]`, a conversion, an operator or a comparison means on it is a hook, a Lua function or native word run while specializing. The built-in kinds are served by the same hooks, so a library can define a fixed-point number, a ring buffer or a struct-of-arrays with no compiler change.
+27. **Field shorthand (§3.3)**: `.name` in a table constructor is `name = name`.
 
 ---
 
@@ -259,6 +260,7 @@ The rules:
 6. **Loop headers.** The `do` of a `while` or `for` header ends the header; a lambda inside a header goes in brackets: `for x in each(xs, do(x) = x > 0) do`.
 7. **Saturating chains.** `f(a) do ... end` on a word accumulates arguments until the word is saturated (§30.4).
 8. **Statements on one line.** Two statements on one line where the first ends with a name and the second begins with one (`a = b c = d`) form an application; separate them with `;`. `f() g()` is unaffected: a name after `)` is not an argument.
+9. **Field shorthand.** In a table constructor, `.name` is `name = name`: `Point { .x, .y, z = 3 }` is `Point { x = x, y = y, z = 3 }`. A `.` never follows `{`, `,` or `;` in Lua, so no existing program changes. The shorthand is rewritten in the token stream, so it works in typed bodies and in the plain Lua code around them, and it is only spelling: the program is the one the long form writes. A bare `{x}` is not a shorthand, because it is already a one-element array table.
 
 The syntax remains independent of the runtime arity of the callee.
 

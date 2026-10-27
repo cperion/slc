@@ -613,6 +613,12 @@ function P:table_body()
             r:expect(']')
             r:expect('=')
             items[#items + 1] = { kind = 'keyed', key = key, e = self:expr() }
+        elseif tk.t == '.' and r:peek(2).t == 'iden' and not r:peek(2).kw
+            and (r:peek(3).t == ',' or r:peek(3).t == ';' or r:peek(3).t == '}') then
+            -- `.name` is `name = name`
+            r:next()
+            local n = r:next()
+            items[#items + 1] = { kind = 'named', name = n.v, e = { k = 'name', name = n.v, line = n.line } }
         elseif tk.t == 'iden' and r:peek(2).t == '=' then
             local n = r:next()
             r:next()

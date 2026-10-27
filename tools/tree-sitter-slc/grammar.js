@@ -47,7 +47,8 @@ module.exports = grammar({
     function_expression: $ => seq('function', $.parameters, optional($.block), 'end'),
     struct_expression: $ => seq('struct', $.table_constructor),
     table_constructor: $ => seq('{', optional(seq(sep($.field, choice(',', ';')), optional(choice(',', ';')))), '}'),
-    field: $ => choice($.handler, seq($.identifier, choice('=', ':'), $._expression),
+    // `.name` is the shorthand for `name = name`.
+    field: $ => choice($.handler, seq('.', $.identifier), seq($.identifier, choice('=', ':'), $._expression),
       seq('[', $._expression, ']', '=', $._expression), $._expression),
     // A keyed handler is a lambda without the leading `do`.
     handler: $ => seq(field('name', $.identifier), $.parameters, optional($.type_annotation), choice(seq('=', $._expression), seq(optional($.block), 'end'))),

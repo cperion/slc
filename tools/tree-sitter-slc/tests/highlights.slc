@@ -23,3 +23,8 @@ local nested = do(): U32
         endall
     return 1
 end
+
+-- field shorthand
+local shorthand = do(x: U32, y: U32): Point
+    return Point { .x, .y, z = 3 }
+end
