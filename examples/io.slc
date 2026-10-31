@@ -4,7 +4,7 @@ local io = require "slc.io"
 -- a pipe between two tasks: the writer closes, the reader reads to the end
 local pipe_roundtrip = do(): U32
     local total: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         io.pipe() {
             done = do(p)
                 spawn do
@@ -92,7 +92,7 @@ export timeout_then_data
 -- an echo server: one task per connection; clients check their replies
 local echo = do(clients: U32): U32
     local good: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         io.listen(io.LOOPBACK, 0) {
             done = do(l)
                 local port: U32 = io.local_port l
@@ -163,7 +163,7 @@ local Chunk = struct { n: U32, bytes: Array(U8, 16) }
 
 local zero_copy = do(chunks: U32): U32
     local total: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         local buffers = pool(Chunk, 2)
         local filled = channel(Slot Chunk, 2)
         io.pipe() {

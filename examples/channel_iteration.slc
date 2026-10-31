@@ -2,7 +2,7 @@
 -- not recursion with a changing compile-time callback argument.
 local channel_nested_each = do(): U32
     local total = U32 0
-    tasks do(scope...)
+    tasks do(..)
         local outer = channel(U32, 1)
         local inner = channel(U32, 1)
         outer:send 7

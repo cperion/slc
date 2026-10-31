@@ -11,8 +11,8 @@ The forms, as in Let's own syntax.md §4 and the application sugar:
     do(x: U32): U32 = x + 1  parameter and result types are read and dropped
     do(x) ... end            a block lambda
     do ... end               a nullary block lambda; `do() ... end` is the same
-    do(...) ... end          the argument is opened: its members are in scope by
-    do(ctx...) ... end       name, for reads and writes; `ctx...` also names it
+    do(..) ... end           the argument is opened: its members are in scope by
+    do(ctx..) ... end        name, for reads and writes; `ctx..` also names it
     do(x) = do(y) = x + y    currying needs no grouping
 
 Application, as in Let: a lambda after an expression is that expression's argument,
@@ -261,11 +261,14 @@ local function parameters (get)
         if t == 'iden' then
             names[#names + 1] = v
             t, v = significant(get)
-            if t == '.' then                              -- `ctx...`: lexed as three dots
-                get(); get(); opened = names[#names]; t, v = significant(get)
+            if t == '.' then                              -- `ctx..`: lexed as two dots
+                local dot = get()
+                if dot ~= '.' then M.error("expected '..' after an opened parameter") end
+                opened = names[#names]; t, v = significant(get)
             end
-        elseif t == '.' then                              -- `...`
-            get(); get()
+        elseif t == '.' then                              -- `..`
+            local dot = get()
+            if dot ~= '.' then M.error("expected '..' for an unnamed opened parameter") end
             names[#names + 1] = '__home'; opened = '__home'
             t, v = significant(get)
         else

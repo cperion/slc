@@ -1677,7 +1677,7 @@ end
 
 -- an untyped local names a value: binding a typed place takes its current
 -- value (resizable storage, which has no value, stays a name for the place)
--- `local ctx... = e`: the context is retained; a place stays a place (syntax §10.5)
+-- `local ctx.. = e`: the context is retained; a place stays a place (syntax §10.5)
 function S.open_bind(v)
     if is_place(v) then return v end
     return S.bind(v)
@@ -2257,7 +2257,7 @@ function W:__tostring()
     for i, p in ipairs(self.params) do
         if i > #self.supplied then ps[#ps + 1] = p.name .. (p.T and (': ' .. p.T.display) or '') end
     end
-    if self.rest then ps[#ps + 1] = '...' .. self.rest end
+    if self.rest then ps[#ps + 1] = '..' .. self.rest end
     return ('<word %s(%s): %s>'):format(self.name, table.concat(ps, ', '), self.ret.display)
 end
 
@@ -3190,7 +3190,7 @@ function S.ret(...)
     b:return_value(frame, v)
 end
 
--- `return ...xs` in a word: exactly one component (words return one value)
+-- `return ..xs` in a word: exactly one component (words return one value)
 function S.ret_one(...)
     local n = select('#', ...)
     if n ~= 1 then
@@ -3945,7 +3945,7 @@ S.NIL = setmetatable({}, { __tostring = function() return 'nil' end })
 
 -- packs ----------------------------------------------------------------------------------------
 -- A rest requirement collects the remaining components into a pack: a static
--- length and components, second-class. `...args` contributes them, `args.length`
+-- length and components, second-class. `..args` contributes them, `args.length`
 -- is the length, `args[i]` a component (a static index, from 1).
 
 local Pack = { __name = 'Pack' }
@@ -3966,7 +3966,7 @@ end
 Pack.__newindex = function() fail('pack-use: a pack cannot be modified', 2) end
 Pack.__tostring = function(p) return '<pack of ' .. #rawget(p, 'c') .. '>' end
 for _, mm in ipairs { '__add', '__sub', '__mul', '__div', '__mod', '__unm', '__concat', '__len', '__call' } do
-    Pack[mm] = function() fail('pack-use: a pack is not a value; spread it with ...', 2) end
+    Pack[mm] = function() fail('pack-use: a pack is not a value; spread it with ..', 2) end
 end
 
 function S.pack(comps)
@@ -3979,12 +3979,12 @@ S.is_pack = is_pack
 function S.no_pack(x)
     if is_pack(x) then
         fail('pack-use: a pack is not a value: it cannot be passed, stored or returned whole; '
-            .. 'spread it with ...args', 3)
+            .. 'spread it with ..args', 3)
     end
 end
 
 -- ordered spread ---------------------------------------------------------------------------------
--- f(a, ...p, b): each item is evaluated once, left to right. A spread item
+-- f(a, ..p, b): each item is evaluated once, left to right. A spread item
 -- contributes a pack's components or a host call's results; records do not
 -- expand positionally.
 
@@ -3998,7 +3998,7 @@ function S.sp(...)
             local t = x.T
             if t.kind == 'ref' then t = t.elem end
             if t.kind == 'struct' then
-                fail(('spread-source: a %s record expands only by key (%s { ...r }), not into an '
+                fail(('spread-source: a %s record expands only by key (%s { ..r }), not into an '
                     .. 'ordered list'):format(t.display, t.display), 2)
             end
             fail(('spread-source: a %s value has no components to spread'):format(t.display), 2)
@@ -4078,7 +4078,7 @@ function S.bmchain(obj, name, first, ...)
     return S.chain(S.boundary(f), g, ...)
 end
 
--- keyed spread: T { ...p, x = 5 } ---------------------------------------------------------------
+-- keyed spread: T { ..p, x = 5 } ---------------------------------------------------------------
 
 local Keyed = { __name = 'Keyed' }
 S.Keyed = Keyed
@@ -5837,7 +5837,7 @@ local function spawn(scope, f, ...)
         fail(('spawn: expects a block (spawn do ... end) or a typed word (spawn(f, args...)), got %s'):format(
             describe(f)), 3)
     end
-    if f.rest then fail(('spawn: %s takes ...%s; a task takes a fixed list of values'):format(f.name, f.rest), 3) end
+    if f.rest then fail(('spawn: %s takes ..%s; a task takes a fixed list of values'):format(f.name, f.rest), 3) end
     if f.ret.kind ~= 'unit' then
         fail(('spawn: %s returns a %s, but a task\'s result goes nowhere; send it on a channel'):format(
             f.name, f.ret.display), 3)
@@ -5879,12 +5879,12 @@ local function spawn(scope, f, ...)
     return spawn_block(scope, function() base(unpack(all, 1, #f.params)) end, f.name, names)
 end
 
--- tasks do(scope...) ... end
+-- tasks do(scope..) ... end
 function S.tasks(body)
     local b = cur()
     local mt = getmetatable(body)
     if type(body) ~= 'function' and not (mt and mt.__call) then
-        fail('tasks takes a body: tasks do(scope...) ... end', 2)
+        fail('tasks takes a body: tasks do(scope..) ... end', 2)
     end
     local group = rt_value(types.Group, 'slc_scope_new', { TASK }, 'opening a tasks scope', nil, 'scope')
     local scope = { group = group }

@@ -247,7 +247,7 @@ local bad  = do(x: U32) = x + 1             -- error: typed parameters need a re
 
 Inside a typed body, an untyped lambda is a callback, evaluated in place (§10.1).
 
-A word's untyped parameters are compile-time parameters (§10.2), and a word may end with a rest requirement `...args` (§10.8). The same holds for named functions: `function T:m(n: U32): Unit ... end` defines a method word on struct `T`, and `local function f(n: U32): U32 ... end` a word that may name itself.
+A word's untyped parameters are compile-time parameters (§10.2), and a word may end with a rest requirement `..args` (§10.8). The same holds for named functions: `function T:m(n: U32): Unit ... end` defines a method word on struct `T`, and `local function f(n: U32): U32 ... end` a word that may name itself.
 
 ## 3. Words
 
@@ -408,7 +408,7 @@ A typed body is therefore parsed — a recursive-descent parser with Lua's prece
 | `do(x) ... end` (untyped) | `stage.callback(...)`: evaluated in place (§10.1) |
 | `f(a)(b)`, `f(a) do ... end` | `stage.chain(f, ...)`: a saturating chain (§10.4) |
 | a free name, a bare call or an assignment in an opened region | resolved against the opened contexts (§10.5) |
-| `...e`, `T { ...p, x = 1 }` | `stage.expand`, `stage.keyed` (§10.7, §10.8) |
+| `..e`, `T { ..p, x = 1 }` | `stage.expand`, `stage.keyed` (§10.7, §10.8) |
 | `oneof { ... }`, `s { alt = handler, ... }` | `stage.oneof`, matching (§11) |
 | `p[i]`, `s[i]`, `Ptr(place)`, `Slice(p, n)` | element places and checked reads (§12) |
 
@@ -1229,13 +1229,13 @@ end
 
 -- work on a copy, commit at the end
 local transaction = do(document: Ref Document, body): Unit
-    local draft = Draft { ...document }
+    local draft = Draft { ..document }
     body(Ref draft)
-    document = Document { ...draft }
+    document = Document { ..draft }
 end
 
 local type_text = do(doc: Ref Document, n: U32): Unit
-    transaction doc do(draft...)
+    transaction doc do(draft..)
         insert n
         move_left()
         if cursor > 3 then
@@ -1276,7 +1276,7 @@ uint32_t fresh_length(uint32_t n) {
 }
 ```
 
-An activity can own temporary state and return a result. Its body may open the home without naming it (`do(...)`):
+An activity can own temporary state and return a result. Its body may open the home without naming it (`do(..)`):
 
 ```lua
 local counting = do(body): U32
@@ -1285,7 +1285,7 @@ local counting = do(body): U32
     return counting.count
 end
 local evens = do(n: U32): U32 =
-counting do(...)
+counting do(..)
     for i: U32 = 1, n do
         if i % 2 == 0 then
             tick()
@@ -1319,16 +1319,18 @@ Temporary resizable state (a worklist, a change log) created in an activity take
 
 ### 10.4 Saturating chains
 
-`transaction(doc) do(draft...) ... end` is the application `transaction(doc)(body)`. On its own, `transaction(doc)` would be a partial application with a runtime argument, which §3.8 rejects. **A chain of applications on a word accumulates its arguments until the word is saturated**, as in Let; surplus arguments apply to the result. The same holds for method chains (`g:view() do(xs) ... end`) and for library functions with a declared arity. Any other Lua function applies each group in turn.
+`transaction(doc) do(draft..) ... end` is the application `transaction(doc)(body)`. On its own, `transaction(doc)` would be a partial application with a runtime argument, which §3.8 rejects. **A chain of applications on a word accumulates its arguments until the word is saturated**, as in Let; surplus arguments apply to the result. The same holds for method chains (`g:view() do(xs) ... end`) and for library functions with a declared arity. Any other Lua function applies each group in turn.
 
 ### 10.5 Opening
 
+SLC uses `..` to contribute bindings or values: postfix in opening declarations, prefix in keyed and ordered spreads, and prefix in a rest parameter. `(..)` reads the anonymous home. Infix `a .. b` keeps its concatenation semantics and precedence; for example, `f(a .. b)` passes one concatenated value, while `f(..args)` expands a pack. Ordinary Lua `...` varargs outside typed bodies are unchanged; `...` is not an alternative spelling for SLC opening or expansion.
+
 | Form | Meaning |
 |---|---|
-| `do(ctx...)`, `do(ctx...: T)` | receive one argument, then open it |
-| `do(...)`, `do(...: T)` | the same, without a name; `(...)` reads the home |
-| `local ctx...` | open an existing binding |
-| `local ctx... = e` | evaluate once, bind, then open |
+| `do(ctx..)`, `do(ctx..: T)` | receive one argument, then open it |
+| `do(..)`, `do(..: T)` | the same, without a name; `(..)` reads the home |
+| `local ctx..` | open an existing binding |
+| `local ctx.. = e` | evaluate once, bind, then open |
 
 One parameter may be opened. What a context introduces:
 
@@ -1344,14 +1346,14 @@ One parameter may be opened. What a context introduces:
 
 #### Anonymous spread
 
-When a context's name adds nothing, open it unnamed. Its fields are in scope, bare calls go to it, and `(...)` reads the home itself — including to pass it on explicitly with `(f)(..., other)`, which bypasses receiver insertion:
+When a context's name adds nothing, open it unnamed. Its fields are in scope, bare calls go to it, and `(..)` reads the home itself — including to pass it on explicitly with `(f)(.., other)`, which bypasses receiver insertion:
 
 ```lua
-local squared = do(...: Vec): F64 = x * x + y * y
+local squared = do(..: Vec): F64 = x * x + y * y
 
-local session = do(...: Ref Terminal, lines: U32): U32
+local session = do(..: Ref Terminal, lines: U32): U32
     draw lines
-    (status)(..., 1)
+    (status)(.., 1)
     return width - drawn
 end
 ```
@@ -1377,7 +1379,7 @@ A materialized unnamed home is named after its type in C. A home read where none
 ```lua
 local units = { kilo = 1000, mega = 1000000 }
 local to_base = do(k: U32, m: U32): U32
-    local units...
+    local units..
     return k * kilo + m * mega
 end
 ```
@@ -1388,7 +1390,7 @@ end
 
 ```lua
 local double_node = do(g: Ref Graph, id: Id Node): Unit
-    local node... = g.nodes[id]
+    local node.. = g.nodes[id]
     value = value * 2
     weight = weight + 1
 end
@@ -1414,19 +1416,19 @@ Then the next use looks again. The C compiler cannot do this merging itself, bec
 ### 10.7 Keyed spread
 
 ```lua
-local moved_x = do(p: Point, dx: I32): Point = Point { ...p, x = p.x + dx }
+local moved_x = do(p: Point, dx: I32): Point = Point { ..p, x = p.x + dx }
 ```
 
 A spread contributes a record's data fields (from a value, place or reference); the result is ordinary construction. Explicit fields override spread fields regardless of position; duplicate explicit fields are rejected; two spreads contributing the same field are rejected (`spread-overlap`), even if an explicit field overrides it; unknown fields are rejected, including overridden ones. All operands evaluate in source order.
 
 ### 10.8 Rest requirements, packs and ordered spread
 
-A word may end its parameters with one unannotated rest requirement `...args`. Once the fixed requirements are supplied, the rest takes every remaining argument and the application is saturated. The components form a **pack**: a static length and components, second-class. Only three operations exist: `...args` contributes the components to an ordered list, `args.length` is the static length, and `args[i]` is a component (a static, in-range index, from 1). Passing, storing, returning or assigning a pack whole is rejected (`pack-use`); a bad index is `pack-index`.
+A word may end its parameters with one unannotated rest requirement `..args`. Once the fixed requirements are supplied, the rest takes every remaining argument and the application is saturated. The components form a **pack**: a static length and components, second-class. Only three operations exist: `..args` contributes the components to an ordered list, `args.length` is the static length, and `args[i]` is a component (a static, in-range index, from 1). Passing, storing, returning or assigning a pack whole is rejected (`pack-use`); a bad index is `pack-index`.
 
 ```lua
-local logged = do(f, ...args): U32
+local logged = do(f, ..args): U32
     log_call args.length
-    return f(...args)
+    return f(..args)
 end
 local use_logged = do(x: U32, y: U32): U32 = logged(twice, x) + logged(add3, x, y, 1)
 ```
@@ -1441,7 +1443,7 @@ uint32_t use_logged(uint32_t x, uint32_t y) {
 
 A pack's shape is part of the specialization key, so each shape gets its own residual code; no runtime tuple or variadic call exists.
 
-`...e` may appear at any position of an argument list, a return list or a binding initializer list. It contributes a pack's components, or the several results of a Lua call. Records do not expand positionally (`spread-source`); nor do Lua tables (runtime-length expansion is deferred). Items evaluate once, left to right. A word's `return ...args` must supply exactly one value.
+`..e` may appear at any position of an argument list, a return list or a binding initializer list. It contributes a pack's components, or the several results of a Lua call. Records do not expand positionally (`spread-source`); nor do Lua tables (runtime-length expansion is deferred). Items evaluate once, left to right. A word's `return ..args` must supply exactly one value.
 
 ### 10.9 `endall`
 
@@ -1449,7 +1451,7 @@ A pack's shape is part of the specialization key, so each shape gets its own res
 local import_rows = do(doc: Ref Document, n: U32): Unit
     traced 1 do
     traced 2 do
-    transaction doc do(draft...)
+    transaction doc do(draft..)
         insert n
     endall
     trace 9
@@ -2328,8 +2330,8 @@ local File = struct { handle: Ptr FILE }
 function File:write(s: CString): Unit
     fputs(s, self.handle)
 end
-function File:say(...parts): Unit
-    fprintf(self.handle, cformat(...parts))
+function File:say(..parts): Unit
+    fprintf(self.handle, cformat(..parts))
 end
 
 local with_file = do(path: CString, mode: CString, body): Bool
@@ -2344,7 +2346,7 @@ local with_file = do(path: CString, mode: CString, body): Bool
 end
 ```
 
-It also provides `say` (formatted `printf`), `each_byte(path) do(b) ... end` (an activity built on `with_file`), and `with_buffer(n) do(buffer...) ... end` with `data`, `size` and `fill`.
+It also provides `say` (formatted `printf`), `each_byte(path) do(b) ... end` (an activity built on `with_file`), and `with_buffer(n) do(buffer..) ... end` with `data`, `size` and `fill`.
 
 ### 17.4 Using it
 
@@ -2352,8 +2354,8 @@ It also provides `say` (formatted `printf`), `each_byte(path) do(b) ... end` (an
 local c = require "slc.libc"
 
 local report = do(path: CString, n: U32, ratio: F64): Bool
-    local c...
-    return with_file(path, "w") do(file...)
+    local c..
+    return with_file(path, "w") do(file..)
         write "report\n"
         say("n = ", n, ", ratio = ", ratio, "\n")
         if n > 10 then
@@ -2391,9 +2393,9 @@ A heap buffer, written through its `Ptr`, read through a checked `Slice`:
 
 ```lua
 local sum_filled = do(n: U32, byte: U8): U32
-    local c...
+    local c..
     local total: U32 = 0
-    with_buffer n do(buffer...)
+    with_buffer n do(buffer..)
         fill byte
         data[0] = 1
         local bytes = Slice(data, size)
@@ -2469,10 +2471,10 @@ references between tasks or change the ownership rules.
 
 ### 18.2 The library
 
-- `with_fd(path, flags) do(writing...) ... end` returns an **`Outcome`**, `oneof { done: Unit, failed: I32 }` carrying the errno. Inside, the body has `write_text`, `write_bytes`, `read_bytes`, `size` and `mapped`.
+- `with_fd(path, flags) do(writing..) ... end` returns an **`Outcome`**, `oneof { done: Unit, failed: I32 }` carrying the errno. Inside, the body has `write_text`, `write_bytes`, `read_bytes`, `size` and `mapped`.
 - `mapped(n) do(bytes) ... end` maps the file's first `n` bytes as a read-only `Slice U8` that ends with its `munmap`.
-- `with_eventfd do(counter...) ... end` gives a kernel counter that is a descriptor.
-- `with_epoll do(poll...) ... end` gives `watch(fd)` and `next_ready(timeout_ms)`.
+- `with_eventfd do(counter..) ... end` gives a kernel counter that is a descriptor.
+- `with_epoll do(poll..) ... end` gives `watch(fd)` and `next_ready(timeout_ms)`.
 
 **Failures are the activity's outcome.** The `Fd` context records the first failed call's errno (every `read` and `write` result is checked, as `warn_unused_result` demands), and `with_fd` reports it as `failed(e)`: the completion policy belongs to the activity.
 
@@ -2482,8 +2484,8 @@ references between tasks or change the ownership rules.
 local px = require "slc.posix"
 
 local make_file = do(path: CString): I32
-    local px...
-    return with_fd(path, bor(O_WRONLY, bor(O_CREAT, O_TRUNC))) do(writing...)
+    local px..
+    return with_fd(path, bor(O_WRONLY, bor(O_CREAT, O_TRUNC))) do(writing..)
         write_text "SLC1"
         write_text "hello, kernel\n"
     end { done() = 0, failed(e) = e }
@@ -2550,12 +2552,12 @@ And the kernel's own event machinery, an eventfd watched by epoll, as a spine of
 
 ```lua
 local ping = do(n: U64): U64
-    local px...
+    local px..
     local got: U64 = 0
-    with_eventfd do(counter...)
+    with_eventfd do(counter..)
         local value = n
         write_bytes(bytes value, size_of U64)
-        with_epoll do(poll...)
+        with_epoll do(poll..)
             watch fd
             if next_ready 100 == fd then
                 local back: U64 = 0
@@ -2702,7 +2704,7 @@ library internals; they are not how tasks cooperate.
 ### 20.1 Scopes
 
 ```lua
-tasks do(scope...)
+tasks do(scope..)
     local jobs = channel(Job, 16)
     spawn do
         for i: U32 = 1, n do jobs:send(Job { id = i, n = i }) end
@@ -2948,7 +2950,7 @@ local Block = struct { n: U32, data: Array(U8, 64) }
 
 local pooled = do(count: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(scope..)
         local buffers = pool(Block, 4)
         local full = channel(Slot Block, 4)
         spawn do

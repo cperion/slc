@@ -3,7 +3,8 @@
 `slc fmt` keeps SLC's word-oriented style without treating it as ordinary Lua.
 It uses the compiler's parser and the lossless lexer; it does not execute the
 source or resolve imports. The one annotation it removes is a repeated
-constructor type (see `type_style`).
+constructor type (see `type_style`). It also removes unused names from opened
+`do` parameters (see `opening_style`).
 
 ## Commands
 
@@ -42,6 +43,7 @@ return {
     spine_style = "pure",
     type_style = "inferred",
     table_style = "shorthand",
+    opening_style = "anonymous",
 }
 ```
 
@@ -59,6 +61,7 @@ file, not arbitrary downloaded Lua code.
 | `call_style` | `"minimal"`, `"preserve"` | Remove safe call parentheses (and fold a spine's closers), or retain call spelling. |
 | `type_style` | `"inferred"`, `"preserve"` | Drop a local's annotation when its initializer is an application of that same type (below), or keep every annotation. |
 | `table_style` | `"shorthand"`, `"preserve"` | `"shorthand"` writes a table entry `name = name` as `.name` (syntax §2.4); `"preserve"` keeps the spelling, including any `.name` already written. |
+| `opening_style` | `"anonymous"`, `"preserve"` | Remove an unused name from an opened `do` parameter, or keep named openings. |
 | `spine_style` | `"pure"`, `"all"`, `"none"` | Which link bodies of an `endall` spine lose their indent. |
 
 Unknown settings and invalid values are errors, not silently ignored options.
@@ -97,6 +100,25 @@ shows. These keep their annotation: `local w: U64 = n` (a different type),
 `local z: U32 = 0` (a host number), `local q: U8 = U32 0` (a different type),
 a name it cannot resolve to a typed declaration, and `for i: U32 = 1, n`. The rewrite is applied only when the reparsed program equals
 the original with exactly those annotations removed.
+
+## Anonymous openings
+
+With `opening_style = "anonymous"`, the formatter writes an unused opened
+parameter `do(ctx..)` as `do(..)`. A type annotation stays: `do(ctx..: T)` becomes
+`do(..: T)`. Ordinary parameters and `local ctx..` declarations are not changed.
+
+Only the parameter-name token is removed. Comments and strings are preserved;
+mentions inside them, field names, and table keys are not uses of the parameter.
+References, assignments, reopening the receiver, and captures in nested blocks
+keep the name. The analysis is conservative: a nested reference also keeps the
+name when an intervening binding might shadow it.
+
+The formatter keeps the name if the block contains an anonymous-home read
+(`(..)`) or refers to the internal `__home` binding, since introducing a home
+could change that lookup. It also avoids conflicting `__home` parameters and
+repeated parameter names that affect which argument is opened.
+The candidate is reparsed and checked against exactly the intended parameter
+change. Set `opening_style = "preserve"` to retain named openings.
 
 ## Default style
 
@@ -149,7 +171,7 @@ A spine is a stack of calls whose bodies are the next call, closed by one
 ```lua
     counted stats do
     counted stats do
-    transaction document do(draft...)
+    transaction document do(draft..)
         insert n
     endall
 ```

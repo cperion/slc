@@ -48,7 +48,7 @@ end
 -- leftover one or two bytes at the end of a chunk move to the front of the buffer
 local pump = do(input: Ptr U8, capacity: U32): I32
     local code: I32 = 0
-    c.with_buffer(U32 4096) do(output...)
+    c.with_buffer(U32 4096) do(output..)
         local have: U32 = 0
         local eof: Bool = false
         while not eof do
@@ -72,7 +72,7 @@ end
 
 local main = do(): I32
     local code: I32 = 0
-    c.with_buffer(U32 3072) do(input...)
+    c.with_buffer(U32 3072) do(input..)
         code = pump(input.data, input.size)
     end
     return code

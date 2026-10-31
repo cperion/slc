@@ -112,15 +112,15 @@ function Balance:debit(n: U32): Unit
     self.amount = self.amount - n
 end
 local bounded = do(account: Ref Balance, maximum: U32, body): Bool
-    local draft = Balance { ...account }
+    local draft = Balance { ..account }
     body(Ref draft)
     if draft.amount > maximum then return false end
-    account = Balance { ...draft }
+    account = Balance { ..draft }
     return true
 end
 local activity = do(initial: U32, incoming: U32, maximum: U32): U32
     local account = Balance { amount = initial }
-    bounded(Ref account, maximum) do(editing...)
+    bounded(Ref account, maximum) do(..)
         credit incoming
         debit 2
     end

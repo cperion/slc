@@ -52,6 +52,21 @@ for id, node in query:iter_captures(tree:root(), 0) do
   end
 end
 assert(string_count == 1 and comment_count == 1, 'missing long string/comment captures')
+local dots = parse([[
+local opened = do(ctx..: T): U32 = ctx.value
+local home = do(..: T): T = (..)
+local values = do(..args): U32 = add(1, ..args)
+local f = do(): U32
+    local ctx.. = source
+    local a, b = ..pair()
+    local text = "a" .. "b"
+    return add(..args)
+end
+local record = T { ..source, x = 1 }
+local function host(...) return ... end
+]], 'two-dot opening, home, expansion, concatenation, and Lua varargs')
+assert(dots:root():sexpr():find('binary_expression', 1, true), 'concatenation lost its infix parse')
+assert(dots:root():sexpr():find('spread_expression', 1, true), 'prefix expansion missing')
 local newline_tree = parse('local x = f a\nx = x + 1\n', 'newline application boundary')
 assert(newline_tree:root():named_child_count() == 2, 'name application crossed newline')
 assert(newline_tree:root():named_child(1):type() == 'assignment_statement')

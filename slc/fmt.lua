@@ -4,7 +4,7 @@ local lexer = require 'macro.lexer'
 local syntax = require 'slc.syntax'
 local M = {}
 M.defaults = { indent_width = 4, column_width = 100, call_style = 'minimal', spine_style = 'pure',
-               type_style = 'inferred', table_style = 'shorthand' }
+               type_style = 'inferred', table_style = 'shorthand', opening_style = 'anonymous' }
 
 function M.options(options)
     local out = {}
@@ -29,6 +29,9 @@ function M.options(options)
     end
     if out.table_style ~= 'preserve' and out.table_style ~= 'shorthand' then
         error('fmt: table_style must be "preserve" or "shorthand"', 0)
+    end
+    if out.opening_style ~= 'anonymous' and out.opening_style ~= 'preserve' then
+        error('fmt: opening_style must be "anonymous" or "preserve"', 0)
     end
     if out.spine_style ~= 'pure' and out.spine_style ~= 'all' and out.spine_style ~= 'none' then
         error('fmt: spine_style must be "pure", "all" or "none"', 0)
@@ -98,7 +101,7 @@ local function parse(source, filename)
     local p = syntax.parser(r)
     local ranges, calls, colons, unary, chains = {}, {}, {}, {}, {}
     local lambdas, body_ranges = {}, {}
-    local typespans, locals = {}, {}
+    local typespans, locals, parameter_names = {}, {}, {}
     local suffixed_from = p.suffixed_from
     function p:suffixed_from(...)
         local first = #calls + 1
@@ -116,6 +119,14 @@ local function parse(source, filename)
         local tk = r:peek()
         if tk.t == '-' or tk.t == '#' then unary[tk.index] = true end
         return subexpr(self, ...)
+    end
+    -- The same token opens/expands in prefix or suffix position and concatenates
+    -- in infix position. Use the parser's decision, not whitespace, to format it.
+    local binop = p.binop
+    function p:binop(tk)
+        local op = binop(self, tk)
+        if op == '..' then ts[tk.index].concat = true end
+        return op
     end
     local depth, native_depth, host_argument_depth = 0, 0, 0
     local argument = p.argument
@@ -195,12 +206,16 @@ local function parse(source, filename)
         return result
     end
     function p:funcbody(name, at, opts)
-        local nesting, j = 0, 1
+        local nesting, j, names = 0, 1, {}
         repeat
             local tk = r:peek(j)
             if tk.t == 'eof' then break end
             if tk.t == '(' then nesting = nesting + 1 end
             if tk.t == ')' then nesting = nesting - 1 end
+            if nesting == 1 and tk.t == 'iden' and r:peek(j + 1).t == '..'
+                and j > 1 and (r:peek(j - 1).t == '(' or r:peek(j - 1).t == ',') then
+                names[tk.v] = tk.index
+            end
             j = j + 1
         until nesting == 0
         local typed = r:peek(j).t == ':'
@@ -210,6 +225,9 @@ local function parse(source, filename)
         end
         if typed then native_depth = native_depth + 1 end
         local result = funcbody(self, name, at, opts)
+        for _, prm in ipairs(result.params) do
+            if prm.opened and not prm.unnamed then parameter_names[prm] = names[prm.name] end
+        end
         if typed then native_depth = native_depth - 1 end
         return result
     end
@@ -279,7 +297,8 @@ local function parse(source, filename)
         end
     end
     return { ast = ast, tokens = ts, ranges = ranges, calls = calls, colons = colons, commas = commas,
-             unary = unary, chains = chains, lambdas = lambdas, typespans = typespans, locals = locals }
+             unary = unary, chains = chains, lambdas = lambdas, typespans = typespans, locals = locals,
+             parameter_names = parameter_names }
 end
 
 -- Source locations and application spelling do not affect the parsed program.
@@ -479,6 +498,64 @@ local function drop_inferred(source, info, filename)
     return source
 end
 
+-- A named opening whose name is never mentioned needs only its anonymous home.
+-- Be conservative: nested mentions count even if a later binding might shadow
+-- the parameter. Opening can introduce unknown names, so this is syntax analysis,
+-- not a claim about which dynamic vocabulary supplies a reference.
+local function drop_opening_names(source, info, filename)
+    local function mentions(node, name)
+        if type(node) ~= 'table' then return false end
+        local function matches(n) return n == name or n == '__home' end
+        -- Introducing a home must not capture an enclosing anonymous home.
+        if node.k == 'home' or node.k == 'name' and matches(node.name) then return true end
+        if node.k == 'open' and not node.init and matches(node.name) then return true end
+        if (node.k == 'function' or node.k == 'export')
+            and matches(node.path and node.path[1] or node.name) then return true end
+        for _, child in pairs(node) do
+            if mentions(child, name) then return true end
+        end
+        return false
+    end
+    local edits, changed = {}, {}
+    for _, item in ipairs(info.lambdas) do
+        local fn = item.fn
+        local has_home = fn.rest == '__home'
+        for _, prm in ipairs(fn.params) do
+            if prm.name == '__home' then has_home = true end
+        end
+        if not has_home then
+            for _, prm in ipairs(fn.params) do
+                local index = info.parameter_names[prm]
+                local repeated = fn.rest == prm.name
+                for _, other in ipairs(fn.params) do
+                    if other ~= prm and other.name == prm.name then repeated = true end
+                end
+                if index and not repeated and not mentions(fn.body or fn.expr, prm.name) then
+                    local tk = info.tokens[index]
+                    edits[#edits + 1] = { tk.first, tk.last }
+                    changed[#changed + 1] = { param = prm, name = prm.name, unnamed = prm.unnamed }
+                end
+            end
+        end
+    end
+    if #edits == 0 then return source end
+    table.sort(edits, function(a, b) return a[1] > b[1] end)
+    local candidate = source
+    for _, edit in ipairs(edits) do
+        candidate = candidate:sub(1, edit[1] - 1) .. candidate:sub(edit[2] + 1)
+    end
+    for _, change in ipairs(changed) do
+        change.param.name, change.param.unnamed = '__home', true
+    end
+    local expected = fingerprint(info.ast)
+    for _, change in ipairs(changed) do
+        change.param.name, change.param.unnamed = change.name, change.unnamed
+    end
+    local ok, reparsed = pcall(parse, candidate, filename)
+    if ok and fingerprint(reparsed.ast) == expected then return candidate end
+    return source
+end
+
 -- `{ x = x }` is `{ .x }`: the same parsed program, so this is only spelling.
 -- Only entries directly inside a table constructor qualify (`a, x = x, y` as a
 -- statement is not one).
@@ -562,11 +639,9 @@ local function gap(prev, tk, colon, unary)
         if prev.t == 'iden' or a == ')' or a == ']' or a == '}' or a == 'do' or a == 'function' then return '' end
     end
     if a == '{' and b == '}' then return '' end
-    if a == '...' or b == '...' then
-        -- `...args` and `f(...)` take no space; anything else after `...` does
-        if b == '...' and (prev.t == 'iden' or a == ')') then return '' end
-        if a == '...' and tk.t == 'iden' then return '' end
-    end
+    if (a == '..' and prev.concat) or (b == '..' and tk.concat) then return ' ' end
+    if b == '..' and (prev.t == 'iden' or a == ')') then return '' end
+    if a == '..' and tk.t == 'iden' then return '' end
     return ' '
 end
 
@@ -652,6 +727,10 @@ function M.format(source, options, filename)
     end
     if options.table_style == 'shorthand' then
         source = shorthand(source, info, filename)
+        info = parse(source, filename)
+    end
+    if options.opening_style == 'anonymous' then
+        source = drop_opening_names(source, info, filename)
         info = parse(source, filename)
     end
     local signature = fingerprint(info.ast)

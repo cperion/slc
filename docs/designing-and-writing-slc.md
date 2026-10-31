@@ -18,10 +18,10 @@ Every `lua` block below is an excerpt of [`examples/guide.slc`](../examples/guid
 | `s { name = do(p) ... end, name(p) = e }` | matching a sum: one handler per alternative |
 | untyped parameters, `f known` | compile-time parameters, partial application |
 | `f "lit"`, `f 1 2`, `f x do ... end` | literal application and saturating chains |
-| `do(ctx...)`, `local ctx... = e` | opening a record or a vocabulary |
+| `do(ctx..)`, `local ctx.. = e` | opening a record or a vocabulary |
 | `endall` | closing a spine of trailing blocks |
 | `s[id]`, `g[i]`, `pool[slot]`, `a[i]` | checked places |
-| `tasks do(scope...)`, `spawn do`, `first_of` | concurrency |
+| `tasks do(scope..)`, `spawn do`, `first_of` | concurrency |
 | `require "slc.io"` | libraries, including I/O by completion |
 | `native word`, `slc run` | compile now, into this process, and call from Lua |
 | `call f(x)` | one site as a shared C function, for code size (§11.2) |
@@ -270,7 +270,7 @@ sequenceDiagram
     participant T as transaction (activity)
     participant E as draft (context)
     participant D as document (entity)
-    Caller->>T: transaction(document) do(draft...)
+    Caller->>T: transaction(document) do(draft..)
     T->>E: setup: copy document into draft
     Caller->>E: insert n, move_left()
     T->>D: completion: commit draft into document
@@ -283,7 +283,7 @@ sequenceDiagram
 | Kind | Setup | Completion | Example |
 |---|---|---|---|
 | working copy | copy the entity into a context | commit, or discard | `transaction` |
-| in place | open a place | nothing; writes went through | `local node... = g.nodes[id]` |
+| in place | open a place | nothing; writes went through | `local node.. = g.nodes[id]` |
 | scoped resource | acquire | release | `with_file` |
 | accumulator | create the state | return a result from it | `counting` |
 | policy | nothing, or a measurement | record, check, clamp, retry | `counted`, `clamped` |
@@ -303,7 +303,7 @@ end
 ```lua
 local type_word = do(document: Ref Document, n: U32): U32
     local moved: U32 = 0
-    transaction document do(draft...)
+    transaction document do(..)
         insert n
         local before = cursor
         move_left()
@@ -313,19 +313,19 @@ local type_word = do(document: Ref Document, n: U32): U32
 end
 ```
 
-`do(draft...)` opens the context. Bare calls use its methods (`insert n`, `move_left()`), and its fields are live places (`cursor`).
+`do(..)` opens the context without an unused receiver name. Bare calls use its methods (`insert n`, `move_left()`), and its fields are live places (`cursor`).
 
 ### 6.4 Open to work; bind to remember
 
-An opened field name is the field's place: reading it reads the current value. A binding takes the value at that point: `local before = cursor` keeps the cursor from before `move_left()`. Opening a place keeps it a place: `local node... = g.nodes[id]` works on the store's slot itself.
+An opened field name is the field's place: reading it reads the current value. A binding takes the value at that point: `local before = cursor` keeps the cursor from before `move_left()`. Opening a place keeps it a place: `local node.. = g.nodes[id]` works on the store's slot itself.
 
 ### 6.5 The activity owns completion
 
 ```lua
 local transaction = do(document: Ref Document, body): Unit
-    local draft = Draft { ...document }
+    local draft = Draft { ..document }
     body(Ref draft)
-    document = Document { ...draft }
+    document = Document { ..draft }
 end
 ```
 
@@ -366,13 +366,13 @@ A body cannot leave its activity, so it cannot abort by jumping out. **It return
 local Outcome = oneof { commit: Unit, abort: U32 }
 
 local attempt = do(document: Ref Document, body): Bool
-    local draft = Draft { ...document }
+    local draft = Draft { ..document }
     local committed: Bool = body(Ref draft) {
         commit() = true,
         abort(reason) = false,
     }
     if committed then
-        document = Document { ...draft }
+        document = Document { ..draft }
     end
     return committed
 end
@@ -380,7 +380,7 @@ end
 
 ```lua
 local type_capped = do(document: Ref Document, n: U32, cap: U32): Bool
-    return attempt document do(draft...)
+    return attempt document do(..)
         insert n
         if length > cap then
             return Outcome.abort length
@@ -440,7 +440,7 @@ end
 local import_capped = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
     counted stats do
     clamped(document, 100) do
-    transaction document do(draft...)
+    transaction document do(..)
         insert n
     endall
 end
@@ -532,7 +532,7 @@ local line_count = do(workers, path: CString): U32
     local total: U32 = 0
     io.open(path, io.READ) {
         done = do(file)
-            tasks do(scope...)
+            tasks do(..)
                 local chunks = pool(Chunk, 8)
                 local filled = channel(Slot Chunk, 8)
                 local counts = channel(U32, 8)
@@ -803,7 +803,7 @@ function Document:at_end(): Bool
 end
 ```
 
-Put the body last when the word establishes structure: `transaction document do(draft...) ... end`.
+Put the body last when the word establishes structure: `transaction document do(draft..) ... end`.
 
 ## 13. Let the contract say copy or borrow
 
@@ -857,11 +857,11 @@ uint32_t tab_stop_4(uint32_t column) {
 |---|---|
 | ordinary result | a computation producing a value: the default |
 | subject block | a block receiving a thing to act on: `ch:each do(v) ... end` |
-| activity block | a block receiving a vocabulary: `do(draft...)` |
+| activity block | a block receiving a vocabulary: `do(draft..)` |
 | keyed handlers | one behavior per outcome: matching a sum, a receive, an I/O result |
 | channel | values crossing tasks (§8) |
 
-**Saturating chains.** `transaction document do(draft...) ... end` applies `transaction` to its arguments group by group until it is saturated. The signature decides the invocation point, not the parser. A pending runtime argument stays inside its chain; it never becomes a runtime closure (slc has none).
+**Saturating chains.** `transaction document do(draft..) ... end` applies `transaction` to its arguments group by group until it is saturated. The signature decides the invocation point, not the parser. A pending runtime argument stays inside its chain; it never becomes a runtime closure (slc has none).
 
 ## 17. Describe, then run
 
@@ -980,19 +980,19 @@ end
 | sum alternative | snake_case outcome | `found`, `missing`, `done`, `timed_out` |
 | library | snake_case domain | `io`, `posix` |
 
-**Activity words say what is guaranteed; contexts are nouns for what the body holds.** `transaction` guarantees a commit; the body holds a `draft`. The context type and the block parameter share one noun: `Draft`, `do(draft...)`. A gerund is the fallback only when the context is the state of an ongoing process with no natural noun.
+**Activity words say what is guaranteed; contexts are nouns for what the body holds.** `transaction` guarantees a commit; the body holds a `draft`. The context type and the block parameter share one noun: `Draft`, `do(draft..)`. A gerund is the fallback only when the context is the state of an ongoing process with no natural noun.
 
 | Kind of activity | Activity word | Context |
 |---|---|---|
 | working copy | `transaction`, `attempt` | `Draft` / `draft` |
-| in place | (opening a place) | the entity's own name: `local node... = g.nodes[id]` |
+| in place | (opening a place) | the entity's own name: `local node.. = g.nodes[id]` |
 | scoped resource | `with_file` | the resource: `file` |
 | accumulator | `counting`, `importing` | what accumulates: `Tally` / `tally`, `Batch` / `batch` |
 | policy | `counted`, `timed`, `clamped` | none |
 
 **Names carry the reading, not parentheses.** The house style drops every call parenthesis that grouping does not need: `release slot`, `insert 5`, `counted stats do`. That works only when names are descriptive. If a line is confusing without parentheses, adding them back hides the problem: the names are not descriptive enough (`p:release s` instead of `pool:release slot`), or the design is wrong (a word with a role-less argument, a chain that applies too much at once, a flag where a sum or two words belong). Rename or redesign until the line reads as a sentence.
 
-**Let the receiver carry the subject:** `document:move_left()`, not `document:move_document_left()`. **Name for the call site:** no unexplained flags; prefer two words or a sum. **Use shadowing deliberately:** openings follow ordinary lexical shadowing, so later vocabularies can override earlier ones. When an override would obscure the subject, ask whether a name is too generic or a homonym should stay qualified (`do(crew)` instead of `do(crew...)` inside an opened scope).
+**Let the receiver carry the subject:** `document:move_left()`, not `document:move_document_left()`. **Name for the call site:** no unexplained flags; prefer two words or a sum. **Use shadowing deliberately:** openings follow ordinary lexical shadowing, so later vocabularies can override earlier ones. When an override would obscure the subject, ask whether a name is too generic or a homonym should stay qualified (`do(crew)` instead of `do(crew..)` inside an opened scope).
 
 ## 20. Spelling forms
 

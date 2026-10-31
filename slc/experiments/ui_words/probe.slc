@@ -80,7 +80,7 @@ local vocabulary = function(phase, turn)
 end
 
 local confirmation = do(home: Ref Confirmation, ui, accepted, cancelled): Unit
-    local ui...
+    local ui..
     local save = button "Save"
     local keep_editing = button "Keep editing"
     column do
@@ -93,7 +93,7 @@ local confirmation = do(home: Ref Confirmation, ui, accepted, cancelled): Unit
 end
 
 local counter = do(home: Ref Counter, ui, changed): Unit
-    local ui...
+    local ui..
     local increment = button "+"
     increment home.plus do
         home.value = home.value + 1
@@ -108,7 +108,7 @@ local begin_save = do(home: Ref Editor, ui): Unit
 end
 
 local editor = do(home: Ref Editor, ui, closed): Unit
-    local ui...
+    local ui..
     local save_and_close = button "Save and close"
     local retry = button "Retry"
     local back = button "Back to editor"

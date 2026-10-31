@@ -13,7 +13,7 @@ end
 
 local sum_squares = do(n: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local nums = channel(U32, 8)
         local squares = channel(U64, 8)
         spawn do
@@ -61,7 +61,7 @@ end
 -- workers print the same, so they share one step function
 local total_steps = do(workers, n: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local jobs = channel(Job, 16)
         local results = channel(Done, 16)
         spawn do
@@ -99,7 +99,7 @@ end
 local merged = do(n: U32): U64
     local sum: U64 = 0
     local done: Bool = false
-    tasks do(scope...)
+    tasks do(..)
         local a = channel(U32, 0)  -- unbuffered: a rendezvous
         local b = channel(U32, 4)
         spawn(count_from, a, 0, n)
@@ -119,7 +119,7 @@ export merged
 -- default: nothing ready, nothing waits
 local poll_empty = do(): Bool
     local waited: Bool = false
-    tasks do(scope...)
+    tasks do(..)
         local c = channel(U32, 1)
         first_of {
             recv c do(v) waited = false end,
@@ -134,7 +134,7 @@ export poll_empty
 
 local gives_up = do(): Bool
     local timed_out: Bool = false
-    tasks do(scope...)
+    tasks do(..)
         local never = channel(U32, 0)
         first_of {
             recv never do(v) timed_out = false end,
@@ -149,7 +149,7 @@ export gives_up
 
 local late_reply = do(): U32
     local got: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         local c = channel(U32, 0)
         spawn do
             sleep(ms 10)
@@ -173,7 +173,7 @@ end
 
 local ask = do(n: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local requests = channel(Request, 0)
         local replies = channel(U64, 1)
         spawn(server, requests)
@@ -214,7 +214,7 @@ end
 
 local tally = do(adds: U32, subs: U32): I64
     local result: I64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local inbox = channel(Msg, 4)
         local out = channel(I64, 1)
         spawn(accumulator, inbox, out)
@@ -240,7 +240,7 @@ export tally
 -- the scope's end suspends the task
 local nested = do(groups: U32, per: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local sums = channel(U64, 4)
         local g: U32 = 0
         while g < groups do
@@ -278,7 +278,7 @@ export nested
 -- a task's own resizable storage lives on its own data stacks
 local grow_in_task = do(n: U32): U32
     local result: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         local out = channel(U32, 1)
         spawn do
             local g = (Grow U32) {}
@@ -329,7 +329,7 @@ end
 
 local pooled = do(count: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local buffers = pool(Block, 4)
         local full = channel(Slot Block, 4)
         spawn do
@@ -353,7 +353,7 @@ export pooled
 -- take as a case of first_of; a send case that loses keeps its slot
 local take_or_time = do(): U32
     local outcome: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         local one = pool(Block, 1)
         local nobody = channel(Slot Block, 0)
         local s = one:take()
@@ -385,7 +385,7 @@ local c_poll = extern("poll", { Ptr U8, U64, I32 }, I32, { header = "<poll.h>" }
 
 local parallel_sleeps = do(n: U32): U32
     local total: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         local done = channel(U32, 8)
         local k: U32 = 0
         while k < n do
@@ -416,7 +416,7 @@ export parallel_sleeps
 local Holder = struct { ch: Chan U32 }
 
 local use_after_scope = do(h: Ref Holder): Unit
-    tasks do(scope...)
+    tasks do(..)
         h.ch = channel(U32, 1)
     end
     h.ch:send 1
@@ -426,7 +426,7 @@ export use_after_scope
 -- a task waiting on a channel nobody will send to: the scope's end would wait
 -- forever, and the scheduler says so
 local forgotten = do(): Unit
-    tasks do(scope...)
+    tasks do(..)
         local c = channel(U32, 0)
         spawn do
             c:recv() { value = do(v) end, closed = do end }

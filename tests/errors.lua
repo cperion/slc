@@ -289,41 +289,60 @@ local f = do(x: U32): U32
 end
 local y = f(3)
 ]] },
+    { name = 'old three-dot opening', expect = 'spread-syntax',
+      src = [[local f = do(x: U32): U32
+    local ctx... = { value = x }
+    return value
+end
+export f
+]] },
+    { name = 'old three-dot opened parameter', expect = 'spread-syntax',
+      src = [[local f = do(ctx...: U32): U32 = 1
+]] },
+    { name = 'old three-dot anonymous parameter', expect = 'spread-syntax',
+      src = [[local f = do(...: U32): U32 = 1
+]] },
+    { name = 'old three-dot rest parameter', expect = 'spread-syntax',
+      src = [[local f = do(...args): U32 = 1
+]] },
+    { name = 'old three-dot home read', expect = 'spread-syntax',
+      src = [[local f = do(..: U32): U32 = (...)
+]] },
     { name = 'two keyed spreads with a common field', expect = 'spread-overlap',
       src = [[local P = struct { x: U32, y: U32 }
-local f = do(a: P, b: P): P = P { ...a, ...b, x = 1 }
+local f = do(a: P, b: P): P = P { ..a, ..b, x = 1 }
 export f
 ]] },
     { name = 'a keyed spread bringing an unknown field', expect = "has no field 'z'",
       src = [[local P = struct { x: U32 }
 local Q = struct { x: U32, z: U32 }
-local f = do(q: Q): P = P { ...q, z = 1 }
+local f = do(q: Q): P = P { ..q, z = 1 }
 export f
 ]] },
     { name = 'a record spread into an ordered list', expect = 'spread-source',
       src = [[local P = struct { x: U32, y: U32 }
 local add = do(a: U32, b: U32): U32 = a + b
-local f = do(p: P): U32 = add(...p)
+local f = do(p: P): U32 = add(..p)
 export f
 ]] },
     { name = 'a pack used as a value', expect = 'pack-use',
       src = [[local first = do(x: U32): U32 = x
-local f = do(...xs): U32 = first(xs)
+local f = do(..xs): U32 = first(xs)
 local g = do(a: U32): U32 = f(a)
 export g
 ]] },
     { name = 'a pack index out of range', expect = 'pack-index',
-      src = [[local f = do(...xs): U32 = xs[2]
+      src = [[local f = do(..xs): U32 = xs[2]
 local g = do(a: U32): U32 = f(a)
 export g
 ]] },
     { name = 'a rest requirement that is not last', expect = 'rest-position',
-      src = [[local f = do(...xs, y: U32): U32 = y
+      src = [[local f = do(..xs, y: U32): U32 = y
 ]] },
     { name = 'assigning an opened context', expect = 'context-use',
       src = [[local E = struct { n: U32 }
 local f = do(x: U32): U32
-    local e... = E { n = x }
+    local e.. = E { n = x }
     e = E { n = 1 }
     return n
 end
@@ -336,7 +355,7 @@ export f
 ]] },
     { name = 'reading the home where none is opened', expect = 'context-required',
       src = [[local f = do(x: U32): U32
-    return (...)
+    return (..)
 end
 ]] },
     { name = 'a match missing an alternative', expect = "alternative 'dot' has no handler",
@@ -512,7 +531,7 @@ local A = Atomic P
     local bump = do(c: Chan U32): Unit
         total = total + 1
     end
-    tasks do(scope...)
+    tasks do(scope..)
         spawn(bump, channel(U32, 1))
     end
     return total
@@ -522,7 +541,7 @@ export f
     { name = 'a spawned block assigning a copy', expect = "'count' is a copy taken at spawn", line = 5,
       src = [[local f = do(n: U32): U32
     local count: U32 = 0
-    tasks do(scope...)
+    tasks do(scope..)
         spawn do
             count = count + 1
         end
@@ -534,7 +553,7 @@ export f
     { name = 'a spawned block mentioning a reference', expect = "a task shares no memory: the outside value 'c' is a Ref C",
       src = [[local C = struct { n: U32 }
 local f = do(c: Ref C): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         spawn do
             local m: U32 = c.n
         end
@@ -552,7 +571,7 @@ walk = do(c: Chan U32, depth: U32): U32
     return walk(c, depth - 1) + walk(c, depth - 1)
 end
 local f = do(d: U32): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         local c = channel(U32, 64)
         spawn do
             local n: U32 = walk(c, d)
@@ -573,7 +592,7 @@ local bump = do(c: Ref C): Unit
     c.n = c.n + 1
 end
 local f = do(c: Ref C): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         spawn(bump, c)
     end
 end
@@ -591,7 +610,7 @@ end
     { name = 'a task with a result', expect = "a task's result goes nowhere; send it on a channel",
       src = [[local g = do(n: U32): U32 = n + 1
 local f = do(n: U32): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         spawn(g, n)
     end
 end
@@ -599,7 +618,7 @@ export f
 ]] },
     { name = 'a channel leaving its scope', expect = 'a channel cannot leave its tasks scope',
       src = [[local f = do(): Unit
-    local c = tasks do(scope...)
+    local c = tasks do(scope..)
         return channel(U32, 1)
     end
 end
@@ -621,7 +640,7 @@ export f
 ]] },
     { name = 'spawning something that is not a word', expect = 'spawn: expects a block (spawn do ... end) or a typed word',
       src = [[local f = do(n: U32): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         spawn(42, n)
     end
 end
@@ -656,7 +675,7 @@ export f
     { name = 'a slot used after it was sent', expect = 'this slot was sent at', line = 8,
       src = [[local B = struct { n: U32 }
 local f = do(): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         local p = pool(B, 2)
         local c = channel(Slot B, 2)
         local s = p:take()
@@ -669,7 +688,7 @@ export f
     { name = 'a slot released twice', expect = 'this slot was released at',
       src = [[local B = struct { n: U32 }
 local f = do(): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         local p = pool(B, 2)
         local s = p:take()
         p:release(s)
@@ -745,7 +764,7 @@ export f
 ]] },
     { name = 'a wait inside a blocking block', expect = 'a blocking block runs outside the scheduler: it cannot wait (send)',
       src = [[local f = do(): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         local c = channel(U32, 1)
         spawn do
             blocking do

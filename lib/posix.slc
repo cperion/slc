@@ -7,8 +7,8 @@
 --
 --     local px = require "slc.posix"
 --     ...
---         local px...
---         with_fd(path, O_RDONLY) do(fd...) ... end { done() = ..., failed(e) = ... }
+--         local px..
+--         with_fd(path, O_RDONLY) do(fd..) ... end { done() = ..., failed(e) = ... }
 
 local fcntl = "<fcntl.h>"
 local unistd = "<unistd.h>"

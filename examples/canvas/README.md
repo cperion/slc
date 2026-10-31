@@ -53,10 +53,10 @@ process termination are outside this normal-completion guarantee.
 
 | Activity or word | Contract |
 |---|---|
-| `open config do(view...) ... end` | Own one window and renderer under a video-subsystem reference. Body returns `Result`. |
+| `open config do(view..) ... end` | Own one window and renderer under a video-subsystem reference. Body returns `Result`. |
 | `interact { key = ..., draw = ... }` | Drain input, draw a frame, delay, repeat until stopped or failed. `draw` is required; `key` is optional. |
 | `stop()` | Latch stop. The current handler finishes; no further event is polled or frame started. A frame already underway completes and presents if successful. |
-| `frame do(drawing...) ... end` | Draw and present once; body returns Unit, activity returns `Result`. Available independently of `interact`. |
+| `frame do(drawing..) ... end` | Draw and present once; body returns Unit, activity returns `Result`. Available independently of `interact`. |
 | `with_frame renderer body` | The same frame activity over a renderer borrowed from the lower-level SDL layer. |
 | `clear color` | Set the drawing color, then clear the complete backbuffer. |
 | `fill_rect x y width height color` | Fill an output-pixel rectangle with floating-point coordinates. |

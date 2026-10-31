@@ -163,7 +163,7 @@ export map_each_mutation
 
 local map_task_each = do(n: U32): U64
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(..)
         local out = channel(U64, 0)
         spawn do
             local m = Counts {}

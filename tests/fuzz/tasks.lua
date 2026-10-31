@@ -64,7 +64,7 @@ local libc = require "slc.libc"
 -- one producer, one squarer, the main thread sums: the sum cannot depend on order
 local run = do(): Unit
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(scope..)
         local nums = channel(U64, 8)
         local ch = channel(U64, 8)
         spawn do
@@ -121,7 +121,7 @@ end
 -- four workers share the jobs; every job is counted once
 local run = do(): Unit
     local total: U64 = 0
-    tasks do(scope...)
+    tasks do(scope..)
         local jobs = channel(Job, 4)
         local results = channel(Done, 4)
         spawn do
@@ -156,7 +156,7 @@ local Buffer = struct { n: U32, bytes: Array(U8, 64) }
 local run = do(): Unit
     local total: U64 = 0
     local count: U32 = 0
-    tasks do(scope...)
+    tasks do(scope..)
         local buffers = pool(Buffer, 4)
         local full = channel(Slot Buffer, 4)
         spawn do
@@ -191,7 +191,7 @@ local libc = require "slc.libc"
 local run = do(): Unit
     local sum: U64 = 0
     local chosen: U32 = 0
-    tasks do(scope...)
+    tasks do(scope..)
         local ready = channel(U64, 16)
         spawn do
             local i: U64 = 0
@@ -231,7 +231,7 @@ local libc = require "slc.libc"
 
 -- nobody ever sends: the scope end must report the same deadlock everywhere
 local run = do(): Unit
-    tasks do(scope...)
+    tasks do(scope..)
         local never = channel(U32, 0)
         spawn do
             never:recv() {

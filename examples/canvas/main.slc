@@ -7,9 +7,9 @@ local main = do(): I32
     return canvas.open {
         title = "SLC canvas — SDL3",
         width = 800, height = 600, resizable = true,
-    } do(view...)
+    } do(..)
         return interact {
-            key = do(key...)
+            key = do(..)
                 if pressed then
                     if code == canvas.Key.escape then stop() end
                     if code == canvas.Key.left then x = x - 10 end
@@ -18,7 +18,7 @@ local main = do(): I32
                     if code == canvas.Key.down then y = y + 10 end
                 end
             end,
-            draw = do(frame...)
+            draw = do(..)
                 clear canvas.Color.black
                 fill_rect x y 80 60 canvas.Color.orange
                 -- The output-pixel dimensions are refreshed for every frame.

@@ -6,7 +6,7 @@ that construct ordinary SLC types, words and sums. The general evaluator change 
 field-wise loop state is present in the checkout; its scope and the evidence are
 recorded in §12.
 
-**The primary declaration form is instructions inside `do(...)` blocks.** The
+**The primary declaration form is instructions inside `do(..)` blocks.** The
 block receives and anonymously opens its construction receiver. Tables remain for
 property bundles, styles, native values and sum matches—not lists of UI children.
 
@@ -47,13 +47,13 @@ local ui = require "slc.ui"
 local component, window = ui.component, ui.window
 local theme = ui.theme
 
-local Confirmation = component "Confirmation" do(...)
+local Confirmation = component "Confirmation" do(..)
     outcome oneof { reset: Unit, keep: Unit }
 
-    modal { width = 320, padding = 16, gap = 12, style = theme.panel } do(...)
+    modal { width = 320, padding = 16, gap = 12, style = theme.panel } do(..)
         label "question" { text = "Reset the counter?" }
 
-        row { gap = 8 } do(...)
+        row { gap = 8 } do(..)
             button "reset_button" { text = "Reset", style = theme.accent }
             button "keep_button" { text = "Keep value" }
         end
@@ -68,11 +68,11 @@ function Confirmation:handle(event: Confirmation.Event): Confirmation.Outcome
     }
 end
 
-local Counter = component "Counter" do(...)
-    column { padding = 24, gap = 12 } do(...)
+local Counter = component "Counter" do(..)
+    column { padding = 24, gap = 12 } do(..)
         number "count" { value = U32 0, font_size = 40 }
 
-        row { gap = 8 } do(...)
+        row { gap = 8 } do(..)
             button "increment_button" { text = "Increase" }
             button "reset_button" { text = "Reset…" }
         end
@@ -106,7 +106,7 @@ function Counter:handle(event: Counter.Event): Unit
     }
 end
 
-local App = window "SLC counter" { width = 640, height = 480, style = theme.window } do(...)
+local App = window "SLC counter" { width = 640, height = 480, style = theme.window } do(..)
     part "counter" (Counter)
 end
 
@@ -153,9 +153,9 @@ before matching:
 
 | Builder or instruction | Meaning |
 |---|---|
-| `component "Name" do(...) ... end` | Declare a component record type, its event/outcome types and generated words |
-| `window "Title" { ... } do(...) ... end` | Declare a window root with its properties and child declarations |
-| `column { ... } do(...) ... end`, `row { ... } do(...) ... end`, `modal { ... } do(...) ... end` | Declare a layout container with properties and child declarations; do not create a control-name scope |
+| `component "Name" do(..) ... end` | Declare a component record type, its event/outcome types and generated words |
+| `window "Title" { ... } do(..) ... end` | Declare a window root with its properties and child declarations |
+| `column { ... } do(..) ... end`, `row { ... } do(..) ... end`, `modal { ... } do(..) ... end` | Declare a layout container with properties and child declarations; do not create a control-name scope |
 | `label "name" { ... }`, `number "name" { ... }`, `button "name" { ... }` | Declare a named control with a property bundle |
 | `part "name" (T)` | Declare a named child component of type `T` |
 | `part "name" (ui.List(T))` | Declare a collection of child components, subject to §6 |
@@ -163,7 +163,7 @@ before matching:
 | `fields { revision = U64 0, phase = Phase.editing() }` | Declare ordinary native fields with their initial values; no separate state dictionary |
 
 **Tables supply properties; blocks contain declarations.** There are no property
-setter instructions such as `gap 8`. Use `row { gap = 8 } do(...) ... end`.
+setter instructions such as `gap 8`. Use `row { gap = 8 } do(..) ... end`.
 `outcome` and `fields` remain instructions because they declare a type and fields.
 An empty property table may be omitted; this does not enable setter instructions.
 
@@ -215,7 +215,7 @@ a new namespace; layout containers do not.
 
 **Addressing container properties:** the root container's public properties belong
 to the component, so `self.gap` means its root gap. A container can optionally be
-named, for example `row "actions" { gap = 8 } do(...) ... end`, to expose `self.actions.gap`.
+named, for example `row "actions" { gap = 8 } do(..) ... end`, to expose `self.actions.gap`.
 Its controls remain directly named fields of the component, not fields under
 `actions`. Anonymous nested containers have internal property storage and no public
 field name; name one when application code needs to address its properties. This
@@ -389,10 +389,10 @@ layout features, not prerequisites for the event model.
 A fixed component shape can contain a dynamic collection of instances:
 
 ```lua
-local TodoRow = component "TodoRow" do(...)
+local TodoRow = component "TodoRow" do(..)
     outcome oneof { toggled: Bool, removed: Unit }
 
-    row { gap = 8 } do(...)
+    row { gap = 8 } do(..)
         checkbox "done" { report = { "changed" } }
         label "title" { capacity = 64 }
         button "remove" { text = "×" }
@@ -406,8 +406,8 @@ function TodoRow:handle(event: TodoRow.Event): TodoRow.Outcome
     }
 end
 
-local Todos = component "Todos" do(...)
-    column { gap = 4 } do(...)
+local Todos = component "Todos" do(..)
+    column { gap = 4 } do(..)
         part "rows" (ui.List(TodoRow))
     end
 end
@@ -499,7 +499,7 @@ A custom leaf is a record with size, paint and optional input methods. Define th
 type before attaching its methods so its name is in scope:
 
 ```lua
-local Swatch = ui.widget "Swatch" do(...)
+local Swatch = ui.widget "Swatch" do(..)
     fields { color = ui.colors.black }
 end
 

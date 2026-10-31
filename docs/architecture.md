@@ -1073,7 +1073,7 @@ Two library-composition items remain in compiler Lua. Both were reviewed against
 §15.1 and are **accepted as compiler primitives** by decision, not migration debt:
 
 * `cformat(...)` returns a **pack** — the format string plus the promoted arguments
-  — so that `printf(cformat(...parts))` can pass them on. Packs are second-class
+  — so that `printf(cformat(..parts))` can pass them on. Packs are second-class
   (syntax §10.8): they cannot be returned, stored or passed whole, so no ordinary
   word can build one. Format selection, literal rendering and percent escaping are
   host metaprogramming over a variadic pack, which the standard allows; the only

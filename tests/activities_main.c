@@ -27,7 +27,10 @@ void trace(uint32_t t) { traces[ntraces++] = t; }
 uint32_t shadow_fields(uint32_t), shadow_activity(uint32_t), shadow_vocab(uint32_t);
 uint32_t shadow_calls(uint32_t), shadow_callback(uint32_t), shadow_prelude(void);
 
+uint32_t two_dot_values(uint32_t);
+
 int main(void) {
+    assert(two_dot_values(5) == 15);
     assert(shadow_fields(0) == 133);
     assert(shadow_fields(5) == 139);
     assert(shadow_activity(8) == 9);

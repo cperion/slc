@@ -93,14 +93,14 @@ end
 
 -- the activity owns completion: work on a copy, commit at the end
 local transaction = do(document: Ref Document, body): Unit
-    local draft = Draft { ...document }
+    local draft = Draft { ..document }
     body(Ref draft)
-    document = Document { ...draft }
+    document = Document { ..draft }
 end
 
 local type_word = do(document: Ref Document, n: U32): U32
     local moved: U32 = 0
-    transaction document do(draft...)
+    transaction document do(..)
         insert n
         local before = cursor
         move_left()
@@ -114,19 +114,19 @@ export type_word
 local Outcome = oneof { commit: Unit, abort: U32 }
 
 local attempt = do(document: Ref Document, body): Bool
-    local draft = Draft { ...document }
+    local draft = Draft { ..document }
     local committed: Bool = body(Ref draft) {
         commit() = true,
         abort(reason) = false,
     }
     if committed then
-        document = Document { ...draft }
+        document = Document { ..draft }
     end
     return committed
 end
 
 local type_capped = do(document: Ref Document, n: U32, cap: U32): Bool
-    return attempt document do(draft...)
+    return attempt document do(..)
         insert n
         if length > cap then
             return Outcome.abort length
@@ -157,7 +157,7 @@ end
 local import_capped = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
     counted stats do
     clamped(document, 100) do
-    transaction document do(draft...)
+    transaction document do(..)
         insert n
     endall
 end
@@ -277,7 +277,7 @@ local line_count = do(workers, path: CString): U32
     local total: U32 = 0
     io.open(path, io.READ) {
         done = do(file)
-            tasks do(scope...)
+            tasks do(..)
                 local chunks = pool(Chunk, 8)
                 local filled = channel(Slot Chunk, 8)
                 local counts = channel(U32, 8)
@@ -328,7 +328,7 @@ export line_count_2
 -- a reply, or a timeout
 local ask = do(): U32
     local answer: U32 = 0
-    tasks do(scope...)
+    tasks do(..)
         local replies = channel(U32, 1)
         spawn do
             sleep(ms 5)

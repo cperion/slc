@@ -17,8 +17,8 @@ local x = 1
 x = x + 1
 local result = match(value) { ok(v) = v, bad() = 0 }
 local nested = do(): U32
-    activity do(ctx...)
-        activity do(...)
+    activity do(ctx..)
+        activity do(..)
             tick()
         endall
     return 1

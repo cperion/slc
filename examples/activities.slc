@@ -21,13 +21,13 @@ end
 
 -- the activity: work on a copy, commit at the end (keyed spread both ways)
 local transaction = do(document: Ref Document, body): Unit
-    local draft = Draft { ...document }
+    local draft = Draft { ..document }
     body(Ref draft)
-    document = Document { ...draft }
+    document = Document { ..draft }
 end
 
 local type_text = do(doc: Ref Document, n: U32): Unit
-    transaction doc do(draft...)
+    transaction doc do(..)
         insert n
         move_left()
         if cursor > 3 then
@@ -40,7 +40,7 @@ export type_text
 -- open to work; bind to remember
 local back_and_forth = do(doc: Ref Document): U32
     local moved: U32 = 0
-    transaction doc do(draft...)
+    transaction doc do(..)
         local before = cursor
         move_left()
         moved = before - cursor
@@ -52,7 +52,7 @@ export back_and_forth
 -- a private document: the whole activity folds away
 local fresh_length = do(n: U32): U32
     local doc = Document { length = 0, cursor = 0, edits = 0 }
-    transaction(Ref doc) do(draft...)
+    transaction(Ref doc) do(..)
         insert n
         insert 2
     end
@@ -71,7 +71,7 @@ local counting = do(body): U32
     return counting.count
 end
 local evens = do(n: U32): U32 =
-counting do(...)
+counting do(..)
     for i: U32 = 1, n do
         if i % 2 == 0 then
             tick()
@@ -84,7 +84,7 @@ export evens
 local Node = struct { value: U32, weight: U32 }
 local Graph = struct { nodes: Store Node }
 local double_node = do(g: Ref Graph, id: Id Node): Unit
-    local node... = g.nodes[id]
+    local node.. = g.nodes[id]
     value = value * 2
     weight = weight + 1
 end
@@ -102,7 +102,7 @@ export roundtrip
 
 -- record update: explicit fields override the spread
 local Point = struct { x: I32, y: I32 }
-local moved_x = do(p: Point, dx: I32): Point = Point { ...p, x = p.x + dx }
+local moved_x = do(p: Point, dx: I32): Point = Point { ..p, x = p.x + dx }
 local shift = do(x: I32, y: I32): I32
     local q: Point = moved_x(Point { .x, .y }, 5)
     return q.x * 100 + q.y
@@ -113,9 +113,9 @@ export shift
 local log_call = extern("log_call", { U32 }, Unit)
 local twice = do(x: U32): U32 = x * 2
 local add3 = do(a: U32, b: U32, c: U32): U32 = a + b + c
-local logged = do(f, ...args): U32
+local logged = do(f, ..args): U32
     log_call args.length
-    return f(...args)
+    return f(..args)
 end
 local use_logged = do(x: U32, y: U32): U32 = logged(twice, x) + logged(add3, x, y, 1)
 export use_logged
@@ -123,7 +123,7 @@ export use_logged
 -- a vocabulary table opened in a body
 local units = { kilo = 1000, mega = 1000000 }
 local to_base = do(k: U32, m: U32): U32
-    local units...
+    local units..
     return k * kilo + m * mega
 end
 export to_base
@@ -138,7 +138,7 @@ end
 local import_rows = do(doc: Ref Document, n: U32): Unit
     traced 1 do
     traced 2 do
-    transaction doc do(draft...)
+    transaction doc do(..)
         insert n
     endall
     trace 9
@@ -158,8 +158,8 @@ export clamp_cb
 -- anonymous spread: an unnamed home
 local Vec = struct { x: F64, y: F64 }
 
--- an unnamed home: its fields are in scope, the home itself is (...)
-local squared = do(...: Vec): F64 = x * x + y * y
+-- an unnamed home: its fields are in scope, the home itself is (..)
+local squared = do(..: Vec): F64 = x * x + y * y
 export squared
 
 local Terminal = struct { width: U32, drawn: U32 }
@@ -170,16 +170,16 @@ local status = do(t: Ref Terminal, extra: U32): Unit
     t.drawn = t.drawn + extra
 end
 
--- receiver calls go to the home; (f)(..., x) passes it explicitly
-local session = do(...: Ref Terminal, lines: U32): U32
+-- receiver calls go to the home; (f)(.., x) passes it explicitly
+local session = do(..: Ref Terminal, lines: U32): U32
     draw lines
-    (status)(..., 1)
+    (status)(.., 1)
     return width - drawn
 end
 export session
 
 -- the home read as a value
-local scaled = do(...: Vec, k: F64): Vec = Vec { x = x * k, y = y * k }
+local scaled = do(..: Vec, k: F64): Vec = Vec { x = x * k, y = y * k }
 local norm2 = do(p: Vec): F64 = squared scaled(p, 2.0)
 export norm2
 
@@ -209,10 +209,10 @@ local shadow_fields = do(n: U32): U32
     local a = Counting { count = 1 }
     local b = Counting { count = 10 };
     do
-        local a...
+        local a..
         count = count + 1
         do
-            local b...
+            local b..
             count = count + 2
             local count = count + 3
             total = count
@@ -228,7 +228,7 @@ local shadow_fields = do(n: U32): U32
 end
 export shadow_fields
 
-local shadow_parameter = do(count...: Ref Counting): U32
+local shadow_parameter = do(count..: Ref Counting): U32
     count = count + 1
     return count
 end
@@ -242,9 +242,9 @@ local base_vocab = { kilo = 2, enabled = true, twice = twice }
 local custom_vocab = { kilo = 3, enabled = false, twice = do(x: U32): U32 = x + 7 }
 local shadow_vocab = do(n: U32): U32
     local kilo = 100
-    local base_vocab...
+    local base_vocab..
     local before = kilo
-    local custom_vocab...
+    local custom_vocab..
     local result = twice n
     if enabled then result = 999 end
     local kilo = kilo + 1
@@ -254,9 +254,9 @@ export shadow_vocab
 
 local shadow_calls = do(n: U32): U32
     local twice = do(x: U32): U32 = x - 1
-    local base_vocab...
+    local base_vocab..
     local result = twice n
-    local custom_vocab...
+    local custom_vocab..
     result = result + twice n
     local twice = do(x: U32): U32 = x + 1
     return result + twice n
@@ -265,7 +265,7 @@ export shadow_calls
 
 local shadow_callback = do(n: U32): U32
     local c = Counting { count = 10 }
-    local c...
+    local c..
     local result = apply(do(count) return count + 1 end, n)
     return result + apply(do(v) return count + v end, n)
 end
@@ -273,7 +273,21 @@ export shadow_callback
 
 local reserved_vocab = { U32 = 7, type = 9 }
 local shadow_prelude = do(): U32
-    local reserved_vocab...
+    local reserved_vocab..
     return U32 + type
 end
 export shadow_prelude
+
+-- Two dots contribute values in lists; infix two dots still concatenate.
+local pair = function(x) return x, x + 1 end
+local forward_one = do(..args): U32
+    return ..args
+end
+local sum_rest = do(..args): U32 = add3(1, ..args)
+local two_dot_values = do(x: U32): U32
+    local a, b = ..pair(x)
+    local text = "a" .. "b" .. "c"
+    local text_length = #text
+    return sum_rest(a, b) + forward_one(text_length)
+end
+export two_dot_values

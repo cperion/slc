@@ -8,8 +8,8 @@
 --
 --     local c = require "slc.libc"
 --     ...
---         local c...
---         with_file(path, "w") do(file...)
+--         local c..
+--         with_file(path, "w") do(file..)
 --             say("n = ", n, "\n")
 --         end
 
@@ -34,8 +34,8 @@ local memset = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, string_h)
 
 -- formatted output: the format is built from the arguments' types while
 -- specializing, so it always matches them
-local say = do(...parts): Unit
-    printf cformat(...parts)
+local say = do(..parts): Unit
+    printf cformat(..parts)
 end
 
 -- files ----------------------------------------------------------------------------------------
@@ -56,8 +56,8 @@ function File:next_byte(): I32
     return fgetc self.handle
 end
 
-function File:say(...parts): Unit
-    fprintf(self.handle, cformat(...parts))
+function File:say(..parts): Unit
+    fprintf(self.handle, cformat(..parts))
 end
 
 -- open, run the body, close; false if the file could not be opened
@@ -74,7 +74,7 @@ end
 
 -- each byte of a file, until its end; false if it could not be opened
 local each_byte = do(path: CString, body): Bool
-    return with_file(path, "rb") do(reading...)
+    return with_file(path, "rb") do(..)
         local b: I32 = next_byte()
         while b >= 0 do
             body(U8 b)

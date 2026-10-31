@@ -27,6 +27,55 @@ local function formatted(name, input, expected, options)
     check(name .. ' idempotent', fmt.format(out, options, name) == out)
 end
 formatted('golden', read(root .. '/tests/formatter/input.slc'), read(root .. '/tests/formatter/expected.slc'))
+formatted('concatenation is still infix', 'local r=a..b..c', 'local r = a .. b .. c\n')
+formatted('two-dot expansion', 'local f=do(..args):U32=add(1,..args)',
+    'local f = do(..args): U32 = add(1, ..args)\n')
+formatted('two-dot anonymous home', 'local f=do(..:T):T=(..)',
+    'local f = do(..: T): T = (..)\n')
+formatted('two-dot named opening', 'local f=do(ctx..:T):U32=x',
+    'local f = do(..: T): U32 = x\n')
+formatted('unused opened callback name', 'activity do(ctx..) tick() end',
+    'activity do(..) tick() end\n')
+formatted('used opened callback name', 'activity do(ctx..) use ctx end',
+    'activity do(ctx..) use ctx end\n')
+formatted('opened name in a nested callback', 'activity do(ctx..) each do(v) use ctx end end',
+    'activity do(ctx..) each do(v) use ctx end end\n')
+formatted('opened name as assignment target', 'activity do(ctx..) ctx = replacement end',
+    'activity do(ctx..) ctx = replacement end\n')
+formatted('opening an existing receiver is a use', 'activity do(ctx..) local ctx.. end',
+    'activity do(ctx..) local ctx.. end\n')
+formatted('receiver name as a table value is a use', 'activity do(ctx..) use { ctx = ctx } end',
+    'activity do(ctx..) use { .ctx } end\n')
+formatted('receiver used in a nested type annotation', 'activity do(ctx..) local f = do(v: ctx): U32 = 0 end',
+    'activity do(ctx..) local f = do(v: ctx): U32 = 0 end\n')
+formatted('receiver used in a function declaration path', 'activity do(ctx..) function ctx.tick() end end',
+    'activity do(ctx..) function ctx.tick() end end\n')
+formatted('nested shadowed mentions are conservative', 'activity do(ctx..) each do(ctx) use ctx end end',
+    'activity do(ctx..) each do(ctx) use ctx end end\n')
+formatted('table keys are not receiver uses', 'activity do(ctx..) use { ctx = 1 } end',
+    'activity do(..) use { ctx = 1 } end\n')
+formatted('field names are not receiver uses', 'activity do(ctx..) use other.ctx end',
+    'activity do(..) use other.ctx end\n')
+formatted('literal text is not a receiver use', 'activity do(ctx..) use "ctx" end -- ctx',
+    'activity do(..) use "ctx" end  -- ctx\n')
+formatted('keep enclosing anonymous home lookup', 'activity do(ctx..) use((..)) end',
+    'activity do(ctx..) use((..)) end\n', { call_style = 'preserve' })
+formatted('keep internal home lookup', 'activity do(ctx..) use __home end',
+    'activity do(ctx..) use __home end\n')
+formatted('avoid duplicate home parameter', 'local f = do(ctx.., __home): U32 = 1',
+    'local f = do(ctx.., __home): U32 = 1\n')
+formatted('duplicate parameter names keep their binding order', 'local f = do(ctx.., ctx): U32 = value',
+    'local f = do(ctx.., ctx): U32 = value\n')
+formatted('rest parameter can hide the opened parameter', 'local f = do(ctx.., ..ctx): U32 = value',
+    'local f = do(ctx.., ..ctx): U32 = value\n')
+formatted('ordinary unused parameter stays', 'activity do(ctx) tick() end',
+    'activity do(ctx) tick() end\n')
+formatted('preserve named opening', 'activity do(ctx..) tick() end',
+    'activity do(ctx..) tick() end\n', { opening_style = 'preserve' })
+formatted('two-dot binding', 'local ctx..=value', 'local ctx.. = value\n')
+formatted('spread operand concatenation', 'local r=f(..a..b)', 'local r = f(..a .. b)\n')
+formatted('ordinary Lua varargs', 'local function f(...) return ... end',
+    'local function f(...) return ... end\n')
 formatted('minimal unary', 'local r=Ref(h)', 'local r = Ref h\n')
 formatted('minimal chain', 'local r=f(a)(b)', 'local r = f a b\n')
 formatted('multiple arguments stay one call', 'local r=f(a,b)', 'local r = f(a, b)\n')
@@ -256,18 +305,18 @@ end
 export import_words
 ]])
 formatted('an existing endall keeps its column', [[local ping = do(n: U64): U64
-    with_eventfd do(counter...)
+    with_eventfd do(counter..)
         local value: U64 = n
-        with_epoll do(poll...)
+        with_epoll do(poll..)
             watch(fd)
         endall
     return n
 end
 export ping
 ]], [[local ping = do(n: U64): U64
-    with_eventfd do(counter...)
+    with_eventfd do(..)
         local value = n
-        with_epoll do(poll...)
+        with_epoll do(..)
             watch fd
         endall
     return n
@@ -307,8 +356,13 @@ local function protected(text)
     return table.concat(result, '\0')
 end
 check('literal and comment bytes unchanged', protected(literal) == protected(out))
+local opening_comment = 'activity do(ctx -- receiver comment\n..) tick() end\n'
+local anonymous_comment = fmt.format(opening_comment)
+check('opening rewrite preserves comments', protected(opening_comment) == protected(anonymous_comment))
+check('commented opened name removed', not anonymous_comment:find('ctx', 1, true), anonymous_comment)
+check('commented opening is stable', fmt.format(anonymous_comment) == anonymous_comment)
 check('comments in calls keep parentheses', fmt.format('local r = f( -- why\nx)\n'):find('f(  -- why', 1, true) ~= nil)
-for _, settings in ipairs { { indent_width = 0 }, { column_width = 10 }, { call_style = 'lua' }, { surprise = true }, { indent_width = false }, { spine_style = 'flat' }, { type_style = 'always' }, { table_style = 'sugar' } } do
+for _, settings in ipairs { { indent_width = 0 }, { column_width = 10 }, { call_style = 'lua' }, { surprise = true }, { indent_width = false }, { spine_style = 'flat' }, { type_style = 'always' }, { table_style = 'sugar' }, { opening_style = 'always' } } do
     local ok = pcall(fmt.format, 'local x=1', settings)
     check('reject invalid config', not ok)
 end
@@ -322,6 +376,38 @@ local slc = dofile(root .. '/slc.lua')
 local function normalized(c)
     return c:gsub('([%w_./%-]+%.slc):%d+:', '%1:<line>:')
 end
+local opening_program = [[
+local View = struct { value: U32 }
+local apply = do(ctx: Ref View, body): U32 = body(ctx)
+local read = do(ctx: Ref View): U32
+    return apply ctx do(unused..)
+        return value
+    end
+end
+local typed_read = do(unused..: Ref View): U32 = value
+local outer = do(..: Ref View, other: Ref View): U32
+    return apply other do(keep..)
+        return (..).value
+    end
+end
+local opening_result = do(x: U32): U32
+    local a = View { value = x }
+    local b = View { value = x + 100 }
+    return read(Ref a) + typed_read(Ref a) + outer(Ref a, Ref b)
+end
+assert(host(opening_result(U32 7)) == 21)
+export opening_result
+]]
+local anonymous_program = fmt.format(opening_program)
+check('unused openings removed in semantic fixture', not anonymous_program:find('unused', 1, true))
+check('enclosing home preserved in semantic fixture', anonymous_program:find('do(keep..)', 1, true) ~= nil)
+local original_opening_c = slc.compile(opening_program, 'opening.slc')
+local anonymous_opening_c = slc.compile(anonymous_program, 'opening.slc')
+-- Eliminating a named receiver can also eliminate an unused copy header.
+-- Both compiles execute the assertions; compare the residual function itself.
+local original_body = assert(original_opening_c:match('(uint32_t opening_result%b() %b{})'))
+local anonymous_body = assert(anonymous_opening_c:match('(uint32_t opening_result%b() %b{})'))
+check('anonymous openings preserve residual C and compile-time results', original_body == anonymous_body)
 for name in io.popen('ls ' .. q(root .. '/examples') .. '/*.slc ' .. q(root .. '/lib') .. '/*.slc'):lines() do
     local source = read(name)
     local result = fmt.format(source, nil, name)

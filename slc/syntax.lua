@@ -260,8 +260,9 @@ function P:statement()
         end
         local names = {}
         local first = r:name('in local declaration')
-        if r:is('...') then
-            -- `local ctx...` opens an existing binding; `local ctx... = e` binds, then opens
+        if r:is('...') then r:error("spread-syntax: use '..' to open a binding", r:peek()) end
+        if r:is('..') then
+            -- `local ctx..` opens an existing binding; `local ctx.. = e` binds, then opens
             r:next()
             local init
             if r:accept('=') then init = self:expr(first.v) end
@@ -409,15 +410,21 @@ function P:funcbody(name, at, opts)
     if not opts.params_open then r:expect('(', 'to open parameters') end
     if not r:is(')') then
         repeat
-            if rest then r:error('rest-position: the rest requirement ...' .. rest .. ' must be last', at) end
+            if rest then r:error('rest-position: the rest requirement ..' .. rest .. ' must be last', at) end
             if r:is('...') then
+                if opts.lambda then r:error("spread-syntax: use '..' for SLC opening or rest parameters", at) end
+                r:next(); vararg = true
+                if r:peek().t == 'iden' or r:is(':') then
+                    r:error("spread-syntax: use '..' for SLC opening or rest parameters", at)
+                end
+            elseif r:is('..') then
                 local dots = r:next()
                 local nt = r:peek(1)
                 if nt.t == 'iden' and not nt.kw then
-                    -- `...args`: the rest requirement
+                    -- `..args`: the rest requirement
                     rest = r:next().v
                 else
-                    -- `...` or `...: T`: one unnamed home, opened
+                    -- `..` or `..: T`: one unnamed home, opened
                     local ty
                     if r:accept(':') then ty = self:typeexpr() end
                     params[#params + 1] = { name = '__home', type = ty, opened = true, unnamed = true,
@@ -426,7 +433,8 @@ function P:funcbody(name, at, opts)
             else
                 local n = r:name('in parameters')
                 local opened = false
-                if r:is('...') then r:next(); opened = true end      -- `ctx...`
+                if r:is('...') then r:error("spread-syntax: use '..' to open a parameter", at) end
+                if r:is('..') then r:next(); opened = true end      -- `ctx..`
                 local ty
                 if r:accept(':') then ty = self:typeexpr() end
                 params[#params + 1] = { name = n.v, type = ty, line = n.line, opened = opened }
@@ -442,10 +450,13 @@ function P:funcbody(name, at, opts)
         result = self:typeexpr()
     end
     local typed = result ~= nil
+    if vararg and (typed or opts.lambda) then
+        r:error("spread-syntax: use '..' for SLC opening or rest parameters", at)
+    end
     for _, p in ipairs(params) do
         if p.type and not typed then
             r:error(("parameter '%s' is typed, but %s declares no result type; "
-                .. "native words declare it: (...): T"):format(p.unnamed and '...' or p.name, name or 'the lambda'), at)
+                .. "native words declare it: (...): T"):format(p.unnamed and '..' or p.name, name or 'the lambda'), at)
         end
     end
     local fn = { params = params, vararg = vararg, rest = rest, result = result, name = name,
@@ -473,14 +484,14 @@ end
 
 -- expressions ------------------------------------------------------------------------------
 
--- `...e` in an ordered supply (arguments, returns, binding initializers)
+-- `..e` in an ordered supply (arguments, returns, binding initializers)
 function P:item(hint)
     local r = self.r
-    if r:is('...') then
+    if r:is('..') then
         local nt = r:peek(2)
         if nt.t == ',' or nt.t == ')' or nt.t == 'eof' or nt.t == ']' or nt.t == '}'
             or (nt.kw and (BLOCK_END[nt.kw] or nt.kw == 'then' or nt.kw == 'do')) then
-            return self:expr(hint)                     -- `...` alone: the home
+            return self:expr(hint)                     -- `..` alone: the home
         end
         local d = r:next()
         return { k = 'spread', e = self:expr(), line = d.line }
@@ -498,6 +509,8 @@ function P:expr(hint, in_type)
     return self:subexpr(0, hint, in_type)
 end
 
+function P:binop(tk) return binop_of(tk) end
+
 function P:subexpr(limit, hint, in_type)
     local r = self.r
     local tk = r:peek(1)
@@ -512,7 +525,7 @@ function P:subexpr(limit, hint, in_type)
     end
     while true do
         local nt = r:peek(1)
-        local op = binop_of(nt)
+        local op = self:binop(nt)
         if not op or BINARY[op][1] <= limit then break end
         r:next()
         local right = self:subexpr(BINARY[op][2], nil, in_type)
@@ -529,7 +542,8 @@ function P:simple(hint, in_type)
     if tk.kw == 'nil' then r:next() return { k = 'nil' } end
     if tk.kw == 'true' then r:next() return { k = 'true' } end
     if tk.kw == 'false' then r:next() return { k = 'false' } end
-    if tk.t == '...' then r:next() return { k = 'home', line = tk.line } end
+    if tk.t == '..' then r:next() return { k = 'home', line = tk.line } end
+    if tk.t == '...' then r:next() return { k = 'vararg', line = tk.line } end
     if tk.t == '{' then return self:table() end
     if tk.kw == 'function' then
         local ftk = r:next()
@@ -604,7 +618,7 @@ function P:table_body()
     local items = {}
     while not r:is('}') do
         local tk = r:peek(1)
-        if tk.t == '...' then
+        if tk.t == '..' then
             r:next()
             items[#items + 1] = { kind = 'spread', e = self:expr() }
         elseif tk.t == '[' then
@@ -880,14 +894,15 @@ function G:expr(e)
         return self:lexical_name(e.name)
     elseif k == 'home' then
         local v = self:lookup('__home')
-        if not v then self:err('context-required: `...` reads an unnamed opened home, and there is none here', e.line) end
+        if not v then self:err('context-required: `..` reads an unnamed opened home, and there is none here', e.line) end
         return '__home'
     elseif k == 'spread' then
-        self:err('spread-context: `...e` belongs in an argument, return or initializer list', e.line)
+        self:err('spread-context: `..e` belongs in an argument, return or initializer list', e.line)
     elseif k == 'num' then return e.text
     elseif k == 'str' then return e.text
     elseif k == 'nil' or k == 'true' or k == 'false' then return k
-    elseif k == 'vararg' then return '...'
+    elseif k == 'vararg' then
+        self:err("spread-syntax: use '..' for SLC expansion or an anonymous home", e.line)
     elseif k == 'paren' then return '(' .. self:expr(e.e) .. ')'
     elseif k == 'field' then
         -- through __S.dot: a native value's fields never meet the evaluator's own keys
@@ -935,7 +950,7 @@ function G:expr(e)
         local spread = false
         for _, it in ipairs(e.items) do if it.kind == 'spread' then spread = true end end
         if spread then
-            -- keyed spread: T { ...p, x = 5 }
+            -- keyed spread: T { ..p, x = 5 }
             local parts = {}
             for _, it in ipairs(e.items) do
                 if it.kind == 'spread' then
@@ -1474,7 +1489,7 @@ function G:stat(s)
         if word then
             local e = s.exprs[1]
             if has_spread(s.exprs) then
-                -- `return ...args`: the components, which must be exactly one value
+                -- `return ..args`: the components, which must be exactly one value
                 self:emit(' do __S.ret_one(' .. self:list(s.exprs) .. ') return end')
             elseif #s.exprs == 0 then
                 self:emit(' do __S.ret() return end')

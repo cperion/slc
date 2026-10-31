@@ -53,6 +53,15 @@ assert(type(u) == 'cdata' and u == 18446744073709551615ULL)
 assert(type(s) == 'cdata' and s == 9223372036854775807LL)
 print('hex suffixes ok')
 ]]), 0, 'hex suffixes ok')
+check('two-dot opening keeps infix concatenation', cli .. ' -lmacro.let -e ' .. q([[
+local named = do(ctx..) = label .. suffix
+local unnamed = do(..) = label .. suffix
+assert(named { label = 'a', suffix = 'b' } == 'ab')
+assert(unnamed { label = 'c', suffix = 'd' } == 'cd')
+local function args(...) return ... end
+assert(args(42) == 42)
+print('two dots ok')
+]]), 0, 'two dots ok')
 -- A host application may have unrelated argv and run outside this checkout.
 local pwd = assert(io.popen('pwd')); local cwd = assert(pwd:read '*l'); pwd:close()
 local absolute = root:sub(1, 1) == '/' and root or (cwd .. '/' .. root)
