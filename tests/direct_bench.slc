@@ -1,0 +1,18 @@
+-- Data-dependent recurrences: GCC cannot replace these loops with a sum formula.
+local integer_loop = do(n: U32): U32
+    local x: U32 = 12345
+    for i: U32 = 1, n do
+        x = x * 1664525 + 1013904223
+    end
+    return x
+end
+export integer_loop
+
+local float_loop = do(n: U32): F64
+    local x: F64 = 1
+    for i: U32 = 1, n do
+        x = x * 1.000001 + 0.00001
+    end
+    return x
+end
+export float_loop

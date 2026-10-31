@@ -26,6 +26,24 @@ check('inferred snapshots and references', inferred.inferred_snapshot(7) == 25)
 check('inferred array and Text constructors', inferred.inferred_storage(8) == 14)
 check('mixed explicit and inferred locals', inferred.inferred_mixed(7) == 17)
 
+-- Field-wise loop state must agree across backedges AND exits.
+local lf = slc.load(root .. '/examples/loop_fields.slc')
+for i = 0, 16 do
+    check('loop invariant fields ' .. i, lf.panel_extent(i) == 48 + 12 * i)
+    check('loop conditional fields ' .. i, lf.tally_odd(i) == math.floor(i / 2))
+    check('loop exit-only write ' .. i, lf.exit_change(i) == (i < 3 and 12 or 55))
+    check('loop nested exit ' .. i, lf.nested_exit(i) == (i < 2 and 7 or 12))
+    check('loop nested state ' .. i, lf.nested_loops(i) == 6 * i + 4)
+    check('loop field swap ' .. i, lf.swap_fields(i) == (i % 2 == 1 and 219 or 129))
+    check('loop snapshots ' .. i, lf.snapshots(i) == 3 * i * (i - 1) / 2 + 5 * i)
+    check('loop late address ' .. i, lf.late_address(i) == 36 + i)
+    check('loop hidden reference ' .. i, lf.hidden_record(i) == (i > 0 and 99 or 12))
+    check('loop native mutation ' .. i, lf.native_mutation(i) == (i > 0 and 99 or 12) + i)
+    check('loop tail-record state ' .. i, lf.tail_fields(i) == 3 * i + 3)
+    check('loop multiple exits ' .. i, lf.multiple_exits(i) == (i < 3 and 39 or i % 2 == 1 and 55 or 82))
+    check('loop boolean exit ' .. i, lf.bool_exit(i) == (i >= 3))
+end
+
 -- the guide's program
 local g = slc.load(root .. '/examples/guide.slc')
 check('outline_demo', g.outline_demo(5) == 10)

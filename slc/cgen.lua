@@ -1816,7 +1816,8 @@ local function module_parts(mod, opts)
             if used then
                 local ps = {}
                 for i, t in ipairs(x.params) do ps[i] = ctype(t) end
-                if #ps == 0 then ps[1] = 'void' end
+                if x.variadic and #ps > 0 then ps[#ps + 1] = '...'
+                elseif #ps == 0 and not x.variadic then ps[1] = 'void' end
                 local ret = x.ret.kind == 'unit' and 'void' or ctype(x.ret)
                 add('externs', 'extern ' .. ret .. ' ' .. x.cname .. '(' .. table.concat(ps, ', ') .. ');')
                 protos = true

@@ -26,7 +26,7 @@ local check   -- reported by every phase; declared before the parallel driver us
 -- Backend and sanitizer variants repeat one program many times; they catch a
 -- different class of bug, not a different feature. Every feature keeps its
 -- single compile/run assertion below; these representatives carry the repeats.
-local SANITIZED = { staged_values = true }
+local SANITIZED = { staged_values = true, loop_fields = true }
 local HARNESS_SAN = { runtime_scheduler = true, runtime_channel = true }
 
 local function cpus()
@@ -206,6 +206,13 @@ do
                     .. '-I%s %s -pthread -o %s.asan && ASAN_OPTIONS=detect_leaks=1 %s.asan')
                     :format(sq(root .. '/runtime'), c .. ' ' .. main .. ' ' .. rt_sources, sq(c), sq(c)))
             end
+            if name == 'loop_fields' then
+                for _, opt in ipairs { 0, 2 } do
+                    add(name .. ': C O' .. opt,
+                        ('%s -O%d %s %s %s -pthread -o %s.o%d.bin && %s.o%d.bin')
+                        :format(CC, opt, c, main, rt_sources, sq(c), opt, sq(c), opt))
+                end
+            end
             if name == 'staged_values' then
                 for _, word in ipairs { 'stage_empty', 'stage_value', 'stage_binary_value', 'stage_live', 'stage_shorter', 'stage_nested', 'stage_parse', 'stage_split' } do
                     local generated = assert(io.open(c))
@@ -214,6 +221,40 @@ do
                     check(word .. ': known construction leaves no copy loop',
                         body and not body:find('for%s*%(') and not body:find('while%s*%('))
                 end
+            elseif name == 'ui_counter_generated' then
+                local generated = assert(io.open(c))
+                local source = generated:read('*a'); generated:close()
+                local body = source:match('run_counter_generated%b()%s*(%b{})')
+                check('UI counter: known event chain has no residual tags or handlers', body
+                    and not body:find('%.tag') and not body:find('switch%s*%(')
+                    and not body:find('handle%s*%(') and not body:find('route%s*%('))
+                local hit = body and body:find('>=%s*20u')
+                local increment = body and body:find('%.count%.value%s*=%s*[%w_%.]+%.count%.value%s*%+%s*1u')
+                check('UI counter: hit test leads to native increment', hit and increment and hit < increment
+                    and body:find('<%s*120u') and body:find('>=%s*60u') and body:find('<%s*90u'))
+                local allowed = { ['.count.value'] = true, ['.increment_button.enabled'] = true,
+                    ['.confirm.visible'] = true }
+                local observed, only_mutable = {}, body ~= nil
+                for path in (body or ''):gmatch('%.counter([%.%w_]+)') do
+                    observed[path] = true
+                    if not allowed[path] then only_mutable = false end
+                end
+                for path in pairs(allowed) do if not observed[path] then only_mutable = false end end
+                check('UI counter: only three mutable component leaves remain', only_mutable)
+                local constants = body ~= nil
+                for _, color in ipairs { 66051, 263430, 460809, 658188, 855567 } do
+                    if not (body or ''):find('%.color%s*=%s*' .. color .. 'u;') then constants = false end
+                end
+                for _, geometry in ipairs { { 'x', 20 }, { 'x', 128 }, { 'y', 140 },
+                    { 'width', 208 }, { 'width', 100 }, { 'height', 24 }, { 'height', 30 } } do
+                    if not (body or ''):find('%.' .. geometry[1] .. '%s*=%s*' .. geometry[2] .. 'u;') then
+                        constants = false
+                    end
+                end
+                check('UI counter: drawing positions sizes and all colors are constants', constants)
+                check('UI counter: no foreign input or drawing dependencies', not source:find('extern ', 1, true))
+                local known = source:match('known_counter%b()%s*(%b{})')
+                check('UI counter: known event sequence folds', known and known:find('return 0u;', 1, true))
             elseif name == 'strmaps' or name == 'maps' then
                 local generated = assert(io.open(c))
                 local source = generated:read('*a'); generated:close()
@@ -422,6 +463,10 @@ do
         { 'activities', 'at->value = at->value * 2u;\n    at->weight = at->weight + 1u;', true,
           'one checked lookup serves the whole stretch' },
         { 'activities', 'NodeStore_borrow', false, 'no C helper for a store lookup' },
+        { 'loop_fields', 'return 48u + panel.count * 12u;', true,
+          'unchanged record fields stay known after a loop' },
+        { 'loop_fields', 't.odd = t.odd + 1u;', true,
+          'unchanged record fields stay known inside a loop' },
         { 'boundary', 'uint32_t t = weigh(a);\n    return t + weigh(b) + (a * 3u + a * 3u + a);', true,
           'call makes a shared function, a plain application stays inline' },
         { 'channels', 'slc_poll_recv(', true, 'first_of makes its attempts in the program' },
@@ -488,6 +533,14 @@ do
     check('split: one C file per function compiles in parallel and links',
         split_ok and units > 10 and compile_ok and run_ok and run_out:find('stores: ok', 1, true) ~= nil,
         split_out .. compile_out .. run_out)
+end
+
+-- SDL3 is optional; when installed, compilation/runtime failures are failures.
+if sh('pkg-config --exists sdl3') then
+    local ok, out = sh(('luajit %s/tests/canvas.lua'):format(sq(root)))
+    check('canvas: SDL3 activity case study', ok, out)
+else
+    print('skip  canvas: SDL3 development package unavailable')
 end
 
 local docs = par {

@@ -16,7 +16,7 @@ export SLC_GCCJIT := $(CURDIR)/.local/lib/libgccjit.so.0
 endif
 endif
 
-.PHONY: help doctor dirs runtime test test-macros test-format test-modules test-native test-scheduler run tree-sitter test-tree-sitter dist test-dist test-dist-suite
+.PHONY: help doctor dirs runtime test test-macros test-format test-modules test-native test-scheduler direct test-direct run tree-sitter test-tree-sitter dist test-dist test-dist-suite
 
 TREE_SITTER ?= tree-sitter
 NVIM ?= nvim
@@ -53,6 +53,10 @@ test-format: dirs
 test-modules: dirs
 	$(LUA) tests/modules.lua
 
+.PHONY: test-canvas
+test-canvas: dirs
+	$(LUA) tests/canvas.lua
+
 test: test-macros test-format test-modules
 	$(LUA) tests/run.lua
 
@@ -65,6 +69,21 @@ test-scheduler: dirs
 test-native: dirs
 	$(LUA) -e 'require("slc.cjit").lib()'
 	$(LUA) tests/native.lua
+
+# Explicit build of the register-bank stencil pack and platform gates.
+direct: dirs
+	bash tools/build_direct.sh
+
+test-direct: direct
+	build/direct/test-abi
+	CC=/bin/false CLANG=/bin/false $(LUA) tests/direct.lua
+	CC=/bin/false CLANG=/bin/false $(LUA) -joff tests/direct.lua
+	$(LUA) tests/direct_ir.lua
+	$(LUA) -joff tests/direct_ir.lua
+	$(LUA) tests/direct_storage.lua
+	$(LUA) tests/direct_tasks.lua
+	CC=/bin/false CLANG=/bin/false SLC_GCCJIT=/direct/no-gccjit.so $(LUA) tests/direct_standalone.lua
+	CC=/bin/false CLANG=/bin/false SLC_GCCJIT=/direct/no-gccjit.so $(LUA) -joff tests/direct_standalone.lua
 
 # the single binary: slc's own parts embedded, the host's LuaJIT linked dynamically,
 # and the C runtime linked in (the process exports it for gccjit'd code)

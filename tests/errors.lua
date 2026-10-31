@@ -289,38 +289,6 @@ local f = do(x: U32): U32
 end
 local y = f(3)
 ]] },
-    { name = 'an opened field colliding with a visible local', expect = 'spread-shadow',
-      src = [[local E = struct { cursor: U32 }
-local f = do(x: U32): U32
-    local cursor: U32 = x
-    local e: E = E { cursor = 1 }
-    local e...
-    return cursor
-end
-export f
-]] },
-    { name = 'a declaration shadowing an introduced name', expect = 'spread-shadow',
-      src = [[local E = struct { cursor: U32 }
-local f = do(x: U32): U32
-    local e: E = E { cursor = x }
-    local e...
-    local cursor = 3
-    return cursor
-end
-export f
-]] },
-    { name = 'two openings introducing the same name', expect = 'spread-shadow',
-      src = [[local A = struct { n: U32 }
-local B = struct { n: U32 }
-local f = do(x: U32): U32
-    local a: A = A { n = x }
-    local b: B = B { n = x }
-    local a...
-    local b...
-    return n
-end
-export f
-]] },
     { name = 'two keyed spreads with a common field', expect = 'spread-overlap',
       src = [[local P = struct { x: U32, y: U32 }
 local f = do(a: P, b: P): P = P { ...a, ...b, x = 1 }
@@ -489,21 +457,6 @@ export f
 ]] },
     { name = 'a foreign struct without a header', expect = 'a header such as',
       src = [[local Stat = cstruct("struct stat", nil, { { "size", I64, "st_size" } })
-]] },
-    { name = 'activity parameter shadowing its own field', expect = 'spread-shadow',
-      src = [[local Fd = struct { fd: I32 }
-local with = do(body): I32
-    local f: Fd = Fd { fd = 3 }
-    body(Ref(f))
-    return 0
-end
-local g = do(x: I32): I32
-    with do(fd...)
-        local y = fd
-    end
-    return x
-end
-export g
 ]] },
     { name = 'reading an atomic plainly', expect = 'is read with :load()',
       src = [[local C = struct { n: Atomic U32 }

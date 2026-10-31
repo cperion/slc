@@ -1,0 +1,94 @@
+-- SDL3 platform boundary and resource activities. Call on the main thread.
+-- Bodies return Result; a normal return always passes through cleanup.
+local header = "<SDL3/SDL.h>"
+local options = { .header }
+local Window = opaque "SDL_Window"
+local Renderer = opaque "SDL_Renderer"
+local Rect = cstruct("SDL_FRect", header, {
+        { "x", F32 }, { "y", F32 }, { "w", F32 }, { "h", F32 },
+    })
+-- One non-overlapping view of the union. Read key fields only for keyboard
+-- events, window_id only for keyboard/window events. timestamp preserves the
+-- union's native alignment; sizeof and offsets come from the SDL header.
+local Event = cstruct("SDL_Event", header, {
+        { "kind", U32, "key.type" }, { "timestamp", U64, "key.timestamp" },
+        { "window_id", U32, "key.windowID" }, { "code", U32, "key.key" },
+        { "pressed", Bool, "key.down" }, { "repeated", Bool, "key.repeat" },
+    })
+local init = extern("SDL_Init", { U32 }, Bool, options)
+local quit = extern("SDL_QuitSubSystem", { U32 }, Unit, options)
+local create_window = extern("SDL_CreateWindow", { CString, I32, I32, U64 }, Ptr Window, options)
+local destroy_window = extern("SDL_DestroyWindow", { Ptr Window }, Unit, options)
+local create_renderer = extern("SDL_CreateRenderer", { Ptr Window, CString }, Ptr Renderer, options)
+local destroy_renderer = extern("SDL_DestroyRenderer", { Ptr Renderer }, Unit, options)
+local get_error = extern("SDL_GetError", {}, CString, options)
+local video = cconst("SDL_INIT_VIDEO", U32, header)
+local resizable = cconst("SDL_WINDOW_RESIZABLE", U64, header)
+local Operation = {
+    init = 1, window = 2, renderer = 3, size = 4,
+    color = 5, clear = 6, fill_rect = 7, line = 8, present = 9,
+}
+-- Owned, bounded diagnostic. Truncation is explicit, never a dangling CString.
+local Message = Chars 512
+local Failure = struct { operation: U32, message: Message, truncated: Bool }
+local no_failure = Failure { operation = 0, message = Message(), truncated = false }
+local Result = oneof { done: Unit, failed: Failure }
+local failure = do(operation: U32): Failure
+    local out = no_failure
+    out.operation = operation
+    local text = (Ptr U8)(get_error())
+    local i: U32 = 0
+    while i < 512 and text[i] ~= 0 do
+        out.message.bytes[i] = text[i]
+        i = i + 1
+    end
+    out.message.len = i
+    out.truncated = text[i] ~= 0
+    return out
+end
+local with_video = do(body): Result
+    if not init video then return Result.failed(failure Operation.init) end
+    local result = body()
+    quit video
+    return result
+end
+local with_window = do(config, body): Result
+    local flags: U64 = 0
+    if config.resizable then flags = resizable end
+    local handle = create_window(config.title, config.width, config.height, flags)
+    if handle == null Window then return Result.failed(failure Operation.window) end
+    local result = body handle
+    destroy_window handle
+    return result
+end
+local with_renderer = do(window: Ptr Window, body): Result
+    local handle = create_renderer(window, CString(null U8))
+    if handle == null Renderer then return Result.failed(failure Operation.renderer) end
+    local result = body handle
+    destroy_renderer handle
+    return result
+end
+return {
+    .Window, .Renderer, .Rect, .Event,
+    .Failure, .Result, .Operation, .failure, .no_failure,
+    .with_video, .with_window, .with_renderer,
+    window_id = extern("SDL_GetWindowID", { Ptr Window }, U32, options),
+    poll = extern("SDL_PollEvent", { Ptr Event }, Bool, options),
+    output_size = extern("SDL_GetRenderOutputSize",
+        { Ptr Renderer, Ptr I32, Ptr I32 }, Bool, options),
+    color = extern("SDL_SetRenderDrawColor", { Ptr Renderer, U8, U8, U8, U8 }, Bool, options),
+    clear = extern("SDL_RenderClear", { Ptr Renderer }, Bool, options),
+    fill_rect = extern("SDL_RenderFillRect", { Ptr Renderer, Ptr Rect }, Bool, options),
+    line = extern("SDL_RenderLine", { Ptr Renderer, F32, F32, F32, F32 }, Bool, options),
+    present = extern("SDL_RenderPresent", { Ptr Renderer }, Bool, options),
+    delay = extern("SDL_Delay", { U32 }, Unit, options),
+    quit_event = cconst("SDL_EVENT_QUIT", U32, header),
+    close_event = cconst("SDL_EVENT_WINDOW_CLOSE_REQUESTED", U32, header),
+    key_down = cconst("SDL_EVENT_KEY_DOWN", U32, header),
+    key_up = cconst("SDL_EVENT_KEY_UP", U32, header),
+    Key = {
+        left = cconst("SDLK_LEFT", U32, header), right = cconst("SDLK_RIGHT", U32, header),
+        up = cconst("SDLK_UP", U32, header), down = cconst("SDLK_DOWN", U32, header),
+        escape = cconst("SDLK_ESCAPE", U32, header),
+    },
+}

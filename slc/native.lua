@@ -60,13 +60,31 @@ end
 
 -- the runtime library, built once per source text and I/O backend
 local rt
-function N.runtime()
-    if rt then return rt end
+local runtime_declared
+local function declare_runtime()
+    if runtime_declared then return end
     ffi.cdef [[
         int slc_try(void (*body)(void *), void *env);
         const char *slc_trap_message(void);
         const char *slc_io_backend(void);
     ]]
+    runtime_declared = true
+end
+-- Strict loader for backends that prohibit runtime compilation. Reuse the one
+-- process runtime, rather than creating another set of TLS traps/data stacks.
+function N.runtime_prebuilt(path)
+    if rt then return rt end
+    declare_runtime()
+    if os.getenv('SLC_RUNTIME_IN_PROCESS') == '1' then rt = ffi.C
+    else
+        assert(path, 'slc: a prebuilt runtime library is required')
+        rt = ffi.load(path, true)
+    end
+    return rt
+end
+function N.runtime()
+    if rt then return rt end
+    declare_runtime()
     -- the single binary links the runtime and exports it: gccjit'd code binds to
     -- these symbols in the process, so there is no library to build or load
     if os.getenv('SLC_RUNTIME_IN_PROCESS') == '1' then
@@ -107,6 +125,8 @@ N.results = {}     -- compiled code lives as long as the process
 -- compile a module's exports (or the given functions) into this process
 function N.compile(mod, opts)
     opts = opts or {}
+    if opts.backend == 'direct' then return require('slc.direct').compile(mod, opts) end
+    if opts.backend and opts.backend ~= 'gccjit' then error('slc: unknown backend ' .. tostring(opts.backend), 0) end
     local runtime = N.runtime()
     local u = JG.build(mod, { opt = opts.opt or 2, debug = opts.debug })
     u:thunks()

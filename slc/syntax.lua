@@ -832,7 +832,9 @@ function G:pop_scope() local b = self.body; b.scopes[#b.scopes] = nil end
 function G:declare(name, info)
     local b = self.body
     info.region = b.region
-    b.scopes[#b.scopes][name] = info
+    local sc = b.scopes[#b.scopes]
+    info.open_order = #(sc.__opens or {})
+    sc[name] = info
 end
 
 function G:lookup(name)
@@ -859,19 +861,23 @@ local function str(s) return ('%q'):format(s) end
 
 local CMP = { ['=='] = 'eq', ['~='] = 'ne', ['<'] = 'lt', ['<='] = 'le', ['>'] = 'gt', ['>='] = 'ge' }
 
+function G:lexical_name(name)
+    local v = self:lookup(name)
+    if v and v.loop_slot then
+        return '__S.inferred_state(' .. v.loop_slot .. ', ' .. name .. ')'
+    end
+    return name
+end
+
 function G:expr(e)
     local k = e.k
     if k == 'name' then
         if e.name == '__S' or e.name == '__ENV' then self:err("'" .. e.name .. "' is reserved", e.line) end
-        if not self:lookup(e.name) and #self:opens() > 0 then
-            -- a free name inside an opened region: an introduced name, or the binding outside
-            return ('__S.oname(%s, %s, function() return %s end)'):format(self:open_list(), str(e.name), e.name)
+        if #self:opens(e.name) > 0 then
+            -- Only openings newer than the nearest lexical binding can hide it.
+            return ('__S.oname(%s, %s, function() return %s end)'):format(self:open_list(e.name), str(e.name), self:lexical_name(e.name))
         end
-        local v = self:lookup(e.name)
-        if v and v.loop_slot then
-            return '__S.inferred_state(' .. v.loop_slot .. ', ' .. e.name .. ')'
-        end
-        return e.name
+        return self:lexical_name(e.name)
     elseif k == 'home' then
         local v = self:lookup('__home')
         if not v then self:err('context-required: `...` reads an unnamed opened home, and there is none here', e.line) end
@@ -1059,14 +1065,13 @@ function G:function_body(fn, kind, method_of)
     self.body = new_body(kind, saved)
     if method_of then self:declare('self', { immutable = true, param = true }) end
     for _, p in ipairs(fn.params) do
-        if not p.unnamed then self:no_shadow_check(p.name) end
         self:declare(p.name, { immutable = kind == 'word', param = true, context = p.opened })
     end
     if fn.rest then self:declare(fn.rest, { immutable = true, pack = true }) end
     local o = self.out
     self.out = {}
     for _, p in ipairs(fn.params) do
-        if p.opened then self:open_context(p.name, p.unnamed and '...' or p.name) end
+        if p.opened then self:open_context(p.name) end
     end
     if fn.expr then
         if kind ~= 'host' then
@@ -1086,59 +1091,41 @@ end
 
 -- opening ----------------------------------------------------------------------------------------
 
--- the opened contexts visible here, innermost first (Lua expressions)
-function G:opens()
+-- Opened contexts, innermost first. With a name, stop at its nearest
+-- declaration and include only openings newer than that declaration.
+-- Synthetic loop-state bindings transport values; they do not declare names.
+function G:opens(name)
     local out = {}
     local b = self.body
     while b do
         for i = #b.scopes, 1, -1 do
             local sc = b.scopes[i]
+            local binding = name and sc[name]
+            if binding and binding.loop_binding then binding = nil end
             if sc.__opens then
-                for k = #sc.__opens, 1, -1 do out[#out + 1] = sc.__opens[k] end
+                for k = #sc.__opens, (binding and binding.open_order or 0) + 1, -1 do
+                    out[#out + 1] = sc.__opens[k]
+                end
             end
+            if binding then return out end
         end
         b = b.parent
     end
     return out
 end
 
-function G:open_list()
-    return '{ ' .. table.concat(self:opens(), ', ') .. ' }'
+function G:open_list(name)
+    return '{ ' .. table.concat(self:opens(name), ', ') .. ' }'
 end
 
--- every declared name visible here
-function G:visible_names()
-    local seen, out = {}, {}
-    local b = self.body
-    while b do
-        for i = #b.scopes, 1, -1 do
-            for name in pairs(b.scopes[i]) do
-                if type(name) == 'string' and not name:match '^__' and not seen[name] then
-                    seen[name] = true
-                    out[#out + 1] = str(name)
-                end
-            end
-        end
-        b = b.parent
-    end
-    table.sort(out)
-    return '{ ' .. table.concat(out, ', ') .. ' }'
-end
-
--- open the context held by Lua variable `var` for the rest of the current scope
-function G:open_context(var, label)
-    local outer = self:open_list()
-    self:emit((' __S.open(%s, %s, %s, __ENV, %s)'):format(var, outer, self:visible_names(), str(label)))
+-- Retain the receiver independently of later bindings of its source name.
+function G:open_context(var)
+    self.open_id = (self.open_id or 0) + 1
+    local alias = '__opened_' .. self.open_id
+    self:emit((' local %s = __S.open(%s)'):format(alias, var))
     local sc = self.body.scopes[#self.body.scopes]
     sc.__opens = sc.__opens or {}
-    table.insert(sc.__opens, var)
-end
-
--- a declaration inside an opened region must not shadow an introduced name
-function G:no_shadow_check(name)
-    if #self:opens() > 0 then
-        self:emit((' __S.no_shadow(%s, %s)'):format(self:open_list(), str(name)))
-    end
+    table.insert(sc.__opens, alias)
 end
 
 -- statements ---------------------------------------------------------------------------------
@@ -1170,12 +1157,19 @@ function G:closure(params, stats, extra)
     return 'function(' .. params .. ') ' .. text .. ' end'
 end
 
-function G:assign_target(t, value)
+function G:assign_target(t, value, lexical)
+    local function reject(message)
+        -- A newer opening may supply the target; diagnose its lexical fallback
+        -- only if specialization actually selects that fallback.
+        if lexical then return 'error(' .. str(message) .. ')' end
+        self:err(message, t.line)
+    end
     if t.k == 'name' then
         local v, owner = self:lookup(t.name)
-        if not v and #self:opens() > 0 then
-            -- an introduced field name: a store to its place
-            return ('__S.oset(%s, %s, %s)'):format(self:open_list(), str(t.name), value)
+        if not lexical and #self:opens(t.name) > 0 then
+            local fallback = self:assign_target(t, '__value', true)
+            return ('__S.oset(%s, %s, %s, function(__value) %s end)'):format(
+                self:open_list(t.name), str(t.name), value, fallback)
         end
         if v and v.inferred then
             local host
@@ -1185,7 +1179,7 @@ function G:assign_target(t, value)
                 host = t.name .. ' = __S.assign_name(' .. t.name .. ', __value, '
                     .. (self.body.region - v.region) .. ')'
             end
-            return '__S.assign_inferred(' .. self:expr(t) .. ', ' .. value
+            return '__S.assign_inferred(' .. self:lexical_name(t.name) .. ', ' .. value
                 .. ', function(__value) ' .. host .. ' end)'
         end
         if v and v.typed then
@@ -1193,16 +1187,16 @@ function G:assign_target(t, value)
             return '__S.set(' .. t.name .. ', ' .. value .. ')'
         end
         if not v or owner ~= self.body then
-            self:err(("cannot assign '%s': a typed body can only assign bindings it declares"):format(t.name), t.line)
+            return reject(("cannot assign '%s': a typed body can only assign bindings it declares"):format(t.name))
         end
         if v.context then
-            self:err(("context-use: '%s' is an opened context; the whole context cannot be assigned"):format(t.name), t.line)
+            return reject(("context-use: '%s' is an opened context; the whole context cannot be assigned"):format(t.name))
         end
         if v.pack then
-            self:err(("pack-use: '%s' is a pack; it cannot be assigned"):format(t.name), t.line)
+            return reject(("pack-use: '%s' is a pack; it cannot be assigned"):format(t.name))
         end
         if v.loopvar then
-            self:err(("'%s' is a loop variable; it cannot be assigned"):format(t.name), t.line)
+            return reject(("'%s' is a loop variable; it cannot be assigned"):format(t.name))
         end
         if v.typed then
             return '__S.set(' .. t.name .. ', ' .. value .. ')'
@@ -1247,7 +1241,7 @@ function G:state_list(state)
     local q, values = {}, {}
     for i, n in ipairs(state) do
         q[i] = str(n)
-        values[i] = '(' .. self:expr({ k = 'name', name = n }) .. ' or false)'
+        values[i] = '(' .. self:lexical_name(n) .. ' or false)'
     end
     return '{ ' .. table.concat(values, ', ') .. ' }, { ' .. table.concat(q, ', ') .. ' }'
 end
@@ -1259,10 +1253,10 @@ function G:loop_bindings(state)
         if v.inferred then
             self.loop_id = (self.loop_id or 0) + 1
             params[i] = '__inferred_loop_' .. self.loop_id
-            bindings[n] = { inferred = true, loop_slot = params[i], region = v.region }
+            bindings[n] = { inferred = true, loop_slot = params[i], region = v.region, loop_binding = true }
         else
             params[i] = n
-            bindings[n] = { typed = true, region = v.region }
+            bindings[n] = { typed = true, region = v.region, loop_binding = true }
         end
     end
     return table.concat(params, ', '), function()
@@ -1284,18 +1278,13 @@ function G:stat(s)
     if k == 'open' then
         if s.init then
             -- bind once, then open; a place stays a place, so its fields are live
-            self:no_shadow_check(s.name)
             self:emit(' local ' .. s.name .. ' = __S.open_bind(' .. self:expr(s.init) .. ')')
             self:declare(s.name, { immutable = true, context = true })
-        elseif not self:lookup(s.name) and #self:opens() > 0 then
-            self:err(("cannot open '%s' here: it would be resolved through another opening; "
-                .. "bind it first"):format(s.name), s.line)
         end
-        self:open_context(s.name, s.name)
+        self:open_context(self:expr({ k = 'name', name = s.name }))
         return
     end
     if k == 'local' then
-        for _, n in ipairs(s.names) do self:no_shadow_check(n.name) end
         local has_type = false
         for _, n in ipairs(s.names) do if n.type then has_type = true end end
         if has_type then
@@ -1330,7 +1319,6 @@ function G:stat(s)
         end
         for _, n in ipairs(s.names) do self:declare(n.name, { inferred = true }) end
     elseif k == 'localfunction' then
-        self:no_shadow_check(s.name)
         self:declare(s.name, {})
         local fn = s.fn
         self:emit(' local ' .. s.name .. '; ' .. s.name .. ' = ' .. self:lambda(fn))

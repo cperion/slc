@@ -1,0 +1,218 @@
+-- Design feasibility probe, NOT a UI toolkit. Inputs are already targeted;
+-- presentation counts declarations, not pixels. No layout/router/SDL adapter.
+local Input = struct { kind: U32, target: U32, ticket: U32 }
+local Stats = struct { actions: U32, submitted: U32, snapshot: U32, buttons: U32, labels: U32 }
+local Turn = struct { input: Input, claimed: Bool, stats: Stats }
+local Button = struct { id: U32, armed: Bool }
+local Confirmation = struct { accept: Button, cancel: Button }
+local Mode = oneof { editing: Unit, confirming: Unit, saving: U32, failed: Unit, closed: Unit }
+local Editor = struct {
+    id: U32, document: U32, serial: U32, mode: Mode,
+    open: Button, confirmation: Confirmation, retry: Button, back: Button,
+}
+local Counter = struct { plus: Button, value: U32 }
+local App = struct { editor: Editor, counter: Counter, done: Bool, finished: U32, observed: U32 }
+local empty_stats = Stats { actions = 0, submitted = 0, snapshot = 0, buttons = 0, labels = 0 }
+local no_input = Input { kind = 0, target = 0, ticket = 0 }
+
+-- A known vocabulary, constructed while specializing. turn is borrowed only
+-- during this root invocation; no entry of this table becomes a runtime closure.
+local vocabulary = function(phase, turn)
+    return {
+        row = do(body): Unit
+            body()
+        end,
+        column = do(body): Unit
+            body()
+        end,
+        label = do(text): Unit
+            if phase == "paint" then turn.stats.labels = turn.stats.labels + 1 end
+        end,
+        button = do(label, home: Ref Button, activated): Unit
+            if phase == "paint" then
+                turn.stats.buttons = turn.stats.buttons + 1
+            else
+                if not turn.claimed and turn.input.target == home.id then
+                    if turn.input.kind == 1 then
+                        home.armed = true
+                        turn.claimed = true
+                    elseif turn.input.kind == 2 then
+                        local fire = home.armed
+                        home.armed = false
+                        turn.claimed = true
+                        if fire then
+                            turn.stats.actions = turn.stats.actions + 1
+                            activated()
+                        end
+                    elseif turn.input.kind == 3 then
+                        home.armed = false
+                        turn.claimed = true
+                    elseif turn.input.kind == 4 then
+                        -- Semantic activation (e.g. accessibility), not fake input.
+                        home.armed = false
+                        turn.claimed = true
+                        turn.stats.actions = turn.stats.actions + 1
+                        activated()
+                    end
+                end
+            end
+        end,
+        submit = do(ticket: U32, document: U32): Unit
+            -- Only an action may call this test port. Real submission is queued
+            -- at the turn boundary; here we observe its single owned snapshot.
+            if phase == "input" then
+                turn.stats.submitted = turn.stats.submitted + 1
+                turn.stats.snapshot = document
+            end
+        end,
+        completion = do(owner: U32, ticket: U32, body): Unit
+            if phase == "input" then
+                if not turn.claimed and turn.input.target == owner and turn.input.ticket == ticket then
+                    if turn.input.kind == 5 or turn.input.kind == 6 then
+                        turn.claimed = true
+                        turn.stats.actions = turn.stats.actions + 1
+                        body(turn.input.kind == 5)
+                    end
+                end
+            end
+        end,
+    }
+end
+
+local confirmation = do(home: Ref Confirmation, ui, accepted, cancelled): Unit
+    local ui...
+    local save = button "Save"
+    local keep_editing = button "Keep editing"
+    column do
+        label "Save before closing?"
+        row do
+            save home.accept accepted
+            keep_editing home.cancel cancelled
+        end
+    end
+end
+
+local counter = do(home: Ref Counter, ui, changed): Unit
+    local ui...
+    local increment = button "+"
+    increment home.plus do
+        home.value = home.value + 1
+        changed home.value
+    end
+end
+
+local begin_save = do(home: Ref Editor, ui): Unit
+    home.serial = home.serial + 1
+    ui.submit(home.serial, home.document)
+    home.mode = Mode.saving home.serial
+end
+
+local editor = do(home: Ref Editor, ui, closed): Unit
+    local ui...
+    local save_and_close = button "Save and close"
+    local retry = button "Retry"
+    local back = button "Back to editor"
+    home.mode {
+        editing = do
+            label "Editing"
+            save_and_close home.open do
+                home.mode = Mode.confirming()
+            end
+        end,
+        confirming = do
+            -- Both continuation blocks are ordinary SLC arguments at this site.
+            confirmation home.confirmation ui do
+                begin_save home ui
+            end do
+                home.mode = Mode.editing()
+            end
+        end,
+        saving = do(ticket)
+            label "Saving"
+            completion home.id ticket do(ok)
+                if ok then
+                    home.mode = Mode.closed()
+                    closed()
+                else
+                    home.mode = Mode.failed()
+                end
+            end
+        end,
+        failed = do
+            label "Save failed"
+            retry home.retry do
+                begin_save home ui
+            end
+            back home.back do
+                home.mode = Mode.editing()
+            end
+        end,
+        closed = do end,
+    }
+end
+
+local application = do(home: Ref App, ui, finished): Unit
+    if not home.done then
+        editor home.editor ui do
+            home.done = true
+            finished()
+        end
+        counter home.counter ui do(value)
+            home.observed = value
+        end
+    end
+end
+
+local button_home = do(id: U32): Button = Button { .id, armed = false }
+local probe_init = do(base: U32, document: U32): App = App {
+    editor = Editor {
+        id = base, .document, serial = 0, mode = Mode.editing(),
+        open = button_home(base + 1),
+        confirmation = Confirmation { accept = button_home(base + 2), cancel = button_home(base + 3) },
+        retry = button_home(base + 4), back = button_home(base + 5),
+    },
+    counter = Counter { plus = button_home(base + 6), value = 0 },
+    done = false, finished = 0, observed = 0,
+}
+export probe_init
+
+local probe_input = do(home: Ref App, input: Input): Stats
+    local turn = Turn { .input, claimed = false, stats = empty_stats }
+    local ui = vocabulary("input", Ref turn)
+    application home ui do
+        home.finished = home.finished + 1
+    end
+    return turn.stats
+end
+export probe_input
+
+local probe_paint = do(home: Ref App): Stats
+    local turn = Turn { input = no_input, claimed = false, stats = empty_stats }
+    local ui = vocabulary("paint", Ref turn)
+    application home ui do
+        home.finished = home.finished + 1
+    end
+    return turn.stats
+end
+export probe_paint
+
+-- Re-visiting a composition with the same already-consumed turn must not
+-- invoke another continuation. This is NOT an allowed duplicate placement.
+local probe_revisit = do(home: Ref App, input: Input): Stats
+    local turn = Turn { .input, claimed = false, stats = empty_stats }
+    local ui = vocabulary("input", Ref turn)
+    application home ui do home.finished = home.finished + 1 end
+    application home ui do home.finished = home.finished + 1 end
+    return turn.stats
+end
+export probe_revisit
+
+-- The same composition can be evaluated with known input, not just residualized.
+local known_counter = do(): U32
+    local home = probe_init(U32 100, U32 7)
+    probe_input(Ref home, Input { kind = 4, target = 106, ticket = 0 })
+    probe_paint(Ref home)
+    return home.observed
+end
+assert(host(known_counter()) == 1)
+export known_counter

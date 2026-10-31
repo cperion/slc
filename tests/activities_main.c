@@ -24,7 +24,17 @@ static uint32_t logs[8], nlogs, traces[8], ntraces;
 void log_call(uint32_t n) { logs[nlogs++] = n; }
 void trace(uint32_t t) { traces[ntraces++] = t; }
 
+uint32_t shadow_fields(uint32_t), shadow_activity(uint32_t), shadow_vocab(uint32_t);
+uint32_t shadow_calls(uint32_t), shadow_callback(uint32_t), shadow_prelude(void);
+
 int main(void) {
+    assert(shadow_fields(0) == 133);
+    assert(shadow_fields(5) == 139);
+    assert(shadow_activity(8) == 9);
+    assert(shadow_vocab(5) == 18);
+    assert(shadow_calls(5) == 28);
+    assert(shadow_callback(5) == 21);
+    assert(shadow_prelude() == 16);
     Document d = { 10, 2, 0 };
     type_text(&d, 1);            /* insert 1 (cursor 3), move left (2), 2 > 3? no */
     assert(d.length == 11 && d.cursor == 2 && d.edits == 1);

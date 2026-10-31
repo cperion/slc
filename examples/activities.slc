@@ -201,3 +201,79 @@ local survives_growth = do(n: U32, flip: Bool): U32
     return g.nodes[id].value
 end
 export survives_growth
+
+-- Opening is bulk lexical binding, including writes and scope restoration.
+local shadow_fields = do(n: U32): U32
+    local count: U32 = 100
+    local total: U32 = 0
+    local a = Counting { count = 1 }
+    local b = Counting { count = 10 };
+    do
+        local a...
+        count = count + 1
+        do
+            local b...
+            count = count + 2
+            local count = count + 3
+            total = count
+        end
+        total = total + count
+        local a = 99 -- must not change the retained receiver
+        while count < n do
+            count = count + 1
+        end
+        total = total + count
+    end
+    return total + count + a.count + b.count
+end
+export shadow_fields
+
+local shadow_parameter = do(count...: Ref Counting): U32
+    count = count + 1
+    return count
+end
+local shadow_activity = do(n: U32): U32
+    local c = Counting { count = n }
+    return shadow_parameter (Ref c)
+end
+export shadow_activity
+
+local base_vocab = { kilo = 2, enabled = true, twice = twice }
+local custom_vocab = { kilo = 3, enabled = false, twice = do(x: U32): U32 = x + 7 }
+local shadow_vocab = do(n: U32): U32
+    local kilo = 100
+    local base_vocab...
+    local before = kilo
+    local custom_vocab...
+    local result = twice n
+    if enabled then result = 999 end
+    local kilo = kilo + 1
+    return before + kilo + result
+end
+export shadow_vocab
+
+local shadow_calls = do(n: U32): U32
+    local twice = do(x: U32): U32 = x - 1
+    local base_vocab...
+    local result = twice n
+    local custom_vocab...
+    result = result + twice n
+    local twice = do(x: U32): U32 = x + 1
+    return result + twice n
+end
+export shadow_calls
+
+local shadow_callback = do(n: U32): U32
+    local c = Counting { count = 10 }
+    local c...
+    local result = apply(do(count) return count + 1 end, n)
+    return result + apply(do(v) return count + v end, n)
+end
+export shadow_callback
+
+local reserved_vocab = { U32 = 7, type = 9 }
+local shadow_prelude = do(): U32
+    local reserved_vocab...
+    return U32 + type
+end
+export shadow_prelude

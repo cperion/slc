@@ -1,0 +1,222 @@
+-- Real source for differential testing of the direct prepared-IR backend.
+local affine = do(x: U64): U64 = x * 6364136223846793005ULL + 1442695040888963407ULL
+export affine
+
+local narrow = do(a: U16, b: U16): U16
+    local product = a * b + a
+    return bxor product b
+end
+export narrow
+
+local signed_math = do(a: I64, b: I64): I64 = a / b + a % b
+export signed_math
+
+local converted = do(x: I32): I16 = I16(U8 x)
+export converted
+
+local choice = do(flag: Bool, a: U32, b: U32): U32
+    local x = a
+    if flag then
+        x = x + b
+    else
+        x = x - b
+    end
+    return x * 3
+end
+export choice
+
+local logic = do(a: Bool, b: Bool, c: Bool): Bool = a and (b or not c)
+export logic
+
+local triangular = do(n: U32): U64
+    local i, total = U32 0, U64 0
+    while i < n do
+        i = i + 1
+        total = total + U64 i
+    end
+    return total
+end
+export triangular
+
+local nested = do(n: U32): U32
+    local total = U32 0
+    for i: U32 = 1, n do
+        for j: U32 = 1, i do
+            total = total + j
+        end
+    end
+    return total
+end
+export nested
+
+local descending = do(n: I32): I32
+    local total = I32 0
+    for i: I32 = n, 0, -2 do
+        total = total + i
+    end
+    return total
+end
+export descending
+
+local edge = do(first: U8): U32
+    local total = U32 0
+    for i: U8 = first, 255 do
+        total = total + U32 i
+    end
+    return total
+end
+export edge
+
+local snapshots = do(x: U32): U32
+    local a = x
+    local before = a
+    a = a + 10
+    return before + a
+end
+export snapshots
+
+local empty = do(x: U32): Unit
+    local ignored = x + 1
+end
+export empty
+
+local function fibonacci(n: U32): U32
+    if n < 2 then return n end
+    return fibonacci(n - 1) + fibonacci(n - 2)
+end
+export fibonacci
+
+local mutate = do(p: Ptr U32, delta: U32): U32
+    local before = p[0]
+    p[0] = before + delta
+    return before + p[0]
+end
+export mutate
+
+local sum10 = extern("cp_fixture_sum10", { U64, U64, U64, U64, U64, U64, U64, U64, U64, U64 }, U64)
+local native_sum = do(x: U64): U64 = sum10(x, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+export native_sum
+
+local callback_word = do(a: U64, b: U64): U64 = a * 2 + b
+local Callback = Fn({ U64, U64 }, U64)
+local callback = extern("cp_fixture_callback", { Callback, U64, U64 }, U64)
+local nested_callback = do(a: U64, b: U64): U64 = callback(fnptr callback_word, a, b)
+export nested_callback
+
+local apply = do(f: Callback, a: U64, b: U64): U64 = f(a, b)
+export apply
+local callback_pointer = do(): Callback = fnptr callback_word
+export callback_pointer
+
+local float_math = do(a: F32, b: F32): F32
+    local x = a * b
+    return -x + F32 0.25
+end
+export float_math
+local double_math = do(a: F64, b: F64): F64 = a / b + 0.125
+export double_math
+local float_compare = do(a: F64, b: F64): Bool = a < b or a == b
+export float_compare
+local float_convert = do(a: I64): F32 = F32 a
+export float_convert
+local float_to_int = do(a: F64): I64 = I64 a
+export float_to_int
+local float_pointer = do(p: Ptr F32, delta: F32): F32
+    p[0] = p[0] + delta
+    return p[0]
+end
+export float_pointer
+local float10 = extern("cp_fixture_float10", { F64, F64, F64, F64, F64, F64, F64, F64, F64, F64 }, F64)
+local native_float = do(a: F64): F64 = float10(a, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+export native_float
+local varsum = extern("cp_fixture_variadic", { U32 }, F64, { variadic = true })
+local native_varargs = do(a: F32, b: F64): F64 = varsum(3, a, b, F32 0.5)
+export native_varargs
+
+local Mixed = struct { a: U64, b: F64 }
+local Large = struct { a: U64, b: U64, c: U64 }
+local Two = struct { a: U64, b: U64 }
+local mixed_update = do(m: Mixed, n: U64): Mixed
+    local before = m
+    local result = Mixed { a = m.a + n, b = m.b * 2 }
+    return result
+end
+export mixed_update
+local large_make = do(a: U64, b: U64): Large = Large { .a, .b, c = a + b }
+export large_make
+local mixed_external = extern("cp_fixture_mixed", { Mixed, U64 }, Mixed)
+local large_external = extern("cp_fixture_large", { U64, U64 }, Large)
+local rollback_external = extern("cp_fixture_rollback", { U64, U64, U64, U64, U64, Two, U64 }, U64)
+local native_record = do(a: U64, b: F64): F64
+    local m = mixed_external(Mixed { .a, .b }, 7)
+    return F64(m.a) + m.b
+end
+export native_record
+local native_large = do(a: U64, b: U64): U64
+    local m = large_external(a, b)
+    return m.a + m.b + m.c
+end
+export native_large
+local native_rollback = do(a: U64): U64 = rollback_external(1, 2, 3, 4, 5, Two { .a, b = 9 }, 6)
+export native_rollback
+local MixedCallback = Fn({ Mixed, U64 }, Mixed)
+local LargeCallback = Fn({ U64, U64 }, Large)
+local call_mixed = extern("cp_fixture_call_mixed", { MixedCallback, U64, F64, U64 }, F64)
+local call_large = extern("cp_fixture_call_large", { LargeCallback, U64, U64 }, U64)
+local native_record_callback = do(a: U64, b: F64): F64 = call_mixed(fnptr mixed_update, a, b, 7)
+export native_record_callback
+local native_large_callback = do(a: U64, b: U64): U64 = call_large(fnptr large_make, a, b)
+export native_large_callback
+
+local function mixed_recursive(m: Mixed, n: U64): Mixed
+    if n == 0 then return m end
+    local previous = mixed_recursive(m, n - 1)
+    return Mixed { a = previous.a + 1, b = previous.b + 0.5 }
+end
+local recursive_record_callback = do(a: U64, b: F64): F64 = call_mixed(fnptr mixed_recursive, a, b, 7)
+export recursive_record_callback
+
+local checked = do(n: U32): U32
+    if n == 0 then trap "direct checked failure" end
+    return n + 1
+end
+export checked
+local checked_word = do(a: U64, b: U64): U64
+    if a == 0 then trap "direct callback failure" end
+    return a + b
+end
+local checked_callback = do(n: U64): U64 = callback(fnptr checked_word, n, 9)
+export checked_callback
+
+local Trio = Array(U32, 3)
+local array_read = do(n: U32): U32
+    local values = Trio { 11, 22, 33 }
+    return values[n]
+end
+export array_read
+
+local Maybe = oneof { none: Unit, some: U32 }
+local sum_value = do(flag: Bool, n: U32): U32
+    local value: Maybe = Maybe.none()
+    if flag then value = Maybe.some n end
+    return value { some(x) = x, none() = 7 }
+end
+export sum_value
+
+local tls_counter = global(U64, { thread_local = true, init = 7 })
+local tls_value = do(): U64 = tls_counter[0]
+export tls_value
+local tls_probe = do(errors: Ptr (Atomic U64), n: U32): Unit
+    for i: U32 = 1, n do
+        tls_counter[0] = tls_counter[0] + 1
+        if tls_counter[0] ~= U64 i + 7 then errors[0]:add(1, "relaxed") end
+    end
+end
+export tls_probe
+local TextHook = Fn({ CString }, Unit)
+local text_length = extern("strlen", { CString }, U64, { header = "<string.h>" })
+local after_text_hook = do(hook: TextHook, text: CString): U64
+    hook text
+    return text_length text
+end
+export after_text_hook

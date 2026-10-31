@@ -1,0 +1,45 @@
+-- Arrow keys move the rectangle; Escape or window close ends the activity.
+local canvas = require "slc.canvas"
+local c = require "slc.libc"
+local main = do(): I32
+    local x: F32 = 100
+    local y: F32 = 100
+    return canvas.open {
+        title = "SLC canvas — SDL3",
+        width = 800, height = 600, resizable = true,
+    } do(view...)
+        return interact {
+            key = do(key...)
+                if pressed then
+                    if code == canvas.Key.escape then stop() end
+                    if code == canvas.Key.left then x = x - 10 end
+                    if code == canvas.Key.right then x = x + 10 end
+                    if code == canvas.Key.up then y = y - 10 end
+                    if code == canvas.Key.down then y = y + 10 end
+                end
+            end,
+            draw = do(frame...)
+                clear canvas.Color.black
+                fill_rect x y 80 60 canvas.Color.orange
+                -- The output-pixel dimensions are refreshed for every frame.
+                local right = F32 width
+                local bottom = F32 height
+                line 0 0 right bottom canvas.Color.white
+            end,
+        }
+    end {
+        done() = I32 0,
+        failed = do(error)
+            c.say("canvas failed at operation ", error.operation, "\n")
+            local i: U32 = 0
+            local putchar = extern("putchar", { I32 }, I32, { header = "<stdio.h>" })
+            while i < error.message.len do
+                putchar(I32 error.message.bytes[i])
+                i = i + 1
+            end
+            c.say "\n"
+            return 1
+        end,
+    }
+end
+export main

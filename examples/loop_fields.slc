@@ -1,0 +1,173 @@
+-- Loop state is generalized field by field, including changes on exit paths.
+local Panel = struct { gap: U32, padding: U32, count: U32 }
+
+local panel_extent = do(n: U32): U32
+    local panel = Panel { gap = 12, padding = 24, count = 0 }
+    local i: U32 = 0
+    while i < n do
+        panel.count = panel.count + 1
+        i = i + 1
+    end
+    return panel.padding * 2 + panel.count * panel.gap
+end
+export panel_extent
+
+local Tally = struct { seen: U32, odd: U32, step: U32 }
+local tally_odd = do(n: U32): U32
+    local t = Tally { seen = 0, odd = 0, step = 1 }
+    while t.seen < n do
+        if (band t.seen 1) == 1 then t.odd = t.odd + t.step end
+        t.seen = t.seen + t.step
+    end
+    return t.odd
+end
+export tally_odd
+
+-- An exit-only write still needs storage on the zero-iteration exit.
+local exit_change = do(n: U32): U32
+    local p = Panel { gap = 12, padding = 24, count = 0 }
+    while p.count < n do
+        if p.count == 2 then
+            p.gap = 55
+            break
+        end
+        p.count = p.count + 1
+    end
+    return p.gap
+end
+export exit_change
+
+local Outer = struct { panel: Panel, step: U32 }
+local nested_exit = do(n: U32): U32
+    local o = Outer { panel = Panel { gap = 3, padding = 4, count = 0 }, step = 2 }
+    while o.panel.count < n do
+        if o.panel.count == 1 then
+            o.panel.gap = 8
+            break
+        end
+        o.panel.count = o.panel.count + 1
+    end
+    return o.panel.gap + o.panel.padding
+end
+export nested_exit
+
+local nested_loops = do(n: U32): U32
+    local o = Outer { panel = Panel { gap = 3, padding = 4, count = 0 }, step = 2 }
+    for i: U32 = 1, n do
+        for j: U32 = 1, o.step do o.panel.count = o.panel.count + 1 end
+    end
+    return o.panel.count * o.panel.gap + o.panel.padding
+end
+export nested_loops
+
+-- Different backedges discover different changing leaves; widening is monotone.
+local continue_fields = do(n: U32): U32
+    local p = Panel { gap = 3, padding = 10, count = 0 }
+    local total: U32 = 0
+    while p.count < n do
+        p.count = p.count + 1
+        if p.count == 1 then continue end
+        if p.count == 2 then p.gap = 5 end
+        if p.count == 4 then p.gap = 7 end
+        total = total + p.gap
+    end
+    return total + p.padding
+end
+export continue_fields
+
+local Pair = struct { x: U32, y: U32, step: U32 }
+local swap_fields = do(n: U32): U32
+    local p = Pair { x = 1, y = 2, step = 9 }
+    for i: U32 = 1, n do p = Pair { x = p.y, y = p.x, step = p.step } end
+    return p.x * 100 + p.y * 10 + p.step
+end
+export swap_fields
+
+local snapshots = do(n: U32): U32
+    local p = Panel { gap = 3, padding = 5, count = 0 }
+    local total: U32 = 0
+    while p.count < n do
+        local before = p
+        p.count = p.count + 1
+        total = total + before.count * before.gap + before.padding
+    end
+    return total
+end
+export snapshots
+
+local inspect = do(p: Ref Panel): U32
+    return p.gap + p.padding + p.count
+end
+local late_address = do(n: U32): U32
+    local p = Panel { gap = 12, padding = 24, count = 0 }
+    while p.count < n do p.count = p.count + 1 end
+    return call inspect (Ref p)
+end
+export late_address
+
+local mutate = do(p: Ref Panel): Unit
+    p.gap = 99
+end
+local hidden_record = do(n: U32): U32
+    local p = Panel { gap = 12, padding = 24, count = 0 }
+    local alias = Ref p
+    while p.count < n do
+        mutate alias
+        p.count = p.count + 1
+    end
+    return p.gap
+end
+export hidden_record
+
+-- A function boundary takes the address inside the loop and may change fields.
+local native_mutation = do(n: U32): U32
+    local p = Panel { gap = 12, padding = 24, count = 0 }
+    while p.count < n do
+        call mutate (Ref p)
+        p.count = p.count + 1
+    end
+    return p.gap + p.count
+end
+export native_mutation
+
+-- Explicit tail-recursive words use the same field-wise agreement.
+local function walk(n: U32, p: Pair): U32
+    if n == 0 then return p.x + p.step end
+    return walk(n - 1, Pair { x = p.x + p.step, y = p.y, step = p.step })
+end
+local tail_fields = do(n: U32): U32
+    return walk n Pair { x = 0, y = 7, step = 3 }
+end
+export tail_fields
+
+-- Two exit paths widen different nested leaves over successive replays.
+local multiple_exits = do(n: U32): U32
+    local o = Outer { panel = Panel { gap = 12, padding = 24, count = 0 }, step = 3 }
+    while o.panel.count < n do
+        if o.panel.count == 1 and (band n 1) == 1 then
+            o.panel.padding = 40
+            break
+        end
+        if o.panel.count == 3 then
+            o.panel.gap = 55
+            break
+        end
+        o.panel.count = o.panel.count + 1
+    end
+    return o.panel.gap + o.panel.padding + o.step
+end
+export multiple_exits
+
+local Flags = struct { enabled: Bool, count: U32 }
+local bool_exit = do(n: U32): Bool
+    local flags = Flags { enabled = false, count = 0 }
+    while flags.count < n do
+        if flags.count == 2 then
+            flags.enabled = true
+            break
+        end
+        flags.count = flags.count + 1
+    end
+    return flags.enabled
+end
+export bool_exit

@@ -915,6 +915,39 @@ uint32_t fib_pair(uint32_t n) {
 }
 ```
 
+**Ordinary records are carried field by field.** A record field that changes between rounds becomes runtime state; an unchanged known field stays known inside the loop and after it. Nested records follow the same rule.
+
+```lua
+local Panel = struct { gap: U32, padding: U32, count: U32 }
+local panel_extent = do(n: U32): U32
+    local panel = Panel { gap = 12, padding = 24, count = 0 }
+    local i: U32 = 0
+    while i < n do
+        panel.count = panel.count + 1
+        i = i + 1
+    end
+    return panel.padding * 2 + panel.count * panel.gap
+end
+```
+
+```c
+uint32_t panel_extent(uint32_t n) {
+    Panel panel;
+    uint32_t i = 0u;
+    panel.count = 0u;
+    for (;;) {
+        if (i >= n) break;
+        panel.count = panel.count + 1u;
+        i = i + 1u;
+    }
+    return 48u + panel.count * 12u;
+}
+```
+
+**Exits count too.** If a field changes only before `break`, it still needs runtime storage when the possible exits disagree. Its initial value must be available on the condition-false exit, including when the loop executes zero times. Agreement on backedges alone is not sufficient.
+
+Known fields are materialized when storage is needed, for example when the record's address crosses a function boundary (§5.3). Existing reference, ownership, atomic, and string rules still apply; field-wise loop generalization does not bypass them.
+
 One case remains where a loop changes a place no syntax shows: a write through a reference taken before the loop, or by a word that captured the place. If a residual loop writes a tracked place that existed before it, the outermost such loop rolls its round back, the place becomes ordinary memory before the loop, and the round is evaluated again. The result is still exact (`hidden` in the examples); the place merely loses its compile-time tracking.
 
 ### 6.5 Where unrolling comes from
@@ -1306,7 +1339,7 @@ One parameter may be opened. What a context introduces:
 
 - **Open to work; bind to remember.** An introduced field name denotes the field's place: reading it reads the current value, assigning it stores to the field. `local before = cursor` takes the value at that point.
 - **Methods stay attached.** Opening introduces no method names. An otherwise-unbound bare call inside an opened region uses the innermost receiver that has such a member; actual members win over lexical words; locally bound callables stay ordinary calls. `(name)(args)` bypasses the receiver.
-- **Spread may not shadow (`spread-shadow`).** An introduced name may not collide with a visible declared name, a name an enclosing opening introduced, a program global or a prelude name; and a later declaration may not shadow an introduced name. *(Lua's own standard-library globals do not count as visible names here, so a field named `next` or `type` can be opened; the library remains reachable as `_G.next`.)* Because a context's type is known only when the program is specialized, these checks happen then, at the opening and at each use.
+- **Opening follows lexical shadowing.** Introduced names shadow earlier visible bindings, including names from earlier openings, program globals and the prelude. Later declarations and openings can shadow them in turn; leaving a scope restores the enclosing bindings. Initializers resolve names before the new binding is introduced. Opened record fields remain live places, not copied values. The receiver is retained independently of later bindings of its source name. Receiver-method lookup remains separate: methods are not introduced bindings, and locally bound callables remain ordinary calls.
 - **An opened context cannot be assigned whole (`context-use`).**
 
 #### Anonymous spread
@@ -2534,7 +2567,7 @@ local ping = do(n: U64): U64
 end
 ```
 
-Inside `with_epoll`, `fd` is still the counter's field and `watch` the poll's method: nested openings compose, and `spread-shadow` keeps them from colliding (naming the activity parameter `fd` would collide with `Fd`'s own field, which is why activity parameters are gerunds).
+Inside `with_epoll`, `fd` is still the counter's field and `watch` the poll's method: nested openings compose with lexical shadowing (naming the activity parameter `fd` would let the opened field shadow that parameter, so a distinct receiver name remains useful for qualification).
 
 ### 18.4 What is next
 
@@ -3290,7 +3323,7 @@ Planned and not implemented: variable-size values (§9.3). Pointer arithmetic be
 15. **References borrow, IDs identify, and neither owns storage.**
 16. **Data-stack allocation is bounded through lexical scopes and call-graph restrictions.**
 17. **No runtime GC, reference counting or implicit heap ownership exists.**
-18. **Activities are compile-time: a callback never becomes a closure; opening introduces live field places and may not shadow.**
+18. **Activities are compile-time: a callback never becomes a closure; opening introduces live field places with lexical shadowing.**
 19. **Tasks share no memory: what reaches a task or crosses a channel is a copy or a move, every wait is an operation in the task's own body, and a scope joins every task it started.**
 20. **The resulting executable is independent of LuaJIT.**
 52

@@ -139,6 +139,14 @@ See the [staged-values example](examples/staged_values.slc) and
 split, C and in-process execution, including copies, live views and task captures.
 This adds neither a compile-time heap nor a new borrowing policy.
 
+## Activity case study: SDL3
+
+[The interactive canvas](examples/canvas/README.md) wraps SDL3 in ordinary SLC
+resource, input and frame activities. It includes a moving-rectangle example,
+explicit failure/cleanup contracts, deterministic fault injection and real
+headless SDL checks. With SDL3 installed, run `make test-canvas` and then
+`./build/canvas/demo`.
+
 ## Source layout
 
 | Part | Source |

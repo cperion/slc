@@ -1,0 +1,118 @@
+-- A single-window, main-thread canvas. SDL is the edge; these are SLC words.
+local sdl = require "slc.sdl"
+local Result, Failure, Operation = sdl.Result, sdl.Failure, sdl.Operation
+local Color = struct { r: U8, g: U8, b: U8, a: U8 }
+local KeyEvent = struct { code: U32, pressed: Bool, repeated: Bool }
+local Frame = struct { handle: Ptr sdl.Renderer, width: I32, height: I32, frame_error: Failure }
+
+function Frame:checked(ok: Bool, operation: U32): Unit
+    if not ok and self.frame_error.operation == 0 then self.frame_error = sdl.failure operation end
+end
+function Frame:color(color: Color): Unit
+    if self.frame_error.operation == 0 then
+        self:checked(sdl.color(self.handle, color.r, color.g, color.b, color.a), Operation.color)
+    end
+end
+function Frame:clear(color: Color): Unit
+    self:color color
+    if self.frame_error.operation == 0 then self:checked(sdl.clear self.handle, Operation.clear) end
+end
+function Frame:fill_rect(x: F32, y: F32, width: F32, height: F32, color: Color): Unit
+    self:color color
+    if self.frame_error.operation == 0 then
+        local rect = sdl.Rect { .x, .y, w = width, h = height }
+        self:checked(sdl.fill_rect(self.handle, Ptr rect), Operation.fill_rect)
+    end
+end
+function Frame:line(x1: F32, y1: F32, x2: F32, y2: F32, color: Color): Unit
+    self:color color
+    if self.frame_error.operation == 0 then
+        self:checked(sdl.line(self.handle, x1, y1, x2, y2), Operation.line)
+    end
+end
+
+-- Independently usable frame activity. The body returns Unit. Its early return
+-- still presents a successful frame. Every frame must redraw its background.
+local with_frame = do(renderer: Ptr sdl.Renderer, body): Result
+    local frame = Frame { handle = renderer, width = 0, height = 0, frame_error = sdl.no_failure }
+    frame:checked(sdl.output_size(renderer, Ptr frame.width, Ptr frame.height), Operation.size)
+    if frame.frame_error.operation == 0 then body(Ref frame) end
+    if frame.frame_error.operation == 0 then frame:checked(sdl.present renderer, Operation.present) end
+    if frame.frame_error.operation ~= 0 then return Result.failed frame.frame_error end
+    return Result.done()
+end
+
+local View = struct {
+    renderer: Ptr sdl.Renderer, window_id: U32, stopped: Bool,
+    frame_delay_ms: U32, session_error: Failure,
+}
+function View:stop(): Unit
+    self.stopped = true
+end
+function View:frame(body): Result
+    if self.session_error.operation ~= 0 then return Result.failed self.session_error end
+    if self.stopped then return Result.done() end
+    local result = with_frame self.renderer body
+    return result {
+        done() = Result.done(),
+        failed = do(frame_error)
+            self.session_error = frame_error
+            self.stopped = true
+            return Result.failed frame_error
+        end,
+    }
+end
+function View:interact(handlers): Result
+    local event = sdl.Event {
+        kind = 0, timestamp = 0, window_id = 0, code = 0, pressed = false, repeated = false,
+    }
+    while not self.stopped do
+        while not self.stopped and sdl.poll(Ptr event) do
+            if event.kind == sdl.quit_event then
+                self:stop()
+            elseif event.kind == sdl.close_event then
+                if event.window_id == self.window_id then self:stop() end
+            elseif event.kind == sdl.key_down or event.kind == sdl.key_up then
+                if event.window_id == self.window_id then
+                    if handlers.key then
+                        local key = KeyEvent { code = event.code,
+                            pressed = event.pressed, repeated = event.repeated }
+                        handlers.key(Ref key)
+                    end
+                end
+            end
+        end
+        if not self.stopped then self:frame handlers.draw end
+        if not self.stopped then sdl.delay self.frame_delay_ms end
+    end
+    if self.session_error.operation ~= 0 then return Result.failed self.session_error end
+    return Result.done()
+end
+local open = do(config, body): Result
+    local result = sdl.with_video do(): Result
+        return sdl.with_window config do(window: Ptr sdl.Window): Result
+            return sdl.with_renderer window do(renderer: Ptr sdl.Renderer): Result
+                local view = View {
+                    .renderer,
+                    window_id = sdl.window_id window,
+                    stopped = false, session_error = sdl.no_failure,
+                    frame_delay_ms = config.frame_delay_ms or 16,
+                }
+                local result = body(Ref view)
+                -- A caller cannot accidentally discard a failed frame.
+                if view.session_error.operation ~= 0 then return Result.failed view.session_error end
+                return result
+            end
+        end
+    end
+    return result
+end
+return {
+    .open, .with_frame, .Result, .Failure,
+    .Operation, Key = sdl.Key, RGBA = Color,
+    Color = {
+        black = Color { r = 0, g = 0, b = 0, a = 255 },
+        orange = Color { r = 255, g = 165, b = 0, a = 255 },
+        white = Color { r = 255, g = 255, b = 255, a = 255 },
+    },
+}

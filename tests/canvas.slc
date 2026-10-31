@@ -1,0 +1,55 @@
+local canvas = require "slc.canvas"
+local report = extern("canvas_test_error", { U32, Ptr U8, U32, Bool }, Unit)
+local observe = extern("canvas_test_frame", { I32, I32, F32 }, Unit)
+local key_seen = extern("canvas_test_key", { U32, Bool, Bool }, Unit)
+local exercise = do(mode: I32): U32
+    local x: F32 = 100
+    return canvas.open {
+        title = "canvas test", width = 640, height = 480,
+        resizable = true, frame_delay_ms = 0,
+    } do(view...)
+        if mode == 1 then return canvas.Result.done() end
+        if mode == 2 then
+            return frame do(drawing...)
+                clear canvas.Color.black
+                return
+            end
+        end
+        if mode == 4 then
+            frame do(drawing...) clear canvas.Color.black end
+            frame do(drawing...) clear canvas.Color.black end
+            return canvas.Result.done()
+        end
+        if mode == 5 then
+            stop()
+            frame do(drawing...) clear canvas.Color.black end
+            return canvas.Result.done()
+        end
+        return interact {
+            key = do(key...)
+                key_seen(code, pressed, repeated)
+                if pressed then
+                    if code == canvas.Key.escape then stop() end
+                    if code == canvas.Key.right then x = x + 10 end
+                end
+                return
+            end,
+            draw = do(drawing...)
+                observe(width, height, x)
+                clear canvas.Color.black
+                fill_rect x 20 80 60 canvas.Color.orange
+                line 0 0 20 20 canvas.Color.white
+                if mode == 3 then stop() end
+            end,
+        }
+    end {
+        done() = U32 0,
+        failed = do(problem)
+            local message = problem.message
+            local bytes = (Ptr U8)(Ptr message.bytes)
+            report(problem.operation, bytes, message.len, problem.truncated)
+            return problem.operation
+        end,
+    }
+end
+export exercise

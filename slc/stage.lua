@@ -2408,11 +2408,80 @@ local function shape_of(args)
     return table.concat(parts, ',')
 end
 
--- positions where a known argument changed: to another value, or to dynamic
-local function changed(a, b)
+-- Only ordinary, fully decomposed records participate in field-wise loop
+-- generalization. Owners, atomics, strings and scoped views retain their contracts.
+h.split_record = function(v)
+    if not (is_value(v) and v.k == 'agg') or rawget(v, 'view') then return false end
+    local t = v.T
+    if t.kind ~= 'struct' or t.resizable or rawget(t, 'is_str') then return false end
+    for _, fd in ipairs(t.fields) do
+        if fd.type.kind == 'atomic' then return false end
+        if fd.type.kind == 'struct' and not h.split_record(v.f[fd.name]) then return false end
+    end
+    return true
+end
+
+h.each_leaf = function(v, place, other, visit)
+    for _, fd in ipairs(v.T.fields) do
+        local x, p = v.f[fd.name], field_place(place, fd.name)
+        local y = is_value(other) and other.k == 'agg' and other.f[fd.name] or nil
+        if fd.type.kind == 'struct' then h.each_leaf(x, p, y, visit) else visit(p, x, y) end
+    end
+end
+
+-- Agreement is monotone: once a leaf is dynamic it cannot become known again.
+-- Keep the incoming expression when widening; it initializes the loop's storage.
+h.agree_record = function(a, b)
+    local fields, wider = {}, false
+    for _, fd in ipairs(a.T.fields) do
+        local x = a.f[fd.name]
+        local y = is_value(b) and b.k == 'agg' and b.f[fd.name] or nil
+        if fd.type.kind == 'struct' then
+            local sub, changed = h.agree_record(x, y)
+            fields[fd.name], wider = sub, wider or changed
+        elseif static(x) and (y == nil or not static(y) or arg_key(x) ~= arg_key(y)) then
+            fields[fd.name], wider = S.dynamic(x), true
+        else fields[fd.name] = x end
+    end
+    return agg(a.T, fields), wider
+end
+
+h.partly_known_record = function(v)
+    if not h.split_record(v) or static(v) then return false end
+    local function known_leaf(r)
+        for _, fd in ipairs(r.T.fields) do
+            local x = r.f[fd.name]
+            if fd.type.kind == 'struct' then
+                if known_leaf(x) then return true end
+            elseif static(x) then return true end
+        end
+        return false
+    end
+    return known_leaf(v)
+end
+
+h.mirror_record = function(v, place)
+    local fields = {}
+    for _, fd in ipairs(v.T.fields) do
+        local x, p = v.f[fd.name], field_place(place, fd.name)
+        if fd.type.kind == 'struct' then fields[fd.name] = h.mirror_record(x, p)
+        elseif static(x) then fields[fd.name] = x
+        else fields[fd.name] = dyn(fd.type, read_expr(p)) end
+    end
+    return agg(v.T, fields)
+end
+
+-- Function specialization retains whole-argument widening. Loop edges may carry
+-- a record-shaped widening mask instead: agreement at each leaf.
+local function changed(a, b, by_field)
     local out = {}
     for i = 1, #a do
-        if static(a[i]) and (not static(b[i]) or arg_key(a[i]) ~= arg_key(b[i])) then out[i] = true end
+        if by_field and h.split_record(a[i]) then
+            local merged, wider = h.agree_record(a[i], b[i])
+            if wider then out[i] = merged end
+        elseif static(a[i]) and (not static(b[i]) or arg_key(a[i]) ~= arg_key(b[i])) then
+            out[i] = true
+        end
     end
     return out
 end
@@ -2441,7 +2510,10 @@ h.widened = function(args, positions)
             fail(('a compile-time argument (%s) changes on every recursion under a dynamic condition; '
                 .. 'it cannot become a runtime value'):format(tostring(a)), 3)
         end
-        out[i] = positions[i] and static(a) and S.dynamic(a) or a
+        local w = positions[i]
+        if type(w) == 'table' and h.split_record(a) then out[i] = h.agree_record(a, w)
+        elseif w and (static(a) or h.split_record(a)) then out[i] = S.dynamic(a)
+        else out[i] = a end
     end
     return out
 end
@@ -2512,7 +2584,11 @@ function Builder:run_frame(desc, args, opts)
         elseif sig.slc_signal == 'restart' then
             self:rollback(frame.snap)
             if sig.escape then escapes[#escapes + 1] = sig.escape end
-            for i in pairs(sig.widen or {}) do widen[i] = true end
+            for i, w in pairs(sig.widen or {}) do
+                if widen[i] == nil then widen[i] = w
+                elseif widen[i] == true or w == true then widen[i] = true
+                else widen[i] = h.agree_record(widen[i], w) end
+            end
             args = h.widened(args, widen)
             mode = sig.mode
             if mode == 'function' then
@@ -2583,6 +2659,7 @@ function run_loop_body(self, frame)
     for _, sl in ipairs(desc.slots or {}) do
         if sl.idx then own[sl.idx] = sl.place end
     end
+    local partial = {}
     for i, a in ipairs(frame.args) do
         if static(a) or a.k == 'ref' then
             vals[i] = a
@@ -2590,12 +2667,17 @@ function run_loop_body(self, frame)
             local lv = own[i] and not rawget(own[i], 'escaped') and own[i]
                 or self:new_var(a.T, 'lv', desc.params[i].name)
             lvs[i] = lv
-            local e = read_expr(lv)
-            if lv.pk == 'lv' then e.lv = true end
-            vals[i] = dyn(a.T, e)
+            if h.partly_known_record(a) then
+                partial[i] = true
+                vals[i] = h.mirror_record(a, lv)
+            else
+                local e = read_expr(lv)
+                if lv.pk == 'lv' then e.lv = true end
+                vals[i] = dyn(a.T, e)
+            end
         end
     end
-    frame.lvs = lvs
+    frame.lvs, frame.partial = lvs, partial
     frame.top, frame.ends = 'L' .. uid(), 'L' .. uid()
     if frame.kind == 'word' and frame.ret.kind ~= 'unit' then
         frame.rvar = self:new_var(frame.ret, 'rvar', 'r')
@@ -2605,18 +2687,32 @@ function run_loop_body(self, frame)
     frame.exit_states = {}
     -- loop variables start from the arguments
     for i, lv in pairs(lvs) do
-        local e = ex(frame.args[i])
-        if not (e.op == 'read' and e.place == lv) then
-            self:emit { op = 'store', place = lv, e = e }
+        local function initialize(p, x)
+            local e = ex(x)
+            if not (e.op == 'read' and e.place == p) then
+                self:emit { op = 'store', place = p, e = e }
+            end
         end
+        if partial[i] then
+            h.each_leaf(frame.args[i], lv, nil, function(p, x)
+                if not static(x) then initialize(p, x) end
+            end)
+        else initialize(lv, frame.args[i]) end
     end
     local inside = copy(s0)
     frame.own = {}
     for i, lv in pairs(lvs) do
-        -- its storage holds the live value from here on
+        local known = {}
+        if partial[i] then
+            h.each_leaf(frame.args[i], lv, nil, function(p, x)
+                if static(x) then known[p] = x end
+            end)
+        end
+        -- Dynamic leaves have storage; invariant leaves remain pending values.
         for _, l in ipairs(leaves(lv)) do
             frame.own[l] = true
-            if inside[l] then inside[l] = { mat = true, ver = new_version() } end
+            if known[l] and tracked(l) then inside[l] = { val = known[l], mat = false }
+            elseif inside[l] then inside[l] = { mat = true, ver = new_version() } end
         end
     end
     local key = frame.key
@@ -2687,7 +2783,7 @@ end
 
 -- jump back to the top of a loop-mode frame with new arguments
 function Builder:jump_next(frame, args)
-    local diff = changed(frame.args, args)
+    local diff = changed(frame.args, args, true)
     if next(diff) then signal('restart', frame, { widen = diff, mode = 'loop' }) end
     for i, a in ipairs(args) do
         if a.k == 'ref' and frame.args[i].k == 'ref' and a.place ~= frame.args[i].place then
@@ -2700,7 +2796,14 @@ function Builder:jump_next(frame, args)
     -- state (the later positions) first: the update an exit shares then leads both paths
     for i = #frame.args, 1, -1 do
         local lv = frame.lvs[i]
-        if lv then
+        if lv and frame.partial[i] then
+            h.each_leaf(frame.args[i], lv, args[i], function(p, x, y)
+                if not static(x) then
+                    local e = ex(value_of(y, p.T, 'loop argument'))
+                    if not (e.op == 'read' and e.place == p) then moves[#moves + 1] = { var = p, e = e } end
+                end
+            end)
+        elseif lv then
             local e = ex(value_of(args[i], lv.T, 'loop argument'))
             if not (e.op == 'read' and e.place == lv) then moves[#moves + 1] = { var = lv, e = e } end
         end
@@ -3139,7 +3242,7 @@ function S.tail(f, ...)
         if round_known(b, target, args) and target.rounds < LOOP_FUEL then
             signal('tail', target, { args = args })
         end
-        signal('restart', target, { widen = changed(target.args, args), mode = 'loop' })
+        signal('restart', target, { widen = changed(target.args, args, true), mode = 'loop' })
     elseif target.mode == 'loop' then
         b:jump_next(target, args)
     elseif target.mode == 'root' and spec_key(f, args) == target.key then
@@ -3258,7 +3361,7 @@ function S.loop_next(...)
         if round_known(b, frame, args) and frame.rounds < LOOP_FUEL then
             signal('tail', frame, { args = args })
         end
-        signal('restart', frame, { widen = changed(frame.args, args), mode = 'loop' })
+        signal('restart', frame, { widen = changed(frame.args, args, true), mode = 'loop' })
     end
     b:jump_next(frame, args)
 end
@@ -3274,9 +3377,34 @@ function S.loop_exit()
     if frame.mode == 'loop' then
         -- all at once: a state place may be its own loop variable, and the
         -- new values can read the old ones
-        local moves = {}
+        -- A field invariant on every backedge can still change before break.
+        -- Widen it before omitting any stores: the existing exit join may mark
+        -- differing states as materialized, so ALL paths must then have storage,
+        -- including the condition-false exit of a zero-iteration loop.
+        local widen = {}
         for j, sl in ipairs(frame.desc.slots) do
-            if sl.idx then
+            if sl.idx and frame.partial[sl.idx] then
+                local merged, wider = h.agree_record(frame.args[sl.idx], b:read(frame.round[j]))
+                if wider then widen[sl.idx] = merged end
+            end
+        end
+        if next(widen) then signal('restart', frame, { widen = widen, mode = 'loop' }) end
+        local moves, known_after = {}, {}
+        for j, sl in ipairs(frame.desc.slots) do
+            if sl.idx and frame.partial[sl.idx] then
+                if frame.round[j] ~= sl.place then
+                    h.each_leaf(frame.args[sl.idx], sl.place, b:read(frame.round[j]), function(p, x, y)
+                        if static(x) and tracked(p) then
+                            known_after[#known_after + 1] = { place = p, val = y }
+                        else
+                            -- Escaped destinations need real stores, even for
+                            -- known fields: aliases may have changed the memory.
+                            local e = ex(y)
+                            if not (e.op == 'read' and e.place == p) then moves[#moves + 1] = { var = p, e = e } end
+                        end
+                    end)
+                end
+            elseif sl.idx then
                 local e = ex(b:read(frame.round[j]))
                 if not (e.op == 'read' and e.place == sl.place) then
                     moves[#moves + 1] = { var = sl.place, e = e }
@@ -3292,6 +3420,10 @@ function S.loop_exit()
             for _, l in ipairs(leaves(m.var)) do
                 if tracked(l) then b.state[l] = { mat = true, ver = new_version() } end
             end
+        end
+        for _, k in ipairs(known_after) do
+            b:invalidate(k.place)
+            b.state[k.place] = { val = k.val, mat = false }
         end
     else
         b.storeback = true
@@ -4000,9 +4132,6 @@ end
 -- the retained receiver; methods stay attached to it (bare calls use it); a Lua
 -- table (a vocabulary) introduces its string keys.
 
-local LUA_GLOBALS = {}
-for k in pairs(_G) do LUA_GLOBALS[k] = true end
-
 local function record_type(x)
     if is_staged(x) then
         local t = x.T
@@ -4033,43 +4162,11 @@ local function has_name(ctx, name)
     return false
 end
 
--- the program's own names, as opposed to Lua's standard library globals
-h.visible_global = function(env, name)
-    local v = env and env[name]
-    if v == nil then return false end
-    if LUA_GLOBALS[name] and rawget(env, name) == nil and v == _G[name] then return false end
-    return true
-end
-
--- check an opening when it happens: its names against the visible declared
--- names, the names earlier openings introduced, and the program's globals
-function S.open(ctx, outer, declared, env, label)
+-- Validate the source; collisions follow lexical binding order in syntax.lua.
+function S.open(ctx)
     if is_pack(ctx) then fail('spread-source: packs cannot introduce names', 2) end
-    for _, name in ipairs(h.names_of(ctx)) do
-        for _, d in ipairs(declared) do
-            if d == name then
-                fail(("spread-shadow: opening %s introduces '%s', which is already a visible name"):format(label, name), 2)
-            end
-        end
-        for _, o in ipairs(outer) do
-            if has_name(o, name) then
-                fail(("spread-shadow: opening %s introduces '%s', which an enclosing opening already introduced"):format(label, name), 2)
-            end
-        end
-        if h.visible_global(env, name) then
-            fail(("spread-shadow: opening %s introduces '%s', which is already a visible name"):format(label, name), 2)
-        end
-    end
+    h.names_of(ctx)
     return ctx
-end
-
--- a declaration inside an opened region must not shadow an introduced name
-function S.no_shadow(ctxs, name)
-    for _, c in ipairs(ctxs) do
-        if has_name(c, name) then
-            fail(("spread-shadow: '%s' is a name introduced by an opening; it cannot be declared again"):format(name), 2)
-        end
-    end
 end
 
 local function introduced(ctxs, name)
@@ -4085,14 +4182,8 @@ end
 
 -- a free name read inside opened regions (innermost context first)
 function S.oname(ctxs, name, lexical)
-    local found = false
-    for _, c in ipairs(ctxs) do if has_name(c, name) then found = true break end end
-    if found then
-        local lv = lexical()
-        if lv ~= nil and not (LUA_GLOBALS[name] and lv == _G[name]) then
-            fail(("spread-shadow: '%s' is both an introduced name and a visible binding"):format(name), 2)
-        end
-        return introduced(ctxs, name)
+    for _, c in ipairs(ctxs) do
+        if has_name(c, name) then return introduced(ctxs, name) end
     end
     return lexical()
 end
@@ -4132,7 +4223,7 @@ function S.ochain(ctxs, name, lexical, first, ...)
 end
 
 -- assignment to a free name inside opened regions: a field place
-function S.oset(ctxs, name, v)
+function S.oset(ctxs, name, v, lexical)
     for _, c in ipairs(ctxs) do
         if has_name(c, name) then
             local t = record_type(c)
@@ -4147,7 +4238,7 @@ function S.oset(ctxs, name, v)
             return
         end
     end
-    fail(("cannot assign '%s': a typed body can only assign bindings it declares"):format(name), 2)
+    return lexical(v)
 end
 
 -- sums ---------------------------------------------------------------------------------------------
