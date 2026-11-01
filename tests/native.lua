@@ -26,6 +26,17 @@ check('inferred snapshots and references', inferred.inferred_snapshot(7) == 25)
 check('inferred array and Text constructors', inferred.inferred_storage(8) == 14)
 check('mixed explicit and inferred locals', inferred.inferred_mixed(7) == 17)
 
+-- Tail calls retain compile-time callbacks and the activity's completion.
+local ar = slc.load(root .. '/examples/activity_returns.slc')
+for i = 0, 16 do
+    check('block-only activity return ' .. i, ar.return_logged(i) == i)
+    check('activity completes after callback return ' .. i, ar.return_completed(i) == i + (i > 3 and 10 or 12))
+    check('mixed static/dynamic tail call ' .. i, ar.return_apply(i) == i + 3)
+    check('recursive static callback ' .. i, ar.return_recursive(i) == i + 5)
+end
+check('tail call host configuration', ar.return_configured() == 7)
+check('tail call known native place', ar.return_known_local() == 9)
+
 -- Field-wise loop state must agree across backedges AND exits.
 local lf = slc.load(root .. '/examples/loop_fields.slc')
 for i = 0, 16 do

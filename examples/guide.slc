@@ -163,6 +163,29 @@ local import_capped = do(document: Ref Document, stats: Ref Stats, n: U32): Unit
 end
 export import_capped
 
+-- nested activities compose: a name the inner context lacks reaches the outer one
+local Log = struct { notes: U32 }
+
+function Log:note(count: U32): Unit
+    self.notes = self.notes + count
+end
+
+local logged = do(body): U32
+    local log = Log { notes = 0 }
+    body(Ref log)
+    return log.notes
+end
+
+local type_logged = do(document: Ref Document, n: U32): U32
+    return logged do(..)
+        transaction document do(..)
+            insert n
+            note 1
+        end
+    end
+end
+export type_logged
+
 -- §7 Step 5: states ---------------------------------------------------------------------------------
 
 -- a lifecycle as a sum, and one word per transition
@@ -214,6 +237,36 @@ local apply = do(document: Ref Document, c: Command): Unit
         quit = do end,
     }
 end
+
+-- a builder: the block declares, the builder returns a description
+local keymap = function(body)
+    local bindings = {}
+    local vocabulary = {
+        bind = function(key)
+            return function(command)
+                bindings[#bindings + 1] = { code = key:byte(), .command }
+            end
+        end,
+    }
+    body vocabulary
+    return bindings
+end
+
+local editor_keys = keymap do(..)
+    bind "h" (Command.move(Direction.left()))
+    bind "l" (Command.move(Direction.right()))
+    bind "u" (Command.undo())
+end
+
+-- the engine over the description: one test per binding, each command folded
+local on_key = do(document: Ref Document, key: U8): Unit
+    for _, binding in ipairs editor_keys do
+        if key == binding.code then
+            apply(document, binding.command)
+        end
+    end
+end
+export on_key
 
 -- a known description: the interpreter dissolves
 local greeting = { Command.insert 5, Command.move(Direction.left()), Command.insert 1 }

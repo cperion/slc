@@ -2,6 +2,8 @@
 
 **Status: a guide to designing and writing programs in slc, beside [the language](syntax.md) and [the compiler](architecture.md), which own the rules.** It follows Let's guide, *Designing and writing Let*, and keeps what transfers. Where slc differs, it says how and why.
 
+The guide follows from a few principles (§1). Its centre is the **activity**, and the construct you write to use one is the **instruction**: a call without a receiver, inside a block that opened one (§6). Activities shape run-time work, and the same construct, run while compiling, builds descriptions and types (§6.10).
+
 * **Part I** is a design process: ten steps, each with the question it answers, the diagram it produces and the condition for moving on.
 * **Part II** is about writing words.
 * **Part III** is house style.
@@ -18,7 +20,9 @@ Every `lua` block below is an excerpt of [`examples/guide.slc`](../examples/guid
 | `s { name = do(p) ... end, name(p) = e }` | matching a sum: one handler per alternative |
 | untyped parameters, `f known` | compile-time parameters, partial application |
 | `f "lit"`, `f 1 2`, `f x do ... end` | literal application and saturating chains |
-| `do(ctx..)`, `local ctx.. = e` | opening a record or a vocabulary |
+| `do(ctx..)`, `do(..)`, `local ctx.. = e` | opening a record or a vocabulary; `do(..)` leaves it unnamed |
+| `insert n`, `note 1` inside an opened block | instructions: calls the innermost opened receiver resolves (§6.3) |
+| `keymap do(..) bind "h" (...) end` | a builder: an activity run while compiling that returns a description or a type (§6.10) |
 | `endall` | closing a spine of trailing blocks |
 | `s[id]`, `g[i]`, `pool[slot]`, `a[i]` | checked places |
 | `tasks do(scope..)`, `spawn do`, `first_of` | concurrency |
@@ -39,11 +43,17 @@ slc puts **binding time** at the center. A program is Lua that runs while compil
 * **A known native value** (`U32 4`, a constant field, a sum with a known tag) is computed while compiling. It shapes the C, and may vanish from it.
 * **A runtime value** (a parameter of an export, a read from a file) is in the C.
 
-Three commitments follow from Let and sharpen in slc:
+Everything in this guide follows from a few principles of the language, each of which asks something of the way you design:
 
-1. **Say it as you think it.** A program is words for its domain, spoken in the contexts where they make sense. The surface is Lua's, extended; it reads as a script and compiles as C.
-2. **Never hide what matters.** Ownership, lifetime, failure and cost are visible in the contracts, and in the C: every check, every wait, every allocation is a line you can read.
-3. **Grow the vocabulary in Lua, not the language.** Configuration, dialects, generators and tests are Lua running at compile time. A new macro is a last resort.
+| Principle | What it asks of you |
+|---|---|
+| **Binding time is the centre.** Work happens at the earliest time it can. | Find what is known before run time and hand it to the code as a description (§3); an engine over a known description loses its interpreter (§17). |
+| **A word is evaluated in place.** There is no inlining decision and no closure. | Write words at the size the meaning wants (§15). A block given to a word is code at that place, so activities cost nothing (§6). |
+| **Ownership is lexical.** Scopes own values, stores own slots, a borrow ends with its scope. | Give every mutable thing one owner and every relationship one kind (§5); keep borrows inside activities. |
+| **Nothing is hidden.** Every check, wait and allocation is a line of C. | Read the C (§11.1); state costs, failures and lifetimes in contracts. |
+| **Tasks share nothing.** Values cross by copy, buffers by move. | Draw concurrency as owners and messages, never as shared state (§8). |
+| **Grow the vocabulary, not the language.** Libraries and the runtime are slc words; configuration, dialects and tests are Lua. | Say a domain as a vocabulary of words and instructions (§6.9, §6.10); a new macro is a last resort. |
+| **One thing, one spelling; names carry the reading.** Lexical scope is the only rule for names. | Speak in instructions that read as sentences (§19); when a line needs explaining, rename or redesign. |
 
 ## 2. The process
 
@@ -73,7 +83,7 @@ flowchart TD
 | 1. Binding times | What is known when? | a diagram in four lanes | everything known before steady state is marked to be a description |
 | 2. Values and outcomes | What does the program talk about? | records and sums | every outcome a caller acts on is a sum |
 | 3. Ownership | Who owns what, and what is each relationship? | a class diagram with roles and labelled arrows | every mutable thing has one owner; no reference outlives an activity |
-| 4. Activities | What bounded work happens? | a sequence diagram per use case | every activity's completion, and its abort, has an owner |
+| 4. Activities | What bounded work happens, and what is said inside it? | a sequence diagram per use case, and each context's vocabulary | every activity's completion, and its abort, has an owner; every block speaks only its context's instructions and its enclosing activities' |
 | 5. States | What has a lifecycle? | state diagrams, then sums and transition words | every state is a variant; every match is complete |
 | 6. Concurrency | What runs at the same time? | a dataflow of tasks, channels and scopes | one owner task per entity; every channel has a closer, every scope an end |
 | 7. Composition and edges | Who connects the parts, where does the world come in? | a component diagram | the core is pure and depends on no edge |
@@ -253,6 +263,8 @@ end
 
 An activity is a design role made of ordinary parts: a word that sets up a context, runs a body that opens it, and owns completion. In slc it costs nothing extra: the body is a callback evaluated in place, and a private context is an ordinary local that folds away.
 
+**The activity is the centre of an slc design.** Every lifetime in the language is one: a working copy and its commit, a file and its close, a borrow of growing storage (`g:view() do(xs)`), a guarded iteration (`m:each do(k, v)`), a `tasks` scope and its join, a `blocking` call. Inside an activity you speak **instructions**: calls written without a receiver, which the opened context resolves (§6.3). The same construct, run while compiling on a vocabulary, is a **builder** (§6.10). Design the activities, and the program's shape follows.
+
 ### 6.1 Finding activities
 
 **Each use case is an activity.** For each, answer four questions:
@@ -287,8 +299,9 @@ sequenceDiagram
 | scoped resource | acquire | release | `with_file` |
 | accumulator | create the state | return a result from it | `counting` |
 | policy | nothing, or a measurement | record, check, clamp, retry | `counted`, `clamped` |
+| builder | a vocabulary | return a description or a type | `keymap`, `ui.component` (§6.10) |
 
-### 6.3 Enter an activity and speak its verbs
+### 6.3 Enter an activity and speak its instructions
 
 ```lua
 local Draft = struct { length: U32, cursor: U32, edits: U32 }
@@ -314,6 +327,8 @@ end
 ```
 
 `do(..)` opens the context without an unused receiver name. Bare calls use its methods (`insert n`, `move_left()`), and its fields are live places (`cursor`).
+
+Each of those lines is an **instruction**: a call without a receiver, resolved by the innermost opened context that has the name. A name the context lacks falls through to enclosing contexts (§6.8), and a local declared inside the block shadows the context. Instructions run in the order written, so a block reads as a list of sentences about one context. Open the context with a name (`do(draft..)`) only when you need to qualify a member that something closer shadows.
 
 ### 6.4 Open to work; bind to remember
 
@@ -448,9 +463,130 @@ end
 
 The transaction commits first, then the clamp applies, then the count is recorded, exactly as the spine reads from the inside out. `endall` closes the spine; it adds no semantics.
 
-### 6.8 Dialects
+### 6.8 Nesting composes
 
-A dialect is a vocabulary plus an engine. In slc the engine often runs while compiling: a description built from Lua tables and words is consumed by Lua code that emits only the work that remains (§17). Keep descriptions pure and effects in engines (§9.3).
+Nested activities do not need to know about each other. A name the inner context lacks falls through to the enclosing ones, innermost first, so a block can speak to several activities at once:
+
+```lua
+-- nested activities compose: a name the inner context lacks reaches the outer one
+local Log = struct { notes: U32 }
+
+function Log:note(count: U32): Unit
+    self.notes = self.notes + count
+end
+
+local logged = do(body): U32
+    local log = Log { notes = 0 }
+    body(Ref log)
+    return log.notes
+end
+
+local type_logged = do(document: Ref Document, n: U32): U32
+    return logged do(..)
+        transaction document do(..)
+            insert n
+            note 1
+        end
+    end
+end
+```
+
+`insert` is the draft's; `note` is not, so it reaches the log. Both contexts are private, so the log disappears and the result is a constant:
+
+```c
+uint32_t type_logged(Document *document, uint32_t n) {
+    Draft draft;
+    draft.length = document->length;
+    draft.cursor = document->cursor;
+    draft.edits = document->edits;
+    draft.length = draft.length + n;
+    draft.cursor = draft.cursor + n;
+    draft.edits = draft.edits + 1u;
+    document->length = draft.length;
+    document->cursor = draft.cursor;
+    document->edits = draft.edits;
+    return 1u;
+}
+```
+
+If the draft also had a `note`, the draft's would win: the innermost context always does. Shadowing is how nesting works, so use it on purpose. When an override would hide something the block needs, the outer name is too generic, or the two activities should not be nested.
+
+### 6.9 Design the context's vocabulary
+
+The context type is the vocabulary of its block. Design it the way you would design a small language for that purpose:
+
+* **Verbs for what happens**, as methods: `insert`, `move_left`, `note`. A verb keeps the context's invariants, so the block cannot break them by writing fields.
+* **Fields for what the block reads**: `cursor`, `length`. A field the block must not write is a sign that a verb is missing.
+* **One context per purpose.** A block that reaches around its context for things it does not offer is two activities mixed together (§2, going back to step 4).
+* **Outcomes for how it can end** (§6.6), named for what happened.
+* **Names that read in the block**: an instruction is read without its receiver, so `insert n` must say everything `draft:insert(n)` said.
+
+### 6.10 Builders: activities while compiling
+
+A **builder** is an activity whose context is a vocabulary, a Lua table, and whose completion returns a description or a type. It runs once, while the program is built: the block's instructions declare things, and the builder collects them. Nothing of the block survives, so a builder needs no current-builder global and no interface argument on every method.
+
+```lua
+-- a builder: the block declares, the builder returns a description
+local keymap = function(body)
+    local bindings = {}
+    local vocabulary = {
+        bind = function(key)
+            return function(command)
+                bindings[#bindings + 1] = { code = key:byte(), .command }
+            end
+        end,
+    }
+    body vocabulary
+    return bindings
+end
+
+local editor_keys = keymap do(..)
+    bind "h" (Command.move(Direction.left()))
+    bind "l" (Command.move(Direction.right()))
+    bind "u" (Command.undo())
+end
+
+-- the engine over the description: one test per binding, each command folded
+local on_key = do(document: Ref Document, key: U8): Unit
+    for _, binding in ipairs editor_keys do
+        if key == binding.code then
+            apply(document, binding.command)
+        end
+    end
+end
+```
+
+The description is known, so the engine (`apply`, §17) dissolves into one test per binding:
+
+```c
+void on_key(Document *document, uint8_t key) {
+    if (key == 104u) {
+        if (document->cursor > 0u) {
+            document->cursor = document->cursor - 1u;
+        }
+    }
+    if (key == 108u) {
+        if (document->cursor < document->length) {
+            document->cursor = document->cursor + 1u;
+        }
+    }
+    if (key == 117u) {
+        document->edits = document->edits + 1u;
+    }
+}
+```
+
+What a builder's vocabulary offers, and how to design one:
+
+* **Declarations** create named parts, often as nested builders with blocks of their own (`button "save_button" do(..)`).
+* **Properties** set a value on the current part (`px 4`, `caption "Save"`). Instructions run in order, so **a later setting wins**: no merge rules or priorities are needed.
+* **Variants** are nested blocks that record conditional settings (`hover do(..) bg blue_700 end`).
+* **Tokens** are names for known values, opened with the vocabulary (`md`, `red_600`); give them a kind so a wrong argument is an error at its line.
+* **Sharing** is a block applied to the current part (`use primary`).
+* **Nesting composes** exactly as in §6.8: a name the inner part lacks reaches the enclosing one.
+* **Keep builders pure** (§9.3): they build descriptions; engines, which are words, do the work.
+
+A builder is "describe, then run" (§17) with a syntax that reads like the domain. The UI library is the full example: a component is declared with a builder, its events become a sum, and its layout, routing and drawing are generated over the known tree ([UI components](ui-components.md), [UI style](ui-style.md)).
 
 ## 7. Step 5: states
 
@@ -857,7 +993,8 @@ uint32_t tab_stop_4(uint32_t column) {
 |---|---|
 | ordinary result | a computation producing a value: the default |
 | subject block | a block receiving a thing to act on: `ch:each do(v) ... end` |
-| activity block | a block receiving a vocabulary: `do(draft..)` |
+| activity block | a block receiving a context and speaking its instructions: `do(draft..)`, `do(..)` |
+| builder block | a block declaring a structure while compiling: `keymap do(..)`, `ui.component "Name" do(..)` (§6.10) |
 | keyed handlers | one behavior per outcome: matching a sum, a receive, an I/O result |
 | channel | values crossing tasks (§8) |
 
@@ -910,7 +1047,7 @@ local replay = do(document: Ref Document, commands: Ref(Grow Command)): Unit
 end
 ```
 
-Do not maintain a second, hand-specialized implementation. Read the C to confirm the interpretation vanished. This is where binding time pays most (§3): an engine over a known description loses its whole interpretive overhead.
+A description is often best written with a builder (§6.10): the block reads like the domain, and the builder hands the engine a Lua table. Do not maintain a second, hand-specialized implementation. Read the C to confirm the interpretation vanished. This is where binding time pays most (§3): an engine over a known description loses its whole interpretive overhead.
 
 ## 18. Arithmetic and operators
 
@@ -976,6 +1113,8 @@ end
 | predicate | proposition | `at_end`, `has_selection` |
 | activity word | purposeful word, or `with_` + resource | `transaction`, `attempt`, `counted`, `with_file` |
 | activity block parameter | snake_case noun, matching the context type | `draft`, `batch`, `file` |
+| declared part (a field a builder declares) | long, descriptive snake_case: what it is | `increment_button`, `question_label`, `count_display` |
+| builder instruction | the domain's own vocabulary | `bind`, `button`, `px`, `bg` |
 | outcome of a body | snake_case outcome | `commit`, `abort`, `retry` |
 | sum alternative | snake_case outcome | `found`, `missing`, `done`, `timed_out` |
 | library | snake_case domain | `io`, `posix` |
@@ -992,6 +1131,8 @@ end
 
 **Names carry the reading, not parentheses.** The house style drops every call parenthesis that grouping does not need: `release slot`, `insert 5`, `counted stats do`. That works only when names are descriptive. If a line is confusing without parentheses, adding them back hides the problem: the names are not descriptive enough (`p:release s` instead of `pool:release slot`), or the design is wrong (a word with a role-less argument, a chain that applies too much at once, a flag where a sum or two words belong). Rename or redesign until the line reads as a sentence.
 
+**Prefer long, descriptive names for declared things.** A declared part shares a namespace with its owner's methods, and a name that says what the part is (`increment_button`) never competes with one that says what a method does (`increment`). Instructions are read without their receiver, so their names must carry the whole meaning.
+
 **Let the receiver carry the subject:** `document:move_left()`, not `document:move_document_left()`. **Name for the call site:** no unexplained flags; prefer two words or a sum. **Use shadowing deliberately:** openings follow ordinary lexical shadowing, so later vocabularies can override earlier ones. When an override would obscure the subject, ask whether a name is too generic or a homonym should stay qualified (`do(crew)` instead of `do(crew..)` inside an opened scope).
 
 ## 20. Spelling forms
@@ -1001,13 +1142,14 @@ end
 | juxtaposition | one simple argument, the default: `insert 5`, `release slot`, `Ref draft`, `tab_stop { tab_width = 4 }` |
 | parentheses | grouping only: several arguments, an argument with an operator, a call as argument (`send(count_lines chunk)`) |
 | `word()` | nullary invocation |
-| trailing block | scopes, iteration, activities |
+| trailing block | scopes, iteration, activities, builders |
+| instruction | inside an opened block, a call without a receiver: `insert n`, `note 1`, `bind "h" (...)` |
 | headed braces | construction (`Document { ... }`) or handlers (`s { ... }`) |
 | `do(x) = e` | a small expression lambda |
 | `do(x) ... end` | a callback with statements |
 | `endall` | the closing run of a trailing-block spine |
-| `local x: T = e` | a typed local: runtime storage |
-| `local x = e` | a binding: a name for a value |
+| `local x = e` | a native local of `e`'s type, holding `e`'s value now; a Lua value stays a host binding |
+| `local x: T = e` | a type other than the initializer's, or storage declared without one |
 
 Parentheses group; they do not explain. Application binds tighter than operators and takes a name's full postfix chain (`count_lines chunks[slot]` is `count_lines(chunks[slot])`), so parentheses are needed only where grouping differs. When a line needs them to be understood, rename or redesign (§19).
 
@@ -1044,6 +1186,9 @@ Explain why when the code says what. State what a signature cannot: an invariant
 | references, slices or text views stored in structs | `Id`s, `Chars n`, or a `Ptr` at a foreign boundary |
 | the body's verbs added to the entity | a context type with those verbs, and an activity word |
 | an activity configured by flags | stacked policy activities |
+| a builder that keeps a current-builder global, or an interface argument passed to every method | a block that opens the builder's vocabulary (§6.10) |
+| a block that writes a context's fields to get around its verbs | the verb that is missing (§6.9) |
+| naming every context to reach outer names | `do(..)`, and let names fall through (§6.8) |
 | an operator or `__member` with a meaning the reader must look up | a named word or a method |
 | parentheses added so a line can be read | descriptive names, or a better split of the words |
 | a body that aborts by jumping out | an outcome the activity matches on |
@@ -1066,6 +1211,7 @@ Explain why when the code says what. State what a signature cannot: an invariant
 * **Ownership:** does every type have one role, and every arrow one kind? Who owns each mutable thing?
 * **Hooks:** does each hook mean what its operation already means? Are fields that carry an invariant written only by the type's methods and hooks?
 * **Activities:** who sets up, who completes, and how does a body abort?
+* **Instructions:** does each block speak only its context's vocabulary and its enclosing activities'? Does each instruction read as a sentence without its receiver? Does a builder leave only a description or a type behind?
 * **States:** is every lifecycle a sum, with every arm handled?
 * **Outcomes:** is every actionable result a sum, and each failure the right kind (§4.2)?
 * **Concurrency:** does anything cross a task except copies and moves? Does each entity have one owner task, each scope an end, each channel a closer?
@@ -1079,4 +1225,4 @@ The forms and libraries in this guide are implemented in the prototype and exerc
 
 ## Maxim
 
-> **Decide what is known, and when. Model the values. Own the state. Name the words. Enter the activity: open the context to work with it, bind a value to remember it, and let the activity complete. Specialize what is known; share nothing between tasks; read the C.**
+> **Decide what is known, and when. Model the values. Own the state. Name the words. Enter the activity: open the context, speak its instructions, bind a value to remember it, and let the activity complete. Describe with builders, run with words. Specialize what is known; share nothing between tasks; read the C.**

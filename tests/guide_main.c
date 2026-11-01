@@ -16,6 +16,8 @@ uint32_t type_word(Document *d, uint32_t n);
 void import_capped(Document *d, Stats *s, uint32_t n);
 bool type_capped(Document *d, uint32_t n, uint32_t cap);
 void type_greeting(Document *d);
+uint32_t type_logged(Document *d, uint32_t n);
+void on_key(Document *d, uint8_t key);
 uint32_t line_count_2(const char *path);
 uint32_t ask(void);
 
@@ -41,6 +43,22 @@ int main(void) {
     d.length = d.cursor = d.edits = 0;
     type_greeting(&d);
     CHECK(d.length == 6 && d.cursor == 5);
+    d = (Document){ 3, 2, 0 };
+    CHECK(type_logged(&d, 4) == 1 && d.length == 7 && d.cursor == 6 && d.edits == 1);
+    on_key(&d, 'h');
+    CHECK(d.cursor == 5);
+    on_key(&d, 'l');
+    CHECK(d.cursor == 6);
+    on_key(&d, 'u');
+    CHECK(d.edits == 2 && d.length == 7 && d.cursor == 6);
+    on_key(&d, '?');
+    CHECK(d.edits == 2 && d.length == 7 && d.cursor == 6);
+    d.cursor = 0;
+    on_key(&d, 'h');
+    CHECK(d.cursor == 0);
+    d.cursor = d.length;
+    on_key(&d, 'l');
+    CHECK(d.cursor == d.length);
     /* a file of 1000 lines, read in 64-byte chunks by two workers */
     f = fopen("/tmp/slc_guide_words.txt", "w");
     for (i = 0; i < 1000; i++) fprintf(f, "alpha beta gamma\n");

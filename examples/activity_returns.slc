@@ -1,0 +1,62 @@
+-- A block-only activity in return position supplies a compile-time callback.
+local Log = struct { notes: U32 }
+function Log:note(count: U32): Unit
+    self.notes = self.notes + count
+end
+local logged = do(body): U32
+    local log = Log { notes = 0 }
+    body(Ref log)
+    return log.notes
+end
+local return_logged = do(n: U32): U32
+    return logged do(..)
+        note n
+    end
+end
+export return_logged
+
+-- Returning from the callback still completes the activity, not its caller.
+local completed = do(body): U32
+    local log = Log { notes = 0 }
+    body(Ref log)
+    log.notes = log.notes + 10
+    return log.notes
+end
+local return_completed = do(n: U32): U32
+    return completed do(..)
+        note n
+        if n > 3 then return end
+        note 2
+    end
+end
+export return_completed
+
+-- Ordinary compile-time arguments follow the same rule in tail position.
+local configured = do(config): U32 = config.amount
+local return_configured = do(): U32
+    return configured { amount = 7 }
+end
+export return_configured
+local static_value = do(value): U32 = value
+local return_known_local = do(): U32
+    local value: U32 = 9
+    return static_value value
+end
+export return_known_local
+
+-- A directly saturated call can mix static and dynamic parameters.
+local apply = do(body, n: U32): U32 = body n
+local return_apply = do(n: U32): U32
+    return apply(do(x) return x + 3 end, n)
+end
+export return_apply
+
+-- The same callback identity is preserved through recursive tail rounds.
+local function repeat_body(body, n: U32): U32
+    if n == 0 then return body() end
+    return repeat_body(body, n - 1)
+end
+local return_recursive = do(n: U32): U32
+    return repeat_body(do() return n + 5 end, n)
+end
+export return_recursive

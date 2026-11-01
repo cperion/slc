@@ -2786,7 +2786,7 @@ function Builder:jump_next(frame, args)
     local diff = changed(frame.args, args, true)
     if next(diff) then signal('restart', frame, { widen = diff, mode = 'loop' }) end
     for i, a in ipairs(args) do
-        if a.k == 'ref' and frame.args[i].k == 'ref' and a.place ~= frame.args[i].place then
+        if is_value(a) and a.k == 'ref' and frame.args[i].k == 'ref' and a.place ~= frame.args[i].place then
             if frame.kind == 'word' then signal('restart', frame, { mode = 'function' }) end
             fail('a loop parameter must refer to the same place on every round', 3)
         end
@@ -3207,7 +3207,14 @@ h.saturate = function(w, n, ...)
     for i = 1, n do
         local idx = #w.supplied + i
         local p = w.params[idx]
-        all[idx] = coerce(new[i], p.T, ("argument '%s' of %s"):format(p.name, w.name))
+        S.no_pack(new[i])
+        -- Tail position does not change an untyped parameter's binding time.
+        -- In particular, an activity's block is a host callback, not a native value.
+        if p.static then
+            all[idx] = static_arg(new[i], p, w)
+        else
+            all[idx] = coerce(new[i], p.T, ("argument '%s' of %s"):format(p.name, w.name))
+        end
     end
     return all
 end

@@ -1,5 +1,12 @@
 -- each case: a program that must not compile, and part of the diagnostic
 return {
+    { name = 'tail call rejects a dynamic compile-time argument', expect = 'value is not known at compile time',
+      src = [[local static_value = do(value): U32 = value
+local f = do(n: U32): U32
+    return static_value n
+end
+export f
+]] },
     { name = 'known map rejects dynamic entries', expect = 'must be known',
       src = [[local f = do(k: U32): U32
     local m = Map.known(U32, U32, { { k, 1 } })
