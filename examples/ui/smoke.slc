@@ -1,0 +1,7 @@
+-- Bounded real-driver acceptance entry, not a replacement renderer.
+local model = require "counter"
+local smoke = do(font: CString): U32
+    local result = model.ui.run(model.App, { .font, max_frames = 8, frame_delay_ms = 0 })
+    return result { done() = U32 0, failed(failure) = failure.operation }
+end
+export smoke

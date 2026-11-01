@@ -1521,10 +1521,10 @@ end
 
 -- translate a typed lambda whose `(` was consumed. Returns the Lua text, and
 -- the tokens read ahead, which go back to the macro processor.
-function M.translate_lambda(reader, name, start_line)
+function M.translate_lambda(reader, name, start_line, opened_callback)
     local p = M.parser(reader)
     local fn = p:funcbody(name, { line = start_line }, { params_open = true })
-    if not fn.result then reader:error('internal: translate_lambda without a result type') end
+    if not fn.result and not opened_callback then reader:error('internal: translate_lambda without a result type') end
     local g = M.codegen(reader.filename, start_line)
     local text = g:lambda(fn)
     return text, reader:leftovers()

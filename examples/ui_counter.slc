@@ -1,0 +1,40 @@
+local model = require "ui.counter"
+local App, ui = model.App, model.ui
+local layout, dispatch = ui.layout(App), ui.dispatch(App)
+local missing_metrics = extern("slc_trap", { CString }, Unit)
+local no_metrics = do(caption: Ref Chars(256), size: F32, font: U32): ui.Size
+    missing_metrics "this fixed-size example must not request font metrics"
+    return ui.Size { width = 0, height = 0 }
+end
+local Observation = struct {
+    count: U32, consumed: U32, modal: Bool, quit: Bool,
+    increment_x: F32, increment_y: F32, reset_x: F32, reset_y: F32,
+}
+local replay_counter = do(inputs: Ptr ui.Input, length: U32, observation: Ref Observation): Unit
+    local app = ui.new App
+    local index = U32 0
+    local quit: Bool = false
+    layout app 640 480 no_metrics
+    while index < length and not quit do
+        local reply = dispatch(app, inputs[index])
+        reply { stay = do() end, quit = do() quit = true end }
+        index = index + 1
+        layout app 640 480 no_metrics
+    end
+    observation.count = app.counter.count.value
+    observation.consumed = index
+    observation.modal = app.counter.confirm.visible
+    observation.quit = quit
+    observation.increment_x = app.counter.increment_button.x
+    observation.increment_y = app.counter.increment_button.y
+    observation.reset_x = app.counter.confirm.reset_button.x
+    observation.reset_y = app.counter.confirm.reset_button.y
+end
+export replay_counter
+local fixed_increment_y = do(): F32
+    local app = ui.new App
+    layout app 640 480 no_metrics
+    return app.counter.increment_button.y
+end
+export fixed_increment_y
+return { App = App, ui = ui, metrics = no_metrics }

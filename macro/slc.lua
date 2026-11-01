@@ -57,6 +57,15 @@ M.let_typed = function (get, ptoks, info)
     return result(pad(text, reader, info.line), left)
 end
 
+-- Untyped opened blocks use the same lexical resolver as nested callbacks.
+-- The standalone Let macros retain their host-environment implementation.
+M.let_opened = function (get, prefix, info)
+    local reader = syntax.reader(function () return get() end, prefix, line_of, M.filename, info.line)
+    local text, left = syntax.translate_lambda(reader, info.name, info.line, true)
+    if info.argument then text = text .. ')' end
+    return result(pad(text, reader, info.line), left)
+end
+
 M.define('__typed_function', function (get)
     local start = lexer.line
     local t, v = before(get, -3)

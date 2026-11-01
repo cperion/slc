@@ -568,6 +568,11 @@ M.set_macro('do', function (get, put)
         end
         ptoks[#ptoks + 1] = { ')', ')' }
         names, opened = parameters(token_stream(ptoks))
+        if opened and M.let_opened then
+            if s2 ~= '' then ptoks[#ptoks + 1] = { 'space', s2 } end
+            ptoks[#ptoks + 1] = { t2, v2 }
+            return M.let_opened(get, ptoks, { argument = argument, name = name_hint, line = do_line })
+        end
         after = { t2, v2, s2 }
     end
     local head = paren .. 'function (' .. names .. ')'

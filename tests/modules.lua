@@ -152,4 +152,37 @@ package.preload['slc.str'] = original_preload
 package.preload.record = previous_record
 restored()
 check('no custom import API remains', slc.import == nil and stage.import == nil)
+-- Top-level untyped openings must use lexical lookup too, without requiring
+-- a native result annotation or a library-specific macro.
+slc.compile([[
+local md = 99
+local caption = function() error("outer caption was called") end
+local receive = do(..)
+    assert(md == 6)
+    caption "inner"
+    local md = 8
+    assert(md == 8)
+    local nested = do(..)
+        assert(md == 10)
+        caption "nested"
+        local own = (..)
+        assert(own.md == 10)
+    end
+    nested { md = 10 }
+    assert(md == 8)
+    outcome oneof { done: Unit }
+    return { value = md }
+end
+local calls = 0
+local result = receive {
+    md = 6,
+    caption = function(text) calls = calls + 1 end,
+    outcome = function(T) assert(T.kind == "sum") end,
+}
+assert(md == 99 and calls == 2 and result.value == 8)
+local named = do(ctx..) = md
+assert(named { md = 7 } == 7)
+]], path)
+check('untyped opened callbacks use lexical lookup and host results', true)
+restored()
 print(('%d module loading checks passed'):format(passed))

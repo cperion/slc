@@ -246,6 +246,11 @@ local bad  = do(x: U32) = x + 1             -- error: typed parameters need a re
 ```
 
 Inside a typed body, an untyped lambda is a callback, evaluated in place (§10.1).
+An untyped lambda with an opened parameter (`do(..)` or `do(ctx..)`) uses that
+same callback translation at top level: its opening follows lexical shadowing,
+its body supports the ordinary SLC application forms, and its result is inferred.
+It does not use a Lua function-environment overlay. Other untyped top-level
+lambdas remain ordinary Lua closures.
 
 A word's untyped parameters are compile-time parameters (§10.2), and a word may end with a rest requirement `..args` (§10.8). The same holds for named functions: `function T:m(n: U32): Unit ... end` defines a method word on struct `T`, and `local function f(n: U32): U32 ... end` a word that may name itself.
 

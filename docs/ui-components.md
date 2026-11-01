@@ -1,14 +1,17 @@
 # UI components: a fixed tree, events as values
 
-**Status: proposed library API, second version.** The UI builders, controls and hosts
-below are not implemented. No language syntax is added: builders are Lua functions
-that construct ordinary SLC types, words and sums. The general evaluator change for
-field-wise loop state is present in the checkout; its scope and the evidence are
-recorded in §12.
+**Status: partially implemented library, with remaining target contracts below.**
+The instruction builders, native records, generated event sums, basic row/column
+layout, pointer routing, modal outcomes and an SDL3/SDL_ttf counter now exist.
+See [the runnable counter](../examples/ui/README.md) for observed checks and limits.
+The rest of this document remains the design target, not a claim that every control,
+layout utility or host capability is complete. The current authoring contract is
+[Tailwind-granular instructions](ui-style.md).
 
 **The primary declaration form is instructions inside `do(..)` blocks.** The
-block receives and anonymously opens its construction receiver. Tables remain for
-property bundles, styles, native values and sum matches—not lists of UI children.
+block receives and anonymously opens its construction vocabulary. Instructions set
+properties and declare children. Tables remain for theme scales, native values and
+sum matches—not control property bundles or lists of UI children.
 
 A component is a persistent record with methods and a declared tree. Content,
 style, layout and behavior belong to the same component. The tree is known while
@@ -39,90 +42,32 @@ constructs and drives it; it is not a second application/controller object.
 
 ## 2. A complete application
 
-This is the target library API, not an example that can run against the current
-checkout. A modal starts closed unless its declaration specifies `visible true`.
+The executable application is [the component counter](../examples/ui/counter.slc),
+with [the SDL entry point](../examples/ui/main.slc) and
+[the replay entry point](../examples/ui_counter.slc). A modal starts closed unless
+its block contains `visible on`.
 
 ```lua
-local ui = require "slc.ui"
-local component, window = ui.component, ui.window
-local theme = ui.theme
-
-local Confirmation = component "Confirmation" do(..)
+local Confirmation = ui.component "Confirmation" do(..)
     outcome oneof { reset: Unit, keep: Unit }
-
-    modal { width = 320, padding = 16, gap = 12, style = theme.panel } do(..)
-        label "question" { text = "Reset the counter?" }
-
-        row { gap = 8 } do(..)
-            button "reset_button" { text = "Reset", style = theme.accent }
-            button "keep_button" { text = "Keep value" }
+    modal do(..)
+        w 80
+        p 4
+        gap 3
+        bg white
+        label "question" do(..) caption "Reset the counter?" end
+        row do(..)
+            gap 2
+            button "reset_button" do(..) caption "Reset" end
+            button "keep_button" do(..) caption "Keep value" end
         end
     end
 end
-
-function Confirmation:handle(event: Confirmation.Event): Confirmation.Outcome
-    self:close()
-    return event {
-        reset_button() = Confirmation.Outcome.reset(),
-        keep_button() = Confirmation.Outcome.keep(),
-    }
-end
-
-local Counter = component "Counter" do(..)
-    column { padding = 24, gap = 12 } do(..)
-        number "count" { value = U32 0, font_size = 40 }
-
-        row { gap = 8 } do(..)
-            button "increment_button" { text = "Increase" }
-            button "reset_button" { text = "Reset…" }
-        end
-
-        part "confirm" (Confirmation)
-    end
-end
-
-function Counter:increment(): Unit
-    if self.count.value < 999999 then
-        self.count.value = self.count.value + 1
-    end
-    self.increment_button.enabled = self.count.value < 999999
-end
-
-function Counter:reset(): Unit
-    self.count.value = 0
-    self.increment_button.enabled = true
-end
-
-function Counter:handle(event: Counter.Event): Unit
-    event {
-        increment_button = do() self:increment() end,
-        reset_button = do() self.confirm:open() end,
-        confirm = do(decision)
-            decision {
-                reset = do() self:reset() end,
-                keep = do() end,
-            }
-        end,
-    }
-end
-
-local App = window "SLC counter" { width = 640, height = 480, style = theme.window } do(..)
-    part "counter" (Counter)
-end
-
-function App:handle(event: App.Event): ui.Reply
-    return event { close_requested() = ui.Reply.quit() }
-end
-
-local main = do(): I32
-    local result = ui.run App
-    return result {
-        quit() = I32 0,
-        failed(failure) = I32 1,
-    }
-end
-export main
 ```
+
+Handlers remain methods on the component records. The runnable counter specifies
+explicit control dimensions; the SDL host also supplies real text measurement.
+Its font path is explicit, not an implicit replacement font.
 
 Reading it:
 
@@ -153,46 +98,25 @@ before matching:
 
 | Builder or instruction | Meaning |
 |---|---|
-| `component "Name" do(..) ... end` | Declare a component record type, its event/outcome types and generated words |
-| `window "Title" { ... } do(..) ... end` | Declare a window root with its properties and child declarations |
-| `column { ... } do(..) ... end`, `row { ... } do(..) ... end`, `modal { ... } do(..) ... end` | Declare a layout container with properties and child declarations; do not create a control-name scope |
-| `label "name" { ... }`, `number "name" { ... }`, `button "name" { ... }` | Declare a named control with a property bundle |
-| `part "name" (T)` | Declare a named child component of type `T` |
-| `part "name" (ui.List(T))` | Declare a collection of child components, subject to §6 |
+| `component "Name" do(..) ... end` | Declare a component record and its generated event sum |
+| `window "Title" do(..) ... end` | Declare the root and set its properties inside the block |
+| `column do(..) ... end`, `row do(..) ... end`, `modal do(..) ... end` | Declare a layout container without adding a control-name scope |
+| `label "name" do(..) ... end`, `number "name" do(..) ... end`, `button "name" do(..) ... end` | Declare a named control; instructions set its properties |
+| `part "name" (T)` | Declare a child component |
 | `outcome oneof { ... }` | Declare the owning component's outward sum |
-| `fields { revision = U64 0, phase = Phase.editing() }` | Declare ordinary native fields with their initial values; no separate state dictionary |
+| `fields { revision = U64 0 }` | Declare ordinary native fields with initial values |
 
-**Tables supply properties; blocks contain declarations.** There are no property
-setter instructions such as `gap 8`. Use `row { gap = 8 } do(..) ... end`.
-`outcome` and `fields` remain instructions because they declare a type and fields.
-An empty property table may be omitted; this does not enable setter instructions.
+**Each block opens a Lua vocabulary table.** Its applicable instructions and the
+bound theme's typed tokens become bindings under ordinary lexical shadowing.
+A name absent from that vocabulary falls through to enclosing scopes. A helper
+declared later inside the block shadows an opened binding in turn. For example,
+`outcome` inside a modal reaches the component, and `gap` inside a button can reach
+its enclosing row. No UI-specific lookup or environment interception is used.
 
-Instructions declare children in execution order. Each block receives a receiver
-and opens it with [anonymous spread](syntax.md#anonymous-spread). Bare calls resolve
-against the innermost receiver that supplies the method. No construction-scope name
-or repeated receiver prefix is needed.
-
-These receivers expose **methods**, not repeated keys in opened Lua vocabulary
-tables. Methods stay attached under [the opening rules](syntax.md#105-opening), so
-nested declaration calls select the inner receiver without introducing shadowing names.
-Receiver bookkeeping should avoid unintentionally hiding user bindings with opened
-fields. The library follows ordinary lexical shadowing; it has no special lookup rules.
-
-An unresolved declaration call must identify the current construction scope and
-list its available declarations, for example:
-
-```text
-'buton' is not a declaration in a row
-available: label, number, button, part, row, column
-```
-
-Preserve ordinary lexical helpers and valid enclosing-receiver calls. Emit this
-contextual diagnostic only after normal name resolution fails; do not intercept
-all Lua globals or invent UI-specific lookup semantics. Unknown property names in
-a bundle, such as `gapp`, must similarly name the owning container and valid
-properties. If existing diagnostic facilities cannot expose this information, the
-implementation must identify the smallest general diagnostic hook needed. These
-are required builder diagnostics, not claims of an already implemented hook.
+Unknown names must preserve normal resolution before receiving UI diagnostics.
+The current builder adds the available instructions and scope to an unresolved-name
+error; nearest-name suggestions are still pending. Wrong token kinds, duplicate
+names and invalid child placement report construction errors.
 
 Construction blocks run while declaring the type, not once per frame or input.
 They can use locals and helpers; any branches or loops that determine the tree must
@@ -201,8 +125,8 @@ Each scope appends declarations to its own parent tree and completes on return.
 The result is the known tree and native type—not a retained construction callback,
 a global current-builder variable, or an `interface` argument on application methods.
 
-Tables remain data: control property bundles, reusable styles, native initializers,
-`oneof` declarations and event matches. They do not enumerate UI children. This is
+Tables remain data: theme scales, native initializers, `oneof` declarations and
+event matches. Shared styles are `ui.style do(..) ... end` blocks. They do not enumerate UI children. This is
 one authoring surface, not two parallel tree APIs. Grouping parentheses remain where
 ordinary SLC grammar requires them, such as `part "confirm" (Confirmation)`.
 
@@ -214,8 +138,8 @@ conflicts are errors that identify the declarations. Named child components star
 a new namespace; layout containers do not.
 
 **Addressing container properties:** the root container's public properties belong
-to the component, so `self.gap` means its root gap. A container can optionally be
-named, for example `row "actions" { gap = 8 } do(..) ... end`, to expose `self.actions.gap`.
+to the component, so `self.gap_x` means its root horizontal gap. A container can optionally be
+named, for example `row "actions" do(..) gap 2 ... end`, to expose `self.actions.gap_x`.
 Its controls remain directly named fields of the component, not fields under
 `actions`. Anonymous nested containers have internal property storage and no public
 field name; name one when application code needs to address its properties. This
@@ -229,7 +153,7 @@ Lua or C helpers.
 ### 3.2 Properties and binding time
 
 Properties have their declared values as initial values. Application code can
-assign them directly: `self.increment_button.enabled = false`, `self.gap = 20`.
+assign them directly: `self.increment_button.enabled = false`, `self.gap_x = 20`.
 The author does not classify properties as static or dynamic.
 
 For an ordinary tracked record in a loop, fields whose values agree across rounds
@@ -249,24 +173,24 @@ some of its field reads folded.
 
 ### 3.3 Style
 
-A style is a Lua table of property defaults. `style = theme.accent` in a control
-or container's property bundle supplies its defaults. Explicit properties in that
-bundle override the style. This is the same rule for controls and containers;
-there is no style instruction, selector, cascade engine or independent style tree.
+A style is an instruction block: `ui.style do(..) ... end`, applied with
+`use primary`. One instruction corresponds to one utility: `px 4`, `rounded md`,
+`bg red_600`, `text_size lg`, `line_height tight`. Instructions run in order and
+later assignments win. `leading` and `trailing` are alignment tokens only.
+See [the style contract](ui-style.md) for scales, tokens and variants.
 
-Theme tables are known descriptions. Their resulting properties are ordinary
-fields. Runtime theme changes use typed native palette/property values assigned by
-handlers, not a Lua table retained in native storage.
+Properties become ordinary native fields. Runtime style changes assign those
+fields, for example `self.reset_button.background = ui.colors.red_700`.
+Interaction and breakpoint blocks record overrides; generated property getters
+select them from interaction fields and window width. Layout and drawing must use
+the same resolved properties.
 
 ### 3.4 Text
 
-Mutable text is owned and bounded in the first version:
-`label "title" { capacity = 64 }` and `text_entry "name" { capacity = 64 }` have
-`Chars 64` storage. A literal initializer must fit the declared capacity. When a declaration supplies
-only a literal, its size determines the default capacity; specify a larger capacity
-when subsequent content needs it. This is a storage bound, not a static/dynamic
-annotation. The compiler can fold known text and its uses where ordinary
-binding-time rules permit it. A borrowed `Str` is never stored in a component.
+The current label/button caption is owned `Chars 256` storage; construction rejects
+longer UTF-8 byte strings. It is not a borrowed `Str`. Configurable capacities and
+editable text controls remain future work. Number controls store their native
+integer value, initialized by `value U32 0` (or another integer width).
 
 ## 4. Events and outcomes
 
@@ -276,7 +200,7 @@ The builder generates `T.Event` from the things in the tree that report:
 
 | Tree declaration | Event contribution |
 |---|---|
-| `button "name" { ... }` | `name: Unit` on activation |
+| `button "name" do(..) ... end` | `name: Unit` on activation |
 | `checkbox`, `slider`, `text_entry` without `report` | None; the control updates its own content |
 | A control with `report = { "changed" }` or `{ "submitted" }` | Its named, typed report under the control's name |
 | `part "name" (C)` with a declared outcome | `name: C.Outcome` |
@@ -378,11 +302,14 @@ all events, outcomes, payloads or dispatch costs disappear in every program.
   Reopening a component cannot complete an old press. Key repeat does not create
   extra button activations unless explicitly part of that control's contract.
 
-Rows and columns arrange visible children in declaration order with gaps and
-padding. Content determines default size; explicit dimensions constrain it.
-Overflow is clipped. Modals are centered overlays, not normal-flow slots. Initial
-scope excludes automatic wrapping, flexible sizing and scrolling; these are later
-layout features, not prerequisites for the event model.
+Layout uses two passes of ordinary SLC words over the known tree: measure content
+and constraints, then arrange according to the container's rules. Known properties
+and dimensions can fold to constant positions; mutable dimensions and resizable
+windows leave native arithmetic, not a layout interpreter. The target includes
+row, column, flex, grid, stack and modal; children set their own placement through
+instructions. Modals are centered overlays, not normal-flow slots. Full wrapping,
+flex sizing, grid tracks and clipping remain incomplete in the current library;
+see [the implementation boundary](ui-style.md#implementation-boundary).
 
 ## 6. Collections
 

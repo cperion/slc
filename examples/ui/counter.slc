@@ -1,0 +1,101 @@
+-- The actual component library: fixed-size controls make this example's layout
+-- independent of font metrics. The SDL host supplies text rendering separately.
+local ui = require "slc.ui"
+local primary = ui.style do(..)
+    px 4
+    py 2
+    bg blue_600
+    text_color white
+    hover do(..) bg blue_700 end
+    disabled do(..) opacity 50 end
+end
+local Confirmation = ui.component "Confirmation" do(..)
+    outcome oneof { reset: Unit, keep: Unit }
+    modal do(..)
+        w 80
+        h 40
+        p 4
+        gap 3
+        bg white
+        label "question" do(..)
+            w 72
+            h 8
+            caption "Reset the counter?"
+        end
+        row do(..)
+            gap 2
+            button "reset_button" do(..)
+                use primary
+                w 28
+                h 10
+                bg red_600
+                hover do(..) bg red_700 end
+                caption "Reset"
+            end
+            button "keep_button" do(..)
+                use primary
+                w 40
+                h 10
+                caption "Keep value"
+            end
+        end
+    end
+end
+function Confirmation:handle(event: Confirmation.Event): Confirmation.Outcome
+    self:close()
+    return event { reset_button() = Confirmation.Outcome.reset(), keep_button() = Confirmation.Outcome.keep() }
+end
+local Counter = ui.component "Counter" do(..)
+    column do(..)
+        p 6
+        gap 3
+        number "count" do(..)
+            value U32 0
+            w 72
+            h 10
+            text_size xl
+        end
+        row do(..)
+            gap 2
+            button "increment_button" do(..)
+                use primary
+                w 32
+                h 10
+                caption "Increase"
+            end
+            button "reset_button" do(..)
+                use primary
+                w 32
+                h 10
+                caption "Reset..."
+            end
+        end
+        part "confirm" (Confirmation)
+    end
+end
+function Counter:increment(): Unit
+    if self.count.value < 999999 then self.count.value = self.count.value + 1 end
+    self.increment_button.enabled = self.count.value < 999999
+end
+function Counter:reset(): Unit
+    self.count.value = 0
+    self.increment_button.enabled = true
+end
+function Counter:handle(event: Counter.Event): Unit
+    event {
+        increment_button = do() self:increment() end,
+        reset_button = do() self.confirm:open() end,
+        confirm = do(decision)
+            decision { reset = do() self:reset() end, keep = do() end }
+        end,
+    }
+end
+local App = ui.window "CounterWindow" do(..)
+    w 160
+    h 120
+    part "counter" (Counter)
+end
+function App:handle(event: App.Event): ui.Reply
+    return event { close_requested() = ui.Reply.quit() }
+end
+return { App = App, ui = ui }

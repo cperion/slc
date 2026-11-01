@@ -1,0 +1,196 @@
+-- Fixed-tree UI. Lua builds the type and vocabulary; native words own runtime
+-- state and algorithms. A component is the persistent record, not a controller.
+local tokens = require "slc.ui.theme"
+local properties = require "slc.ui.properties"
+local ui = { theme = tokens.theme, colors = tokens.colors, palettes = tokens.palettes,
+    Color = tokens.Color, pixels = tokens.pixels, fr = tokens.fr }
+ui.Reply = oneof { stay: Unit, quit: Unit }
+local default_theme = tokens.theme {}
+local descriptions = {}
+local function sorted_keys(values)
+    local keys = {}
+    for name in pairs(values) do keys[#keys + 1] = name end
+    table.sort(keys)
+    return keys
+end
+local function reserve(owner, name)
+    assert(type(name) == "string" and name:match("^[a-zA-Z][a-zA-Z0-9_]*$"), "invalid UI declaration name: " .. tostring(name))
+    assert(not owner.names[name], "duplicate UI declaration '" .. name .. "' in " .. owner.name)
+    assert(name ~= "handle" and name ~= "open" and name ~= "close" and name ~= "Event" and name ~= "Outcome",
+        "reserved UI name '" .. name .. "' in " .. owner.name)
+    owner.names[name] = true
+end
+local function node(kind, parent, name)
+    local n = { kind = kind, parent = parent, name = name, children = {},
+        container = kind ~= "button" and kind ~= "label" and kind ~= "number" }
+    properties.defaults(n)
+    if parent then parent.children[#parent.children + 1] = n end
+    return n
+end
+local function variant_fields(n, fields, values)
+    for i, override in ipairs(n.variants) do
+        local schema = {}
+        for _, name in ipairs(sorted_keys(override.values)) do schema[#schema + 1] = { name, n.types[name] } end
+        if #schema > 0 then
+            override.field = "variant_" .. i
+            override.T = __S.struct("UIVariant", schema)
+            fields[#fields + 1] = { override.field, override.T }
+            values[override.field] = override.T(override.values)
+        end
+    end
+end
+local function fields_of(n)
+    local fields, values = {}, {}
+    for _, name in ipairs(sorted_keys(n.values)) do
+        fields[#fields + 1] = { name, n.types[name] }; values[name] = n.values[name]
+    end
+    variant_fields(n, fields, values)
+    return fields, values
+end
+local vocabulary
+vocabulary = function(owner, parent)
+    local v = parent and properties.vocabulary(parent, owner.theme) or {}
+    if not parent or (owner.window and parent == owner.root) then
+        if not parent then
+            for name, token in pairs(owner.theme.tokens) do v[name] = token end
+        end
+        v.outcome = function(T)
+            assert(not owner.outcome, "duplicate outcome in " .. owner.name)
+            assert(T.kind == "sum", "outcome requires a oneof type")
+            owner.outcome = T
+        end
+        v.fields = function(values)
+            for _, name in ipairs(sorted_keys(values)) do
+                reserve(owner, name)
+                local value = values[name]
+                assert(type(value) == "table" and value.T and __S.static(value), "fields require known native initial values: " .. name)
+                owner.extra[#owner.extra + 1] = { name, value.T }
+                owner.defaults[name] = value
+            end
+        end
+    end
+    for _, kind in ipairs { "row", "column", "flex", "grid", "stack", "modal" } do
+        v[kind] = function(body_or_name)
+            local function construct(body, name)
+                if name then reserve(owner, name) end
+                local n = node(kind, parent, name)
+                if not parent then
+                    assert(not owner.root, "component " .. owner.name .. " has more than one visual root")
+                    assert(not name, "the component itself names its root container")
+                    owner.root = n
+                end
+                owner.nodes[#owner.nodes + 1] = n
+                properties.invoke(body, vocabulary(owner, n), owner.name .. "/" .. kind)
+            end
+            if type(body_or_name) == "string" then
+                return function(body) construct(body, body_or_name) end
+            end
+            construct(body_or_name)
+        end
+    end
+    for _, kind in ipairs { "button", "label", "number" } do
+        v[kind] = function(name)
+            reserve(owner, name)
+            return function(body)
+                assert(parent, kind .. " needs a layout container in " .. owner.name)
+                local n = node(kind, parent, name)
+                owner.nodes[#owner.nodes + 1] = n
+                properties.invoke(body, properties.vocabulary(n, owner.theme), owner.name .. "/" .. kind .. " " .. name)
+            end
+        end
+    end
+    v.part = function(name)
+        reserve(owner, name)
+        return function(T)
+            assert(descriptions[T], "part requires a UI component type")
+            assert(parent, "part needs a layout container in " .. owner.name)
+            local n = { kind = "part", name = name, parent = parent, T = T, description = descriptions[T] }
+            parent.children[#parent.children + 1] = n
+            owner.nodes[#owner.nodes + 1] = n
+        end
+    end
+    return v
+end
+local function build(name, body, theme, window)
+    local owner = { name = name, theme = theme, nodes = {}, names = {}, extra = {}, defaults = {}, window = window }
+    if window then
+        owner.root = node("column")
+        owner.nodes[1] = owner.root
+        owner.root.values.requested_width = F32 640
+        owner.root.values.requested_height = F32 480
+        owner.root.values.width_mode = U32 1
+        owner.root.values.height_mode = U32 1
+        properties.invoke(body, vocabulary(owner, owner.root), "window " .. name)
+    else
+        properties.invoke(body, vocabulary(owner), "component " .. name)
+    end
+    local fields, initial = {}, {}
+    if owner.root then fields, initial = fields_of(owner.root) end
+    local occupied = {}
+    for _, field in ipairs(fields) do occupied[field[1]] = true end
+    local function add(name, T, value)
+        assert(not occupied[name], "UI declaration '" .. name .. "' collides with a property in " .. owner.name)
+        occupied[name] = true; fields[#fields + 1] = { name, T }; initial[name] = value
+    end
+    local events = {}
+    if window then events[#events + 1] = { "close_requested", Unit } end
+    for i, n in ipairs(owner.nodes) do
+        if n ~= owner.root then
+            n.field = n.name or ("layout_" .. i)
+            if n.kind == "part" then
+                add(n.field, n.T, n.description.initial)
+                if n.description.outcome then events[#events + 1] = { n.name, n.description.outcome } end
+            else
+                local schema, values = fields_of(n)
+                n.T = __S.struct(name .. "_" .. n.field, schema)
+                add(n.field, n.T, n.T(values))
+                if n.kind == "button" then events[#events + 1] = { n.name, Unit } end
+            end
+        end
+    end
+    for _, field in ipairs(owner.extra) do add(field[1], field[2], owner.defaults[field[1]]) end
+    local Component = __S.struct(name, fields)
+    owner.T = Component
+    if owner.root then owner.root.T = Component end
+    Component.Event = #events > 0 and __S.oneof(name .. "Event", events) or Unit
+    Component.Outcome = owner.outcome or Unit
+    owner.initial = Component(initial)
+    descriptions[Component] = owner
+    if owner.root and owner.root.kind == "modal" then
+        function Component:open(): Unit
+            self.visible = true
+        end
+        function Component:close(): Unit
+            self.visible = false
+        end
+    end
+    return Component
+end
+ui.component = function(name)
+    return function(body) return build(name, body, default_theme, false) end
+end
+ui.window = function(title)
+    return function(body) return build(title, body, default_theme, true) end
+end
+-- Bind a theme explicitly; this does not mutate a global current-builder/theme.
+ui.with_theme = function(theme)
+    assert(theme and theme.tokens, "with_theme requires a ui.theme")
+    return {
+        component = function(name) return function(body) return build(name, body, theme, false) end end,
+        window = function(title) return function(body) return build(title, body, theme, true) end end,
+    }
+end
+ui.style = function(body) return { ui_style = true, body = body } end
+ui.new = function(T)
+    assert(descriptions[T], "ui.new requires a component type")
+    return descriptions[T].initial
+end
+-- Exposed to the other UI library modules, not a runtime registry.
+ui.description = function(T) return assert(descriptions[T], "not a UI component type") end
+local attach_tree = require "slc.ui.tree"
+attach_tree(ui)
+ui.run = function(T, config)
+    local host = require "slc.ui.sdl"
+    return host.run(T, config)()
+end
+return ui

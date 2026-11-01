@@ -53,9 +53,13 @@ test-format: dirs
 test-modules: dirs
 	$(LUA) tests/modules.lua
 
-.PHONY: test-canvas
+.PHONY: test-canvas test-ui
 test-canvas: dirs
 	$(LUA) tests/canvas.lua
+
+test-ui: dirs
+	$(LUA) tests/ui.lua
+	$(LUA) tests/ui_sdl.lua
 
 test: test-macros test-format test-modules
 	$(LUA) tests/run.lua

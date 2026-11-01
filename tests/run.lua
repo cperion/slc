@@ -136,10 +136,12 @@ end
 local order = {}
 for i = 1, #examples do order[i] = i end
 table.sort(order, function(a, b) return names[a] < names[b] end)
+local ordered_examples, ordered_names = {}, {}
 for i, index in ipairs(order) do
-    examples[i], names[i] = examples[index], names[index]
-    cpaths[i] = build .. '/slc_' .. names[i] .. '.c'
+    ordered_examples[i], ordered_names[i] = examples[index], names[index]
+    cpaths[i] = build .. '/slc_' .. ordered_names[i] .. '.c'
 end
+examples, names = ordered_examples, ordered_names
 
 local compiled, strict = {}, {}
 do
@@ -541,6 +543,17 @@ if sh('pkg-config --exists sdl3') then
     check('canvas: SDL3 activity case study', ok, out)
 else
     print('skip  canvas: SDL3 development package unavailable')
+end
+
+do
+    local ok, out = sh(('luajit %s/tests/ui.lua'):format(sq(root)))
+    check('UI: construction vocabularies and native records', ok, out)
+    if sh('pkg-config --exists sdl3 sdl3-ttf') then
+        local host_ok, host_out = sh(('luajit %s/tests/ui_sdl.lua'):format(sq(root)))
+        check('UI: SDL3 counter and font resource activity', host_ok, host_out)
+    else
+        print('skip  UI SDL: SDL3/SDL_ttf development packages unavailable')
+    end
 end
 
 local docs = par {

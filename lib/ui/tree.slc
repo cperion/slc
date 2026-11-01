@@ -1,0 +1,379 @@
+-- Known-tree traversal generates ordinary SLC words. No runtime tree, layout
+-- interpreter, event registry, or stored callback is created.
+local Size = struct { width: F32, height: F32 }
+local Input = struct { kind: U32, x: F32, y: F32 }
+local dot = __S.dot
+local function home(owner, node)
+    if node.field then return dot(owner, node.field) end
+    return owner
+end
+local maximum = do(a: F32, b: F32): F32
+    if a > b then return a end
+    return b
+end
+local dimension = do(value: F32, mode: U32, available: F32, screen: F32, natural: F32): F32
+    if mode == 1 then return value end
+    if mode == 2 then return value * available end
+    if mode == 3 then return value * screen end
+    return natural
+end
+local properties = {}
+local function property(node, name)
+    properties[node] = properties[node] or {}
+    if properties[node][name] then return properties[node][name] end
+    local Node, Value = node.T, node.types[name]
+    local overrides = {}
+    for _, variant in ipairs(node.variants) do
+        if variant.field and variant.values[name] ~= nil then overrides[#overrides + 1] = variant end
+    end
+    local get = do(box: Ref Node, window_width: F32): Value
+        local value = dot(box, name)
+        for _, variant in ipairs overrides do
+            do
+                local applies: Bool = true
+                for condition, threshold in pairs variant.predicates do
+                    if condition == "hover" then applies = applies and box.hovered
+                    elseif condition == "active" then applies = applies and box.pressed
+                    elseif condition == "focus" then applies = applies and box.focused
+                    elseif condition == "disabled" then applies = applies and not box.enabled
+                    else applies = applies and window_width >= threshold end
+                end
+                if applies then value = dot(dot(box, variant.field), name) end
+            end
+        end
+        return value
+    end
+    properties[node][name] = get
+    return get
+end
+local function get(owner, node, name, window_width)
+    return property(node, name)(home(owner, node), window_width)
+end
+local function modal(node)
+    return node.kind == "modal" or (node.kind == "part" and node.description.root and node.description.root.kind == "modal")
+end
+local function attach(ui)
+    ui.Input, ui.Size = Input, Size
+    ui.input = { activate = 0, close = 1, move = 2, press = 3, release = 4, cancel = 5 }
+    local cache = {}
+    local engine
+    engine = function(T)
+        if cache[T] then return cache[T] end
+        local description = ui.description T
+        local compiled = {}
+        cache[T] = compiled
+        local measure, arrange = {}, {}
+        local function prepare(node)
+            if node.kind == "part" then
+                local child = engine(node.T)
+                measure[node], arrange[node] = child.measure, child.arrange
+                return
+            end
+            for _, child in ipairs(node.children) do prepare(child) end
+            local function child_measure(owner, child, width, height, window_width, window_height, metrics)
+                local target = child.kind == "part" and home(owner, child) or owner
+                measure[child](target, width, height, window_width, window_height, metrics)
+            end
+            local function child_arrange(owner, child, x, y, width, height, window_width, window_height)
+                local target = child.kind == "part" and home(owner, child) or owner
+                arrange[child](target, x, y, width, height, window_width, window_height)
+            end
+            measure[node] = do(owner: Ref T, available_width: F32, available_height: F32,
+                window_width: F32, window_height: F32, metrics): Unit
+                local box = Ref home(owner, node)
+                local left = get(owner, node, "padding_left", window_width)
+                local right = get(owner, node, "padding_right", window_width)
+                local top = get(owner, node, "padding_top", window_width)
+                local bottom = get(owner, node, "padding_bottom", window_width)
+                local requested_width = get(owner, node, "requested_width", window_width)
+                local requested_height = get(owner, node, "requested_height", window_width)
+                local width_mode = get(owner, node, "width_mode", window_width)
+                local height_mode = get(owner, node, "height_mode", window_width)
+                local constraint_width = dimension(requested_width, width_mode, available_width, window_width, available_width)
+                local constraint_height = dimension(requested_height, height_mode, available_height, window_height, available_height)
+                local inner_width = maximum(constraint_width - left - right, 0)
+                local inner_height = maximum(constraint_height - top - bottom, 0)
+                local content_width = F32 0
+                local content_height = F32 0
+                if node.container then
+                    local gap_x = get(owner, node, "gap_x", window_width)
+                    local gap_y = get(owner, node, "gap_y", window_width)
+                    local horizontal = get(owner, node, "direction", window_width) == 0
+                    local seen: Bool = false
+                    local column = U32 0
+                    local line_width = F32 0
+                    local line_height = F32 0
+                    for _, child in ipairs node.children do
+                        child_measure(owner, child, inner_width, inner_height, window_width, window_height, metrics)
+                        local item = Ref home(owner, child)
+                        if not modal(child) and item.visible then
+                            if node.kind == "grid" then
+                                if column > 0 then line_width = line_width + gap_x end
+                                line_width = line_width + item.measured_width
+                                line_height = maximum(line_height, item.measured_height)
+                                column = column + 1
+                                if column == box.columns then
+                                    content_width = maximum(content_width, line_width)
+                                    if seen then content_height = content_height + gap_y end
+                                    content_height = content_height + line_height
+                                    column = 0
+                                    line_width = 0
+                                    line_height = 0
+                                    seen = true
+                                end
+                            elseif node.kind == "stack" then
+                                content_width = maximum(content_width, item.measured_width)
+                                content_height = maximum(content_height, item.measured_height)
+                            elseif horizontal then
+                                if seen then content_width = content_width + gap_x end
+                                content_width = content_width + item.measured_width
+                                content_height = maximum(content_height, item.measured_height)
+                                seen = true
+                            else
+                                if seen then content_height = content_height + gap_y end
+                                content_height = content_height + item.measured_height
+                                content_width = maximum(content_width, item.measured_width)
+                                seen = true
+                            end
+                        end
+                    end
+                    if node.kind == "grid" and column > 0 then
+                        content_width = maximum(content_width, line_width)
+                        if seen then content_height = content_height + gap_y end
+                        content_height = content_height + line_height
+                    end
+                else
+                    if width_mode == 0 or height_mode == 0 then
+                        local size = metrics(box.caption, box.text_size, box.font)
+                        content_width = size.width
+                        content_height = size.height
+                    end
+                end
+                local width = dimension(requested_width, width_mode, available_width, window_width, content_width + left + right)
+                local height = dimension(requested_height, height_mode, available_height, window_height, content_height + top + bottom)
+                local min_width = dimension(box.min_width, box.min_width_mode, available_width, window_width, 0)
+                local min_height = dimension(box.min_height, box.min_height_mode, available_height, window_height, 0)
+                local max_width = dimension(box.max_width, box.max_width_mode, available_width, window_width, width)
+                local max_height = dimension(box.max_height, box.max_height_mode, available_height, window_height, height)
+                width = maximum(width, min_width)
+                height = maximum(height, min_height)
+                if width > max_width then width = max_width end
+                if height > max_height then height = max_height end
+                box.measured_width = maximum(width, 0)
+                box.measured_height = maximum(height, 0)
+            end
+            arrange[node] = do(owner: Ref T, x: F32, y: F32, width: F32, height: F32,
+                window_width: F32, window_height: F32): Unit
+                local box = Ref home(owner, node)
+                box.x = x
+                box.y = y
+                box.width = width
+                box.height = height
+                if node.container then
+                    local left = get(owner, node, "padding_left", window_width)
+                    local right = get(owner, node, "padding_right", window_width)
+                    local top = get(owner, node, "padding_top", window_width)
+                    local bottom = get(owner, node, "padding_bottom", window_width)
+                    local gap_x = get(owner, node, "gap_x", window_width)
+                    local gap_y = get(owner, node, "gap_y", window_width)
+                    local horizontal = get(owner, node, "direction", window_width) == 0
+                    local items = get(owner, node, "items", window_width)
+                    local justify = get(owner, node, "justify", window_width)
+                    local inner_width = maximum(width - left - right, 0)
+                    local inner_height = maximum(height - top - bottom, 0)
+                    local used = F32 0
+                    local count = F32 0
+                    for _, child in ipairs node.children do
+                        local item = Ref home(owner, child)
+                        if not modal(child) and item.visible then
+                            if horizontal then used = used + item.measured_width
+                            else used = used + item.measured_height end
+                            count = count + 1
+                        end
+                    end
+                    local gap = gap_y
+                    local extent = inner_height
+                    if horizontal then gap = gap_x; extent = inner_width end
+                    if count > 0 then used = used + (count - 1) * gap end
+                    local extra = maximum(extent - used, 0)
+                    local cursor = F32 0
+                    if justify == 2 then cursor = extra / 2
+                    elseif justify == 3 then cursor = extra
+                    elseif justify == 6 and count > 1 then gap = gap + extra / (count - 1)
+                    elseif justify == 7 and count > 0 then gap = gap + extra / count; cursor = extra / count / 2
+                    elseif justify == 8 and count > 0 then gap = gap + extra / (count + 1); cursor = extra / (count + 1) end
+                    local column = U32 0
+                    local line_y = F32 0
+                    local line_height = F32 0
+                    for _, child in ipairs node.children do
+                        local item = Ref home(owner, child)
+                        local child_width = item.measured_width
+                        local child_height = item.measured_height
+                        local child_x = x + left
+                        local child_y = y + top
+                        if modal(child) then
+                            child_x = (window_width - child_width) / 2
+                            child_y = (window_height - child_height) / 2
+                        elseif item.visible then
+                            local alignment = item.align
+                            if alignment == 0 then alignment = items end
+                            if node.kind == "grid" then
+                                local track_width = (inner_width - gap_x * F32(box.columns - 1)) / F32 box.columns
+                                child_x = child_x + F32(column) * (track_width + gap_x)
+                                child_y = child_y + line_y
+                                if alignment == 4 then child_width = track_width
+                                elseif alignment == 2 then child_x = child_x + (track_width - child_width) / 2
+                                elseif alignment == 3 then child_x = child_x + track_width - child_width end
+                                line_height = maximum(line_height, child_height)
+                                column = column + 1
+                                if column == box.columns then
+                                    column = 0
+                                    line_y = line_y + line_height + gap_y
+                                    line_height = 0
+                                end
+                            elseif node.kind == "stack" then
+                                child_x = child_x + item.inset
+                                child_y = child_y + item.inset
+                            elseif horizontal then
+                                child_x = child_x + cursor
+                                if alignment == 4 then child_height = inner_height
+                                elseif alignment == 2 then child_y = child_y + (inner_height - child_height) / 2
+                                elseif alignment == 3 then child_y = child_y + inner_height - child_height end
+                                cursor = cursor + child_width + gap
+                            else
+                                child_y = child_y + cursor
+                                if alignment == 4 then child_width = inner_width
+                                elseif alignment == 2 then child_x = child_x + (inner_width - child_width) / 2
+                                elseif alignment == 3 then child_x = child_x + inner_width - child_width end
+                                cursor = cursor + child_height + gap
+                            end
+                        end
+                        child_arrange(owner, child, child_x, child_y, child_width, child_height, window_width, window_height)
+                    end
+                end
+            end
+        end
+        assert(description.root, "UI layout requires a visual root")
+        prepare(description.root)
+        compiled.measure = measure[description.root]
+        compiled.arrange = arrange[description.root]
+        compiled.layout = do(owner: Ref T, width: F32, height: F32, metrics): Unit
+            compiled.measure(owner, width, height, width, height, metrics)
+            compiled.arrange(owner, 0, 0, width, height, width, height)
+        end
+        compiled.modal = do(owner: Ref T): Bool
+            local active: Bool = false
+            if owner.visible then
+                if description.root.kind == "modal" then active = true end
+                for _, node in ipairs description.nodes do
+                    if node.kind == "part" then
+                        local child = engine(node.T)
+                        active = active or child.modal(home(owner, node))
+                    end
+                end
+            end
+            return active
+        end
+        local function deliver(owner, event, emit)
+            local handler = T.methods.handle
+            assert(handler, description.name .. " needs a handle method for its generated Event")
+            assert(handler.params[2] and handler.params[2].T == T.Event,
+                description.name .. ": handle must take its generated Event")
+            local expected = description.window and ui.Reply or T.Outcome
+            assert(handler.ret == expected, description.name .. ": handle has the wrong outcome type")
+            if expected == Unit then handler(owner, event)
+            else emit(handler(owner, event)) end
+        end
+        compiled.route = do(owner: Ref T, input: Input, emit): Bool
+            local consumed: Bool = false
+            if owner.visible then
+                local scoped = compiled.modal owner
+                for _, node in ipairs description.nodes do
+                    if node.kind == "part" then
+                        local child = engine(node.T)
+                        if not consumed and (not scoped or child.modal(home(owner, node))) then
+                            local ChildOutcome = node.T.Outcome
+                            if ChildOutcome == Unit then
+                                consumed = child.route(home(owner, node), input, do() end)
+                            else
+                                consumed = child.route(home(owner, node), input, do(outcome: ChildOutcome): Unit
+                                    deliver(owner, T.Event[node.name](outcome), emit)
+                                end)
+                            end
+                        end
+                    elseif node.kind == "button" then
+                        local box = Ref home(owner, node)
+                        if not scoped or description.root.kind == "modal" then
+                            local inside = box.visible and box.enabled and input.x >= box.x and input.y >= box.y
+                                and input.x < box.x + box.width and input.y < box.y + box.height
+                            if input.kind == 2 then box.hovered = inside end
+                            if input.kind == 5 then box.pressed = false; box.hovered = false end
+                            if not consumed then
+                                if input.kind == 3 and inside then
+                                    box.pressed = true
+                                    consumed = true
+                                elseif input.kind == 4 then
+                                    local fire = box.pressed and inside
+                                    box.pressed = false
+                                    if fire then
+                                        deliver(owner, T.Event[node.name](), emit)
+                                        consumed = true
+                                    end
+                                elseif input.kind == 0 and inside then
+                                    deliver(owner, T.Event[node.name](), emit)
+                                    consumed = true
+                                end
+                            end
+                        else
+                            box.pressed = false
+                            box.hovered = false
+                        end
+                    end
+                end
+                if description.root.kind == "modal" then consumed = true end
+            end
+            return consumed
+        end
+        local paint_node
+        paint_node = function(node, owner, window_width, painter)
+            if node.kind == "part" then
+                engine(node.T).paint(home(owner, node), window_width, painter)
+            else
+                local Node = node.T
+                local visit = do(box: Ref Node): Unit
+                    if box.visible then
+                        painter(node, box, window_width)
+                        for _, child in ipairs node.children do
+                            if not modal(child) then paint_node(child, owner, window_width, painter) end
+                        end
+                        for _, child in ipairs node.children do
+                            if modal(child) then paint_node(child, owner, window_width, painter) end
+                        end
+                    end
+                end
+                visit(home(owner, node))
+            end
+        end
+        compiled.paint = do(owner: Ref T, window_width: F32, painter): Unit
+            paint_node(description.root, owner, window_width, painter)
+        end
+        compiled.dispatch = do(owner: Ref T, input: Input): ui.Reply
+            local reply = ui.Reply.stay()
+            local emit = do(value: ui.Reply): Unit
+                reply = value
+            end
+            if input.kind == 1 then
+                deliver(owner, T.Event.close_requested(), emit)
+            else
+                compiled.route owner input emit
+            end
+            return reply
+        end
+        return compiled
+    end
+    ui.layout = function(T) return engine(T).layout end
+    ui.dispatch = function(T) return engine(T).dispatch end
+    ui.paint = function(T) return engine(T).paint end
+    ui.property = property
+end
+return attach

@@ -1,0 +1,239 @@
+-- Property declarations are host metaprogramming. This module only builds
+-- native field schemas and initial values; it performs no layout or drawing.
+local theme = require "slc.ui.theme"
+local M = {}
+local function number(name, value, minimum, maximum)
+    assert(type(value) == "number" and value == value and value < math.huge and value > -math.huge,
+        name .. " takes a finite number")
+    assert(not minimum or value >= minimum, name .. " is below its minimum")
+    assert(not maximum or value <= maximum, name .. " is above its maximum")
+    return value
+end
+local function spacing(t, name, value, negative)
+    local minimum = 0
+    if negative then minimum = nil end
+    if type(value) == "number" then return number(name, value, minimum) * t.spacing end
+    return number(name, theme.expect(name, value, "pixels"), minimum)
+end
+local function dimension(t, name, value)
+    if type(value) == "number" or value.kind == "pixels" then return spacing(t, name, value), 1 end
+    if value.kind == "fraction" then return value.value, 2 end
+    local key = theme.expect(name, value, "size")
+    if key == "auto" then return 0, 0 end
+    if key == "full" then return 1, 2 end
+    if key == "screen" then return 1, 3 end
+    assert(t.widths[key], name .. ": no size '" .. key .. "' in widths")
+    return t.widths[key], 1
+end
+function M.defaults(node)
+    node.values, node.types, node.variants = {}, {}, {}
+    local function add(name, T, value)
+        node.types[name] = T
+        node.values[name] = type(value) == "table" and value.T == T and value or T(value)
+    end
+    for _, name in ipairs { "x", "y", "width", "height", "measured_width", "measured_height",
+        "padding_top", "padding_right", "padding_bottom", "padding_left",
+        "margin_top", "margin_right", "margin_bottom", "margin_left",
+        "requested_width", "requested_height", "min_width", "min_height", "max_width", "max_height",
+        "radius", "shadow", "border_width", "ring_width", "inset", "basis", "grow", "tracking" } do add(name, F32, 0) end
+    for _, name in ipairs { "width_mode", "height_mode", "min_width_mode", "min_height_mode", "max_width_mode", "max_height_mode",
+        "basis_mode", "align", "layer", "col_start" } do add(name, U32, 0) end
+    for _, name in ipairs { "margin_top_auto", "margin_right_auto", "margin_bottom_auto", "margin_left_auto", "clip", "hovered", "pressed", "focused" } do add(name, Bool, false) end
+    add("visible", Bool, node.kind ~= "modal")
+    add("enabled", Bool, true)
+    add("opacity", F32, 100)
+    add("shrink", F32, 1)
+    add("span", U32, 1); add("row_span", U32, 1)
+    add("background", theme.Color, theme.colors.transparent)
+    add("border_color", theme.Color, theme.colors.black)
+    add("ring_color", theme.Color, theme.colors.blue_500)
+    add("cursor", U32, 1)
+    if node.container then
+        add("gap_x", F32, 0); add("gap_y", F32, 0)
+        add("items", U32, 1); add("justify", U32, 1)
+        add("wrap", Bool, false)
+        add("direction", U32, node.kind == "row" and 0 or 1)
+        add("columns", U32, 1); add("rows", U32, 1)
+    else
+        add("caption", Chars(256), "")
+        add("text_size", F32, 16); add("text_color", theme.Color, theme.colors.black)
+        add("weight", U32, 400); add("font", U32, 1)
+        add("line_height", F32, 1.5); add("text_align", U32, 1)
+        add("truncate", Bool, false)
+        if node.kind == "number" then add("value", U32, 0) end
+    end
+end
+function M.vocabulary(node, t, output, predicates)
+    output = output or node.values
+    predicates = predicates or {}
+    local v = {}
+    for name, token in pairs(t.tokens) do v[name] = token end
+    local function put(name, value)
+        assert(node.types[name], "property not available: " .. name)
+        local T = node.types[name]
+        output[name] = type(value) == "table" and value.T == T and value or T(value)
+    end
+    local function instruction(name, body)
+        assert(v[name] == nil, "theme token '" .. name .. "' collides with an instruction in " .. node.kind)
+        v[name] = body
+    end
+    local sides = { p = {"top","right","bottom","left"}, px = {"left","right"}, py = {"top","bottom"},
+        pt = {"top"}, pr = {"right"}, pb = {"bottom"}, pl = {"left"} }
+    for prefix, selected in pairs(sides) do
+        instruction(prefix, function(value)
+            local amount = spacing(t, prefix, value)
+            for _, side in ipairs(selected) do put("padding_" .. side, amount) end
+        end)
+        local margin = "m" .. prefix:sub(2)
+        instruction(margin, function(value)
+            local auto = type(value) == "table" and value.kind == "size" and value.name == "auto"
+            local amount = auto and 0 or spacing(t, margin, value, true)
+            for _, side in ipairs(selected) do
+                put("margin_" .. side, amount); put("margin_" .. side .. "_auto", auto)
+            end
+        end)
+    end
+    for name, property in pairs { w = "requested_width", h = "requested_height", min_w = "min_width", min_h = "min_height", max_w = "max_width", max_h = "max_height", basis = "basis" } do
+        local mode = property:gsub("requested_", "") .. "_mode"
+        instruction(name, function(value)
+            if name == "basis" then M.placement(node, name, { row = true, column = true, flex = true }) end
+            local amount, kind = dimension(t, name, value)
+            put(property, amount); put(mode, kind)
+        end)
+    end
+    instruction("square", function(value) v.w(value); v.h(value) end)
+    for name, property in pairs { bg = "background", border_color = "border_color", ring_color = "ring_color" } do
+        instruction(name, function(value) put(property, theme.expect(name, value, "colour")) end)
+    end
+    for name, property in pairs { visible = "visible", enabled = "enabled" } do
+        instruction(name, function(value) put(property, theme.expect(name, value, "switch")) end)
+    end
+    for name, property in pairs { border = "border_width", ring = "ring_width", opacity = "opacity", layer = "layer", grow = "grow", shrink = "shrink", span = "span", row_span = "row_span", col_start = "col_start" } do
+        instruction(name, function(value)
+            if name == "grow" or name == "shrink" then M.placement(node, name, { row = true, column = true, flex = true }) end
+            if name == "span" or name == "row_span" or name == "col_start" then M.placement(node, name, { grid = true }) end
+            if name == "layer" then M.placement(node, name, { stack = true }) end
+            put(property, number(name, value, 0, name == "opacity" and 100 or nil))
+        end)
+    end
+    instruction("inset", function(value)
+        M.placement(node, "inset", { stack = true }); put("inset", spacing(t, "inset", value))
+    end)
+    instruction("align", function(value) put("align", theme.expect("align", value, "alignment")) end)
+    instruction("cursor", function(value) put("cursor", theme.expect("cursor", value, "cursor")) end)
+    local function scale(name, property, values)
+        instruction(name, function(value)
+            local amount
+            if type(value) == "table" and value.kind == "pixels" then amount = value.value
+            else
+                local key = theme.expect(name, value, "size")
+                amount = values[key]
+                assert(amount ~= nil, name .. ": no size '" .. key .. "' in its scale")
+            end
+            put(property, amount)
+        end)
+    end
+    scale("rounded", "radius", t.radii); scale("shadow", "shadow", t.shadows)
+    if node.container then
+        instruction("clip", function(value) put("clip", theme.expect("clip", value, "switch")) end)
+        if node.kind ~= "stack" then
+            instruction("gap", function(value)
+                local amount = spacing(t, "gap", value); put("gap_x", amount); put("gap_y", amount)
+            end)
+            instruction("gap_x", function(value) put("gap_x", spacing(t, "gap_x", value)) end)
+            instruction("gap_y", function(value) put("gap_y", spacing(t, "gap_y", value)) end)
+            for _, name in ipairs { "items", "justify" } do
+                instruction(name, function(value) put(name, theme.expect(name, value, "alignment")) end)
+            end
+        end
+        if node.kind == "row" or node.kind == "flex" then
+            instruction("wrap", function(value) put("wrap", theme.expect("wrap", value, "switch")) end)
+        end
+        if node.kind == "flex" then instruction("direction", function(value) put("direction", theme.expect("direction", value, "direction")) end) end
+        if node.kind == "grid" then
+            for name, field in pairs { cols = "columns", rows = "rows" } do
+                instruction(name, function(...)
+                    local tracks = { ... }
+                    if #tracks == 1 and type(tracks[1]) == "number" then
+                        local count = number(name, tracks[1], 1)
+                        assert(count == math.floor(count), name .. " takes a positive integer")
+                        put(field, count)
+                    else
+                        assert(#tracks > 0, name .. " needs tracks")
+                        put(field, #tracks)
+                        for i, track in ipairs(tracks) do
+                            local mode, amount
+                            if track.kind == "track" then mode, amount = 4, track.value
+                            else amount, mode = dimension(t, name, track) end
+                            local key = field .. "_" .. i
+                            node.types[key] = F32; node.types[key .. "_mode"] = U32
+                            put(key, amount); put(key .. "_mode", mode)
+                        end
+                    end
+                end)
+            end
+        end
+    else
+        instruction("caption", function(value)
+            assert(type(value) == "string", "caption takes a string")
+            assert(#value <= 256, "caption exceeds 256 UTF-8 bytes")
+            put("caption", value)
+        end)
+        instruction("text_color", function(value) put("text_color", theme.expect("text_color", value, "colour")) end)
+        scale("text_size", "text_size", t.text_sizes)
+        scale("line_height", "line_height", t.line_heights)
+        scale("tracking", "tracking", t.tracking)
+        for name, kind in pairs { weight = "weight", font = "font", text_align = "alignment", truncate = "switch" } do
+            instruction(name, function(value) put(name, theme.expect(name, value, kind)) end)
+        end
+        if node.kind == "number" then
+            instruction("value", function(T)
+                assert(type(T) == "table" and T.kind == "int", "value takes an integer type followed by its initial value: value U32 0")
+                return function(initial)
+                    local value = T(initial)
+                    assert(__S.static(value), "value requires a known initial value")
+                    node.types.value = T; output.value = value
+                end
+            end)
+        end
+    end
+    instruction("use", function(style)
+        assert(type(style) == "table" and style.ui_style, "use takes a ui.style block")
+        style.body(v)
+    end)
+    local function variant(name, predicate)
+        instruction(name, function(body)
+            local conditions = {}
+            for k, value in pairs(predicates) do conditions[k] = value end
+            conditions[name] = predicate
+            local override = { values = {}, predicates = conditions }
+            node.variants[#node.variants + 1] = override
+            local vocabulary = M.vocabulary(node, t, override.values, conditions)
+            M.invoke(body, vocabulary, node.kind .. "/" .. name)
+        end)
+    end
+    for _, name in ipairs { "hover", "active", "focus", "disabled" } do variant(name, true) end
+    for name, width in pairs(t.breakpoints) do variant("from_" .. name, width) end
+    v.pixels, v.fr = theme.pixels, theme.fr
+    return v
+end
+function M.placement(node, instruction, allowed)
+    local parent = node.parent and node.parent.kind or "component root"
+    assert(allowed[parent], instruction .. " on " .. node.kind .. " is not valid in " .. parent)
+end
+-- Decorate only unresolved names after normal lexical lookup has failed. A
+-- metatable __index would intercept valid outer names; deliberately do not use it.
+function M.invoke(body, vocabulary, scope)
+    local ok, result = pcall(body, vocabulary)
+    if ok then return result end
+    local message = tostring(result)
+    local name = message:match("'([^']+)' is not defined")
+    if name then
+        local names = {}
+        for key, value in pairs(vocabulary) do if type(value) == "function" then names[#names + 1] = key end end
+        table.sort(names)
+        message = message .. "\nUI vocabulary in " .. scope .. "; available instructions: " .. table.concat(names, ", ")
+    end
+    error(message, 0)
+end
+return M
