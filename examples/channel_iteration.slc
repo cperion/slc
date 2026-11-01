@@ -6,9 +6,9 @@ local channel_nested_each = do(): U32
         local outer = channel(U32, 1)
         local inner = channel(U32, 1)
         outer:send 7
-        outer:close()
+        outer:close
         inner:send 11
-        inner:close()
+        inner:close
         outer:each do(a)
         inner:each do(b)
             total = total + a * b

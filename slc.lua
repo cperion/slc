@@ -147,7 +147,7 @@ function slc.translate(src, path)
         local at = tostring(err):find(path .. ':', 1, true)
         error(at and err:sub(at) or err, 0)
     end
-    return code
+    return require('slc.syntax').statement_calls(code, path)
 end
 
 -- The runtime is SLC, so it is built with the program: its words are made lazily,

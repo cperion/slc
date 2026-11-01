@@ -174,7 +174,7 @@ local map_task_each = do(n: U32): U64
             end
             m:put(0, 1)
             out:send m[0]
-            out:close()
+            out:close
         end
         out:each do(v) total = total + v end
     end

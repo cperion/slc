@@ -1668,6 +1668,9 @@ function G.prepare(mod)
             end
         end)
     end
+    -- Complete call bodies are available here, including mutually recursive
+    -- functions. Check task effects before cleanup loses address provenance.
+    require('slc.task_globals').check(fns, walk_block)
     -- cleanup first: it can only remove uses
     for _, fn in ipairs(fns) do G.cleanup(fn) end
     -- Native representation hooks cache per module, not per source type.

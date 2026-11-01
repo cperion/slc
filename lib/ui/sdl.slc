@@ -6,35 +6,42 @@ local format = require "slc.format"
 local header, font_header = "<SDL3/SDL.h>", "<SDL3_ttf/SDL_ttf.h>"
 local Font = opaque "TTF_Font"
 local Surface, Texture = opaque "SDL_Surface", opaque "SDL_Texture"
-local NativeColor = cstruct("SDL_Color", header, { {"r", U8}, {"g", U8}, {"b", U8}, {"a", U8} })
+local NativeColor = cstruct("SDL_Color", header, { { "r", U8 }, { "g", U8 }, { "b", U8 },
+        { "a", U8 } })
 -- Motion and button events have identical x/y offsets, verified by SDL's
 -- declarations. The button byte is read only on button events.
 local Event = cstruct("SDL_Event", header, {
-    {"kind", U32, "button.type"}, {"timestamp", U64, "button.timestamp"},
-    {"window_id", U32, "button.windowID"}, {"button", U8, "button.button"},
-    {"x", F32, "button.x"}, {"y", F32, "button.y"},
-})
-local poll = extern("SDL_PollEvent", { Ptr Event }, Bool, { header = header })
-local convert = extern("SDL_ConvertEventToRenderCoordinates", { Ptr sdl.Renderer, Ptr Event }, Bool, { header = header })
+        { "kind", U32, "button.type" }, { "timestamp", U64, "button.timestamp" },
+        { "window_id", U32, "button.windowID" }, { "button", U8, "button.button" },
+        { "x", F32, "button.x" }, { "y", F32, "button.y" },
+    })
+local poll = extern("SDL_PollEvent", { Ptr Event }, Bool, { .header })
+local convert = extern("SDL_ConvertEventToRenderCoordinates",
+    { Ptr sdl.Renderer, Ptr Event }, Bool, { .header })
 local motion = cconst("SDL_EVENT_MOUSE_MOTION", U32, header)
 local down = cconst("SDL_EVENT_MOUSE_BUTTON_DOWN", U32, header)
 local up = cconst("SDL_EVENT_MOUSE_BUTTON_UP", U32, header)
 local focus_lost = cconst("SDL_EVENT_WINDOW_FOCUS_LOST", U32, header)
 local mouse_left = cconst("SDL_BUTTON_LEFT", U8, header)
-local blend = extern("SDL_SetRenderDrawBlendMode", { Ptr sdl.Renderer, U32 }, Bool, { header = header })
+local blend = extern("SDL_SetRenderDrawBlendMode", { Ptr sdl.Renderer, U32 }, Bool, { .header })
 local blend_alpha = cconst("SDL_BLENDMODE_BLEND", U32, header)
 local init_font = extern("TTF_Init", {}, Bool, { header = font_header })
 local quit_font = extern("TTF_Quit", {}, Unit, { header = font_header })
 local open_font = extern("TTF_OpenFont", { CString, F32 }, Ptr Font, { header = font_header })
 local close_font = extern("TTF_CloseFont", { Ptr Font }, Unit, { header = font_header })
 local set_font_size = extern("TTF_SetFontSize", { Ptr Font, F32 }, Bool, { header = font_header })
-local text_size = extern("TTF_GetStringSize", { Ptr Font, CString, U64, Ptr I32, Ptr I32 }, Bool, { header = font_header })
-local render_text = extern("TTF_RenderText_Blended", { Ptr Font, CString, U64, NativeColor }, Ptr Surface, { header = font_header })
-local create_texture = extern("SDL_CreateTextureFromSurface", { Ptr sdl.Renderer, Ptr Surface }, Ptr Texture, { header = header })
-local destroy_surface = extern("SDL_DestroySurface", { Ptr Surface }, Unit, { header = header })
-local destroy_texture = extern("SDL_DestroyTexture", { Ptr Texture }, Unit, { header = header })
-local texture_size = extern("SDL_GetTextureSize", { Ptr Texture, Ptr F32, Ptr F32 }, Bool, { header = header })
-local render_texture = extern("SDL_RenderTexture", { Ptr sdl.Renderer, Ptr Texture, Ptr sdl.Rect, Ptr sdl.Rect }, Bool, { header = header })
+local text_size = extern("TTF_GetStringSize",
+    { Ptr Font, CString, U64, Ptr I32, Ptr I32 }, Bool, { header = font_header })
+local render_text = extern("TTF_RenderText_Blended",
+    { Ptr Font, CString, U64, NativeColor }, Ptr Surface, { header = font_header })
+local create_texture = extern("SDL_CreateTextureFromSurface",
+    { Ptr sdl.Renderer, Ptr Surface }, Ptr Texture, { .header })
+local destroy_surface = extern("SDL_DestroySurface", { Ptr Surface }, Unit, { .header })
+local destroy_texture = extern("SDL_DestroyTexture", { Ptr Texture }, Unit, { .header })
+local texture_size = extern("SDL_GetTextureSize",
+    { Ptr Texture, Ptr F32, Ptr F32 }, Bool, { .header })
+local render_texture = extern("SDL_RenderTexture",
+    { Ptr sdl.Renderer, Ptr Texture, Ptr sdl.Rect, Ptr sdl.Rect }, Bool, { .header })
 local Operation = { font_init = 20, font_open = 21, font_size = 22, measure = 23,
     text = 24, texture = 25, texture_size = 26, texture_draw = 27, blend = 28, coordinates = 29 }
 local Painter = struct { renderer: Ptr sdl.Renderer, font: Ptr Font, failure: sdl.Failure }
@@ -43,18 +50,21 @@ function Painter:checked(ok: Bool, operation: U32): Unit
 end
 function Painter:measure(text: Str, size: F32): ui.Size
     local width, height = I32 0, I32 0
-    if self.failure.operation == 0 then self:checked(set_font_size(self.font, size), Operation.font_size) end
+    if self.failure.operation == 0 then self:checked(set_font_size(self.font, size),
+            Operation.font_size) end
     if self.failure.operation == 0 and text.length > 0 then
         text:cstring() do(c: CString): Unit
-            self:checked(text_size(self.font, c, U64 text.length, Ptr width, Ptr height), Operation.measure)
+            self:checked(text_size(self.font, c, U64 text.length, Ptr width, Ptr height),
+                Operation.measure)
         end
     end
     return ui.Size { width = F32 width, height = F32 height }
 end
 function Painter:rectangle(x: F32, y: F32, width: F32, height: F32, color: ui.Color, opacity: F32): Unit
     if self.failure.operation == 0 and width > 0 and height > 0 and color.a > 0 then
-        local alpha = U8(F32(color.a) * opacity / 100)
-        self:checked(sdl.color(self.renderer, color.r, color.g, color.b, alpha), sdl.Operation.color)
+        local alpha = U8(F32 color.a * opacity / 100)
+        self:checked(sdl.color(self.renderer, color.r, color.g, color.b, alpha),
+            sdl.Operation.color)
         if self.failure.operation == 0 then
             local rect = sdl.Rect { .x, .y, w = width, h = height }
             self:checked(sdl.fill_rect(self.renderer, Ptr rect), sdl.Operation.fill_rect)
@@ -65,7 +75,8 @@ function Painter:text(text: Str, x: F32, y: F32, size: F32, color: ui.Color, opa
     if text.length > 0 and self.failure.operation == 0 then
         self:checked(set_font_size(self.font, size), Operation.font_size)
         if self.failure.operation == 0 then
-            local native_color = NativeColor { r = color.r, g = color.g, b = color.b, a = U8(F32(color.a) * opacity / 100) }
+            local native_color = NativeColor { r = color.r,
+                g = color.g, b = color.b, a = U8(F32 color.a * opacity / 100) }
             local surface = text:cstring() do(c: CString): Ptr Surface
                 return render_text(self.font, c, U64 text.length, native_color)
             end
@@ -77,10 +88,12 @@ function Painter:text(text: Str, x: F32, y: F32, size: F32, color: ui.Color, opa
                 destroy_surface surface
                 if texture ~= null Texture then
                     local width, height = F32 0, F32 0
-                    self:checked(texture_size(texture, Ptr width, Ptr height), Operation.texture_size)
+                    self:checked(texture_size(texture, Ptr width, Ptr height),
+                        Operation.texture_size)
                     if self.failure.operation == 0 then
                         local rect = sdl.Rect { .x, .y, w = width, h = height }
-                        self:checked(render_texture(self.renderer, texture, null sdl.Rect, Ptr rect), Operation.texture_draw)
+                        self:checked(render_texture(self.renderer, texture, null sdl.Rect, Ptr rect),
+                            Operation.texture_draw)
                     end
                     destroy_texture texture
                 end
@@ -92,15 +105,16 @@ local run = function(T, config)
     assert(config and config.font, "SDL UI requires an explicit font path")
     local description = ui.description T
     assert(description.window, "ui.run requires a window component")
-    local layout, dispatch, paint = ui.layout(T), ui.dispatch(T), ui.paint(T)
-    local initial = __S.host(description.initial)
+    local layout, dispatch, paint = ui.layout T, ui.dispatch T, ui.paint T
+    local initial = __S.host description.initial
     local window_config = { title = config.title or description.name,
-        width = config.width or initial.requested_width, height = config.height or initial.requested_height,
+        width = config.width or initial.requested_width,
+        height = config.height or initial.requested_height,
         resizable = config.resizable == nil or config.resizable }
     -- Capability validation is explicit: never silently replace a requested face.
-    for _, node in ipairs(description.nodes) do
+    for _, node in ipairs description.nodes do
         if not node.container and node.kind ~= "part" then
-            assert(__S.host(node.values.font) == 1, "this SDL font capability supplies sans only")
+            assert(__S.host node.values.font == 1, "this SDL font capability supplies sans only")
         end
     end
     return do(): sdl.Result
@@ -111,19 +125,20 @@ local run = function(T, config)
                     local font = open_font(config.font, 16)
                     if font == null Font then
                         local failure = sdl.failure Operation.font_open
-                        quit_font()
+                        quit_font
                         return sdl.Result.failed failure
                     end
                     local painter = Painter { .renderer, .font, failure = sdl.no_failure }
                     painter:checked(blend(renderer, blend_alpha), Operation.blend)
                     local app = ui.new T
                     local id = sdl.window_id window
-                    local event = Event { kind = 0, timestamp = 0, window_id = 0, button = 0, x = 0, y = 0 }
+                    local event = Event { kind = 0,
+                        timestamp = 0, window_id = 0, button = 0, x = 0, y = 0 }
                     local stopped: Bool = false
                     local frames = U32 0
                     local width, height = I32 0, I32 0
                     local metrics = do(caption: Ref Chars(256), size: F32, face: U32): ui.Size
-                        local text: Chars(256) = caption
+                        local text: Chars 256 = caption
                         return painter:measure(text:str(), size)
                     end
                     local draw = function(node, box, window_width)
@@ -136,7 +151,7 @@ local run = function(T, config)
                             local x = box.x + ui.property(node, "padding_left")(box, window_width)
                             local y = box.y + ui.property(node, "padding_top")(box, window_width)
                             if node.kind == "number" then
-                                local text = format.u64(U64(box.value))
+                                local text = format.u64(U64 box.value)
                                 painter:text(text:str(), x, y, size, color, opacity)
                             else
                                 painter:text(box.caption:str(), x, y, size, color, opacity)
@@ -144,7 +159,8 @@ local run = function(T, config)
                         end
                     end
                     while not stopped and painter.failure.operation == 0 do
-                        painter:checked(sdl.output_size(renderer, Ptr width, Ptr height), sdl.Operation.size)
+                        painter:checked(sdl.output_size(renderer, Ptr width, Ptr height),
+                            sdl.Operation.size)
                         if painter.failure.operation == 0 then
                             layout(app, F32 width, F32 height, metrics)
                             while not stopped and painter.failure.operation == 0 and poll(Ptr event) do
@@ -154,7 +170,8 @@ local run = function(T, config)
                                     if event.kind == sdl.close_event then input.kind = 1
                                     elseif event.kind == focus_lost then input.kind = 5
                                     elseif event.kind == motion or event.kind == down or event.kind == up then
-                                        painter:checked(convert(renderer, Ptr event), Operation.coordinates)
+                                        painter:checked(convert(renderer, Ptr event),
+                                            Operation.coordinates)
                                         input.x = event.x
                                         input.y = event.y
                                         if event.kind == motion then input.kind = 2
@@ -170,10 +187,13 @@ local run = function(T, config)
                                 end
                             end
                             if not stopped and painter.failure.operation == 0 then
-                                painter:checked(sdl.color(renderer, 245, 245, 245, 255), sdl.Operation.color)
-                                if painter.failure.operation == 0 then painter:checked(sdl.clear renderer, sdl.Operation.clear) end
+                                painter:checked(sdl.color(renderer, 245, 245, 245, 255),
+                                    sdl.Operation.color)
+                                if painter.failure.operation == 0 then painter:checked(sdl.clear renderer,
+                                        sdl.Operation.clear) end
                                 if painter.failure.operation == 0 then paint(app, F32 width, draw) end
-                                if painter.failure.operation == 0 then painter:checked(sdl.present renderer, sdl.Operation.present) end
+                                if painter.failure.operation == 0 then painter:checked(sdl.present renderer,
+                                        sdl.Operation.present) end
                                 frames = frames + 1
                                 if config.max_frames then
                                     if frames >= config.max_frames then stopped = true end
@@ -183,7 +203,7 @@ local run = function(T, config)
                         end
                     end
                     close_font font
-                    quit_font()
+                    quit_font
                     if painter.failure.operation ~= 0 then return sdl.Result.failed painter.failure end
                     return sdl.Result.done()
                 end

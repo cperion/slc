@@ -101,7 +101,7 @@ end
 local late_address = do(n: U32): U32
     local p = Panel { gap = 12, padding = 24, count = 0 }
     while p.count < n do p.count = p.count + 1 end
-    return call inspect (Ref p)
+    return call inspect(Ref p)
 end
 export late_address
 
@@ -123,7 +123,7 @@ export hidden_record
 local native_mutation = do(n: U32): U32
     local p = Panel { gap = 12, padding = 24, count = 0 }
     while p.count < n do
-        call mutate (Ref p)
+        call mutate(Ref p)
         p.count = p.count + 1
     end
     return p.gap + p.count

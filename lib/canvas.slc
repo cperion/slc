@@ -69,9 +69,9 @@ function View:interact(handlers): Result
     while not self.stopped do
         while not self.stopped and sdl.poll(Ptr event) do
             if event.kind == sdl.quit_event then
-                self:stop()
+                self:stop
             elseif event.kind == sdl.close_event then
-                if event.window_id == self.window_id then self:stop() end
+                if event.window_id == self.window_id then self:stop end
             elseif event.kind == sdl.key_down or event.kind == sdl.key_up then
                 if event.window_id == self.window_id then
                     if handlers.key then

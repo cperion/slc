@@ -70,6 +70,19 @@ assert(dots:root():sexpr():find('spread_expression', 1, true), 'prefix expansion
 local newline_tree = parse('local x = f a\nx = x + 1\n', 'newline application boundary')
 assert(newline_tree:root():named_child_count() == 2, 'name application crossed newline')
 assert(newline_tree:root():named_child(1):type() == 'assignment_statement')
+local bare_source = 'refresh\nscreen.refresh\nscreen:refresh\nlocal action = refresh\nlocal result = refresh()\n'
+local bare_tree = parse(bare_source, 'bare calls remain statement-only')
+assert(bare_tree:root():named_child_count() == 5, 'bare calls crossed a newline')
+assert(bare_tree:root():named_child(2):named_child(0):type() == 'bare_method_call')
+assert(not bare_tree:root():named_child(3):sexpr():find('call', 1, true), 'callable initializer became a call')
+local bare_captures = {}
+for id, node in query:iter_captures(bare_tree:root(), bare_source) do
+  local row = node:range()
+  bare_captures[row .. ':' .. query.captures[id]] = true
+end
+assert(bare_captures['0:function.call'] and bare_captures['1:function.call']
+  and bare_captures['2:function.method.call'], 'bare calls lack call highlighting')
+assert(not bare_captures['3:function.call'], 'callable value highlighted as invocation')
 parse([[
 local run = do(): Unit
     if flag then

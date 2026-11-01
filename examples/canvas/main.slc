@@ -11,7 +11,7 @@ local main = do(): I32
         return interact {
             key = do(..)
                 if pressed then
-                    if code == canvas.Key.escape then stop() end
+                    if code == canvas.Key.escape then stop end
                     if code == canvas.Key.left then x = x - 10 end
                     if code == canvas.Key.right then x = x + 10 end
                     if code == canvas.Key.up then y = y - 10 end

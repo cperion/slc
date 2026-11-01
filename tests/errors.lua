@@ -1,5 +1,21 @@
 -- each case: a program that must not compile, and part of the diagnostic
 return {
+    { name = 'a non-callable bare statement is not a no-op', expect = 'not callable',
+      src = [[local f = do(n: U32): U32
+    n
+    return n
+end
+export f
+]] },
+    { name = 'bare methods do not invoke in expressions', expect = 'needs arguments',
+      src = [[local Counter = struct { count: U32 }
+function Counter:tick(): Unit self.count = self.count + 1 end
+local f = do(c: Ref Counter): U32
+    local action = c:tick
+    return c.count
+end
+export f
+]] },
     { name = 'tail call rejects a dynamic compile-time argument', expect = 'value is not known at compile time',
       src = [[local static_value = do(value): U32 = value
 local f = do(n: U32): U32

@@ -69,7 +69,7 @@ local path, wanted = arg and arg[1], arg and arg[2]
 if path and wanted and native then
     local f = assert(io.open(path, 'rb'))
     local text = f:read '*a'
-    f:close()
+    f:close
     local header, first = text:match '^([^\n]*)\n([^\n]*)'
     local index
     local k = 0

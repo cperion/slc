@@ -42,8 +42,9 @@ local Confirmation = ui.component "Confirmation" do(..)
     end
 end
 function Confirmation:handle(event: Confirmation.Event): Confirmation.Outcome
-    self:close()
-    return event { reset_button() = Confirmation.Outcome.reset(), keep_button() = Confirmation.Outcome.keep() }
+    self:close
+    return event { reset_button() = Confirmation.Outcome.reset(),
+        keep_button() = Confirmation.Outcome.keep() }
 end
 local Counter = ui.component "Counter" do(..)
     column do(..)
@@ -83,10 +84,10 @@ function Counter:reset(): Unit
 end
 function Counter:handle(event: Counter.Event): Unit
     event {
-        increment_button = do() self:increment() end,
-        reset_button = do() self.confirm:open() end,
+        increment_button = do() self:increment end,
+        reset_button = do() self.confirm:open end,
         confirm = do(decision)
-            decision { reset = do() self:reset() end, keep = do() end }
+            decision { reset = do() self:reset end, keep = do() end }
         end,
     }
 end
@@ -98,4 +99,4 @@ end
 function App:handle(event: App.Event): ui.Reply
     return event { close_requested() = ui.Reply.quit() }
 end
-return { App = App, ui = ui }
+return { .App, .ui }

@@ -1,0 +1,58 @@
+-- A boundary applies to the resolved callable, not to an unresolved spelling.
+local Counter = struct { total: U32 }
+function Counter:add(n: U32): U32
+    self.total = self.total + n
+    return self.total
+end
+function Counter:scaled(n: U32, scale: U32): U32
+    self.total = self.total + n * scale
+    return self.total
+end
+local update = do(c: Ref Counter, n: U32): U32
+    c.total = c.total + n
+    return c.total
+end
+local add = do(n: U32): U32 = n + 1000
+local activity = do(c: Ref Counter, body): U32 = body c
+
+local opened_lexical = do(n: U32): U32
+    local c = Counter { total = 1 }
+    return activity(Ref c) do(state..)
+        call update(state, n)
+        return call update state n
+    end
+end
+export opened_lexical
+
+local opened_home = do(n: U32): U32
+    local c = Counter { total = 1 }
+    return activity(Ref c) do(..)
+        return call update(.., n)
+    end
+end
+export opened_home
+
+local opened_member = do(n: U32): U32
+    local c = Counter { total = 1 }
+    return activity(Ref c) do(..)
+        call add n
+        return call scaled n 3
+    end
+end
+export opened_member
+
+local opened_local = do(n: U32): U32
+    local c = Counter { total = 1 }
+    return activity(Ref c) do(..)
+        local add = do(x: U32): U32 = x * 7
+        return call add n
+    end
+end
+export opened_local
+
+local opened_vocabulary = do(n: U32): U32
+    local vocabulary = { update = do(x: U32, y: U32): U32 = x + y * 5 }
+    local vocabulary..
+    return call update n 2
+end
+export opened_vocabulary

@@ -192,7 +192,7 @@ local zero_copy = do(chunks: U32): U32
                             buffers:release s
                         end
                     end
-                    filled:close()
+                    filled:close
                     io.close(p.reader) { done = do() end, failed = do(e) end }
                 end
                 filled:each do(s)

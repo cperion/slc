@@ -319,7 +319,7 @@ local type_word = do(document: Ref Document, n: U32): U32
     transaction document do(..)
         insert n
         local before = cursor
-        move_left()
+        move_left
         moved = before - cursor
     end
     return moved
@@ -408,8 +408,6 @@ end
 ```c
 bool type_capped(Document *document, uint32_t n, uint32_t cap) {
     Draft draft;
-    Outcome r;
-    bool r2;
     draft.length = document->length;
     draft.cursor = document->cursor;
     draft.edits = document->edits;
@@ -417,26 +415,25 @@ bool type_capped(Document *document, uint32_t n, uint32_t cap) {
     draft.cursor = draft.cursor + n;
     draft.edits = draft.edits + 1u;
     if (draft.length > cap) {
-        r = (Outcome){ .tag = Outcome_abort, .as.abort = draft.length };
         goto L1;
     }
-    r = (Outcome){ .tag = Outcome_commit };
+    bool r = true;
+    goto L2;
 L1:;
-    if (r.tag == Outcome_abort) {
-        r2 = false;
-    } else {
-        r2 = true;
-    }
-    if (r2) {
+    r = false;
+L2:;
+    if (r) {
         document->length = draft.length;
         document->cursor = draft.cursor;
         document->edits = draft.edits;
     }
-    return r2;
+    return r;
 }
 ```
 
 The rule "the activity owns completion" holds when things go wrong too: the body says what happened, and the activity decides what that means for the entity. The outcome type is part of the activity's contract, so give it outcome names (`commit`, `abort`, `retry`), not flags.
+
+Match the body's outcome at the call when completion needs it immediately. Known-tag returns can jump directly to their handlers, without a temporary tagged sum. This preserves effects and payload joins; it does not let a nested call steal the body's completion or remove an explicit native boundary. Keep an outcome in a local when the program genuinely needs to carry it elsewhere.
 
 ### 6.7 Stack activities instead of adding options
 
@@ -445,7 +442,7 @@ Each policy is its own activity, and the order of the spine is the order of comp
 ```lua
 -- a policy that completes after the work inside it
 local clamped = do(document: Ref Document, max: U32, body): Unit
-    body()
+    body
     if document.length > max then
         document.length = max
         document.cursor = max
@@ -687,7 +684,7 @@ local line_count = do(workers, path: CString): U32
                             filled:send slot
                         end
                     end
-                    filled:close()
+                    filled:close
                 end
                 -- the workers run in a scope of their own: when it ends, counts can close
                 spawn do
@@ -701,7 +698,7 @@ local line_count = do(workers, path: CString): U32
                             end
                         end
                     end
-                    counts:close()
+                    counts:close
                 end
                 counts:each do(lines)
                     total = total + lines
@@ -802,29 +799,26 @@ The skeleton is done when it compiles, its asserts pass, and every element of th
 
 Put cost requirements on the inner loops, codecs and engines that matter, then **read the C**: `luajit slc.lua program.slc` prints it. Know what stays:
 
-* **A check nothing proves stays.** `first_or` keeps one, because the fact `i < xs.length` does not travel through the `Found` sum that carried `i` out:
+* **A check nothing proves stays.** `first_or` keeps one, because the fact `i < xs.length` does not travel from the producer's loop into the handler's joined payload. The immediate match removes the tagged sum, not this bounds check:
 
 ```c
 uint32_t first_or(U32Slice xs, uint32_t fallback) {
-    Found r;
+    uint32_t payload;
     uint32_t i = 0u;
     for (;;) {
         if (i >= xs.len) break;
         if (xs.ptr[i] != 0u) {
-            r = (Found){ .tag = Found_found, .as.found = i };
+            payload = i;
             goto L1;
         }
         i = i + 1u;
     }
-    r = (Found){ .tag = Found_missing };
-L1:;
-    if (r.tag == Found_found) {
-        if ((uint64_t)r.as.found >= (uint64_t)xs.len) {
-            slc_trap("slice index out of range");
-        }
-        return xs.ptr[r.as.found];
-    }
     return fallback;
+L1:;
+    if ((uint64_t)payload >= (uint64_t)xs.len) {
+        slc_trap("slice index out of range");
+    }
+    return xs.ptr[payload];
 }
 ```
 
@@ -834,6 +828,10 @@ L1:;
 * **Allocation is in the runtime, and only there.** Task frames, channels and pools are allocated by the runtime. Stores and Grow arrays live on data stacks. Plain words allocate nothing.
 
 ### 11.2 Code size and compile time
+
+The numerical reports and timings in this section are historical examples from
+before the boundary-free library/runtime reset. They explain the tools, not the
+current baseline. Use fresh measurements before making a new tuning decision.
 
 Evaluation in place is what makes a program small when little is left to do. It makes the C large when a large word is applied at many sites, because each site gets its own copy, and the C compiler then spends its time on all of them. `call` puts a function boundary at one site, and `slc size` finds the sites worth one. The language rule is in [the syntax](syntax.md#39-call-a-function-boundary-at-one-site).
 
@@ -897,12 +895,12 @@ change: `saves` is the copies one shared function removes, not the net diff.
 * Words of a line or two, or that would save under 100 lines, are left out.
 * Figures count nested words inside the words that contain them. Act on the first entry, then run the report again.
 * **`--split dir`** writes one C file per function beside a header, so the C compiler can work in parallel: on `examples/maps.slc` that is 141 units, 1.5 s as one unit against 0.9 s on 16 cores at `-O2` and 1.9 s against 0.9 s at `-O3`. Link with `-flto` if the cross-function inlining the single unit got for free matters; without it the map harness runs about 9% slower.
-* **`--compare`** compiles the program three ways: `inline` (every `call` ignored), `written` (as it is) and `share` (a boundary at every application that can have one). **Aim inside that range, not at either end**: the inlined end is a pile of copies, the shared end is a call on every path that reaches one, and the geometric mean of the two is a fair reference (`maps` is at 9,607 against 19,260, `strmaps` 10,612 against 22,045, `channels` 5,198 against 5,284), with the arithmetic mean printed as well because it is the one people estimate by eye. The report says which side of them the program is on: `examples/stores.slc` sits above the geometric mean (1,484 against 1,389), where its `add`/`get` boundaries are worth a second look rather than an automatic `call`, and `examples/boundary.slc` sits above both by construction (43 lines as written, 18 with every `call` ignored, 45 all-shared) because it exists to show what a boundary is and pays for the boundaries it shows. A `call` pays from the second application of the same key, so `lib/hash.slc` puts none inside `hash.sip24` — a program that hashes several dynamic strings writes `call hash.sip24(...)` itself, which is 242 lines of C for three sites against 655. `--profile inline|share` gives the full report for one of them.
+* **`--compare`** compiles the program three ways: `inline` (every `call` ignored), `written` (as it is) and `share` (a boundary at every application that can have one). These are experiments, not tuning targets. The printed means do not measure runtime cost or lost specialization, and the all-shared experiment may be expensive or unavailable. Start without explicit boundaries; consider a few only when current measurements justify them. `--profile inline|share` gives the full report for one policy.
 * **Runtime and library words appear in the report too**, because the runtime is built with the program and its words are evaluated in place like any other ([architecture §12.2](architecture.md#122-the-runtime-is-built-with-the-program)). Their sites are named where they are written (`runtime/scheduler.slc:256`), and their `call`s are the libraries' business, not yours. Only what reaches the C is counted, so a word the runtime stages for a program that never names it is not in the list.
 
-**The libraries have already done it.** `slc size` on a program that uses maps reports the map words first, and that is why `lib/map.slc` puts a `call` at its key digest, probe, growth, insertion and key copy, `lib/storage_layout.slc` at the element address a read and a write both take, `lib/storage.slc` at the `Id` check, `lib/hash.slc` and `lib/key.slc` at hash finalization, `lib/stacks.slc` at stack-set selection and two growth steps, and the runtime at the scheduler words it applies at several sites: a program with a hundred map operations then contains one probe, not a hundred. With those in place `examples/maps.slc` (183 source lines) compiles to 9,607 lines of C and `examples/strmaps.slc` (113 lines) to 10,612. The same report tells you when a `call` of your own would pay, and the same measurement tells you when it would not: the boundary costs a call where there was none. The module table is the other half of the answer: it keeps pointing at the library that needs the work next, which for a map or store program is `lib/stacks.slc`.
+**Start without boundaries.** The maintained libraries and runtime contain no explicit `call` directives. Hashing, maps, storage and scheduler policy specialize with their callers. Keep that fresh baseline: only if a concrete program is too large should a size report and runtime measurements motivate adding a few calls. Compiler fixtures deliberately retain calls to test the language feature; they are not tuning examples.
 
-**When not to.** Leave `call` out of a hot site, and measure rather than assume. Sharing `lib/hash.slc`'s SipHash block makes a map loop 33% slower and removes 5% of its C; sharing the round costs 59% for 1%. Sharing the map element address costs nothing measurable, because the C compiler inlines the smaller function back, and removes 12%: that one is in the library. Do not add a `call` to a small word; the report does not list them. And a call is specialized on the arguments known at its site, so `call` on a word applied to many different constants builds one function per constant: put it one level down instead.
+**When not to.** Do not add `call` just because a report lists a repeated word. A boundary can block constant propagation and force register-local state into memory. Generated C size is not runtime speed, and a historical benchmark does not settle the current choice. A call also specializes on arguments known at its site, so many different constants can create many separate functions rather than one shared body.
 
 **Things that surprise.** A word containing `call` still runs at compile time on known inputs: `call` is ignored while evaluating at compile time, so `host(hash.sip24(...))` works. `return call f(x)` returns the call; it is not a tail jump. And `call` needs a native word: an untyped Lua function is an error, and a foreign function is already a call.
 
@@ -1140,8 +1138,9 @@ end
 | Form | Use |
 |---|---|
 | juxtaposition | one simple argument, the default: `insert 5`, `release slot`, `Ref draft`, `tab_stop { tab_width = 4 }` |
-| parentheses | grouping only: several arguments, an argument with an operator, a call as argument (`send(count_lines chunk)`) |
-| `word()` | nullary invocation |
+| parentheses | grouping and zero-argument calls in expressions; standalone `refresh`, `screen.refresh` and `screen:refresh` need no `()` |
+| `word` | zero-argument call statement |
+| `word()` | zero-argument invocation in an expression; also valid as an explicit statement |
 | trailing block | scopes, iteration, activities, builders |
 | instruction | inside an opened block, a call without a receiver: `insert n`, `note 1`, `bind "h" (...)` |
 | headed braces | construction (`Document { ... }`) or handlers (`s { ... }`) |
@@ -1150,6 +1149,8 @@ end
 | `endall` | the closing run of a trailing-block spine |
 | `local x = e` | a native local of `e`'s type, holding `e`'s value now; a Lua value stays a host binding |
 | `local x: T = e` | a type other than the initializer's, or storage declared without one |
+
+A standalone name is an instruction: `refresh` calls `refresh()`. In an expression the name remains a value: `local action = refresh` saves the callable, while `local result = refresh()` invokes it. The formatter's minimal call style removes empty parentheses only from call statements.
 
 Parentheses group; they do not explain. Application binds tighter than operators and takes a name's full postfix chain (`count_lines chunks[slot]` is `count_lines(chunks[slot])`), so parentheses are needed only where grouping differs. When a line needs them to be understood, rename or redesign (§19).
 

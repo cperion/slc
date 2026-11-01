@@ -103,7 +103,7 @@ local type_word = do(document: Ref Document, n: U32): U32
     transaction document do(..)
         insert n
         local before = cursor
-        move_left()
+        move_left
         moved = before - cursor
     end
     return moved
@@ -141,13 +141,13 @@ local Stats = struct { entered: U32, left: U32 }
 
 local counted = do(stats: Ref Stats, body): Unit
     stats.entered = stats.entered + 1
-    body()
+    body
     stats.left = stats.left + 1
 end
 
 -- a policy that completes after the work inside it
 local clamped = do(document: Ref Document, max: U32, body): Unit
-    body()
+    body
     if document.length > max then
         document.length = max
         document.cursor = max
@@ -349,7 +349,7 @@ local line_count = do(workers, path: CString): U32
                             filled:send slot
                         end
                     end
-                    filled:close()
+                    filled:close
                 end
                 -- the workers run in a scope of their own: when it ends, counts can close
                 spawn do
@@ -363,7 +363,7 @@ local line_count = do(workers, path: CString): U32
                             end
                         end
                     end
-                    counts:close()
+                    counts:close
                 end
                 counts:each do(lines)
                     total = total + lines

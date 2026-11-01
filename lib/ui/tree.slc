@@ -23,7 +23,7 @@ local function property(node, name)
     if properties[node][name] then return properties[node][name] end
     local Node, Value = node.T, node.types[name]
     local overrides = {}
-    for _, variant in ipairs(node.variants) do
+    for _, variant in ipairs node.variants do
         if variant.field and variant.values[name] ~= nil then overrides[#overrides + 1] = variant end
     end
     local get = do(box: Ref Node, window_width: F32): Value
@@ -65,16 +65,18 @@ local function attach(ui)
         local measure, arrange = {}, {}
         local function prepare(node)
             if node.kind == "part" then
-                local child = engine(node.T)
+                local child = engine node.T
                 measure[node], arrange[node] = child.measure, child.arrange
                 return
             end
-            for _, child in ipairs(node.children) do prepare(child) end
-            local function child_measure(owner, child, width, height, window_width, window_height, metrics)
+            for _, child in ipairs node.children do prepare child end
+            local function child_measure(owner,
+                child, width, height, window_width, window_height, metrics)
                 local target = child.kind == "part" and home(owner, child) or owner
                 measure[child](target, width, height, window_width, window_height, metrics)
             end
-            local function child_arrange(owner, child, x, y, width, height, window_width, window_height)
+            local function child_arrange(owner,
+                child, x, y, width, height, window_width, window_height)
                 local target = child.kind == "part" and home(owner, child) or owner
                 arrange[child](target, x, y, width, height, window_width, window_height)
             end
@@ -89,8 +91,10 @@ local function attach(ui)
                 local requested_height = get(owner, node, "requested_height", window_width)
                 local width_mode = get(owner, node, "width_mode", window_width)
                 local height_mode = get(owner, node, "height_mode", window_width)
-                local constraint_width = dimension(requested_width, width_mode, available_width, window_width, available_width)
-                local constraint_height = dimension(requested_height, height_mode, available_height, window_height, available_height)
+                local constraint_width = dimension(requested_width,
+                    width_mode, available_width, window_width, available_width)
+                local constraint_height = dimension(requested_height,
+                    height_mode, available_height, window_height, available_height)
                 local inner_width = maximum(constraint_width - left - right, 0)
                 local inner_height = maximum(constraint_height - top - bottom, 0)
                 local content_width = F32 0
@@ -104,9 +108,10 @@ local function attach(ui)
                     local line_width = F32 0
                     local line_height = F32 0
                     for _, child in ipairs node.children do
-                        child_measure(owner, child, inner_width, inner_height, window_width, window_height, metrics)
+                        child_measure(owner,
+                            child, inner_width, inner_height, window_width, window_height, metrics)
                         local item = Ref home(owner, child)
-                        if not modal(child) and item.visible then
+                        if not modal child and item.visible then
                             if node.kind == "grid" then
                                 if column > 0 then line_width = line_width + gap_x end
                                 line_width = line_width + item.measured_width
@@ -149,12 +154,18 @@ local function attach(ui)
                         content_height = size.height
                     end
                 end
-                local width = dimension(requested_width, width_mode, available_width, window_width, content_width + left + right)
-                local height = dimension(requested_height, height_mode, available_height, window_height, content_height + top + bottom)
-                local min_width = dimension(box.min_width, box.min_width_mode, available_width, window_width, 0)
-                local min_height = dimension(box.min_height, box.min_height_mode, available_height, window_height, 0)
-                local max_width = dimension(box.max_width, box.max_width_mode, available_width, window_width, width)
-                local max_height = dimension(box.max_height, box.max_height_mode, available_height, window_height, height)
+                local width = dimension(requested_width,
+                    width_mode, available_width, window_width, content_width + left + right)
+                local height = dimension(requested_height,
+                    height_mode, available_height, window_height, content_height + top + bottom)
+                local min_width = dimension(box.min_width,
+                    box.min_width_mode, available_width, window_width, 0)
+                local min_height = dimension(box.min_height,
+                    box.min_height_mode, available_height, window_height, 0)
+                local max_width = dimension(box.max_width,
+                    box.max_width_mode, available_width, window_width, width)
+                local max_height = dimension(box.max_height,
+                    box.max_height_mode, available_height, window_height, height)
                 width = maximum(width, min_width)
                 height = maximum(height, min_height)
                 if width > max_width then width = max_width end
@@ -185,7 +196,7 @@ local function attach(ui)
                     local count = F32 0
                     for _, child in ipairs node.children do
                         local item = Ref home(owner, child)
-                        if not modal(child) and item.visible then
+                        if not modal child and item.visible then
                             if horizontal then used = used + item.measured_width
                             else used = used + item.measured_height end
                             count = count + 1
@@ -211,7 +222,7 @@ local function attach(ui)
                         local child_height = item.measured_height
                         local child_x = x + left
                         local child_y = y + top
-                        if modal(child) then
+                        if modal child then
                             child_x = (window_width - child_width) / 2
                             child_y = (window_height - child_height) / 2
                         elseif item.visible then
@@ -219,7 +230,7 @@ local function attach(ui)
                             if alignment == 0 then alignment = items end
                             if node.kind == "grid" then
                                 local track_width = (inner_width - gap_x * F32(box.columns - 1)) / F32 box.columns
-                                child_x = child_x + F32(column) * (track_width + gap_x)
+                                child_x = child_x + F32 column * (track_width + gap_x)
                                 child_y = child_y + line_y
                                 if alignment == 4 then child_width = track_width
                                 elseif alignment == 2 then child_x = child_x + (track_width - child_width) / 2
@@ -248,13 +259,16 @@ local function attach(ui)
                                 cursor = cursor + child_height + gap
                             end
                         end
-                        child_arrange(owner, child, child_x, child_y, child_width, child_height, window_width, window_height)
+                        child_arrange(owner,
+                            child,
+                            child_x,
+                            child_y, child_width, child_height, window_width, window_height)
                     end
                 end
             end
         end
         assert(description.root, "UI layout requires a visual root")
-        prepare(description.root)
+        prepare description.root
         compiled.measure = measure[description.root]
         compiled.arrange = arrange[description.root]
         compiled.layout = do(owner: Ref T, width: F32, height: F32, metrics): Unit
@@ -267,8 +281,8 @@ local function attach(ui)
                 if description.root.kind == "modal" then active = true end
                 for _, node in ipairs description.nodes do
                     if node.kind == "part" then
-                        local child = engine(node.T)
-                        active = active or child.modal(home(owner, node))
+                        local child = engine node.T
+                        active = active or child.modal home(owner, node)
                     end
                 end
             end
@@ -280,7 +294,8 @@ local function attach(ui)
             assert(handler.params[2] and handler.params[2].T == T.Event,
                 description.name .. ": handle must take its generated Event")
             local expected = description.window and ui.Reply or T.Outcome
-            assert(handler.ret == expected, description.name .. ": handle has the wrong outcome type")
+            assert(handler.ret == expected,
+                description.name .. ": handle has the wrong outcome type")
             if expected == Unit then handler(owner, event)
             else emit(handler(owner, event)) end
         end
@@ -290,22 +305,23 @@ local function attach(ui)
                 local scoped = compiled.modal owner
                 for _, node in ipairs description.nodes do
                     if node.kind == "part" then
-                        local child = engine(node.T)
-                        if not consumed and (not scoped or child.modal(home(owner, node))) then
+                        local child = engine node.T
+                        if not consumed and (not scoped or child.modal home(owner, node)) then
                             local ChildOutcome = node.T.Outcome
                             if ChildOutcome == Unit then
                                 consumed = child.route(home(owner, node), input, do() end)
                             else
-                                consumed = child.route(home(owner, node), input, do(outcome: ChildOutcome): Unit
-                                    deliver(owner, T.Event[node.name](outcome), emit)
-                                end)
+                                consumed = child.route(home(owner, node),
+                                    input, do(outcome: ChildOutcome): Unit
+                                        deliver(owner, T.Event[node.name](outcome), emit)
+                                    end)
                             end
                         end
                     elseif node.kind == "button" then
                         local box = Ref home(owner, node)
                         if not scoped or description.root.kind == "modal" then
                             local inside = box.visible and box.enabled and input.x >= box.x and input.y >= box.y
-                                and input.x < box.x + box.width and input.y < box.y + box.height
+                            and input.x < box.x + box.width and input.y < box.y + box.height
                             if input.kind == 2 then box.hovered = inside end
                             if input.kind == 5 then box.pressed = false; box.hovered = false end
                             if not consumed then
@@ -344,10 +360,10 @@ local function attach(ui)
                     if box.visible then
                         painter(node, box, window_width)
                         for _, child in ipairs node.children do
-                            if not modal(child) then paint_node(child, owner, window_width, painter) end
+                            if not modal child then paint_node(child, owner, window_width, painter) end
                         end
                         for _, child in ipairs node.children do
-                            if modal(child) then paint_node(child, owner, window_width, painter) end
+                            if modal child then paint_node(child, owner, window_width, painter) end
                         end
                     end
                 end

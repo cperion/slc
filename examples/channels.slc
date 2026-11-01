@@ -8,7 +8,7 @@ local square = do(inp: Chan U32, out: Chan U64): Unit
     inp:each do(v)
         out:send(U64 v * U64 v)
     end
-    out:close()
+    out:close
 end
 
 local sum_squares = do(n: U32): U64
@@ -22,7 +22,7 @@ local sum_squares = do(n: U32): U64
                 nums:send i
                 i = i + 1
             end
-            nums:close()
+            nums:close
         end
         spawn(square, nums, squares)
         squares:each do(v)
@@ -68,7 +68,7 @@ local total_steps = do(workers, n: U32): U64
             for i: U32 = 1, n do
                 jobs:send Job { id = i, n = i }
             end
-            jobs:close()
+            jobs:close
         end
         for _ = 1, workers do
             spawn(worker, jobs, results)
@@ -93,7 +93,7 @@ local count_from = do(out: Chan U32, start: U32, n: U32): Unit
         out:send(start + i)
         i = i + 1
     end
-    out:close()
+    out:close
 end
 
 local merged = do(n: U32): U64
@@ -141,7 +141,7 @@ local gives_up = do(): Bool
             after(ms 20) do timed_out = true end,
             closed = do end,
         }
-        never:close()
+        never:close
     end
     return timed_out
 end
@@ -184,7 +184,7 @@ local ask = do(n: U32): U64
                 closed = do end,
             }
         end
-        requests:close()
+        requests:close
     end
     return total
 end
@@ -340,7 +340,7 @@ local pooled = do(count: U32): U64
                 full:send s  -- s now belongs to the receiver
                 k = k + 1
             end
-            full:close()
+            full:close
         end
         full:each do(s)
             total = total + U64(checksum buffers[s])
@@ -373,7 +373,7 @@ local take_or_time = do(): U32
             end,
             after(ms 500) do outcome = 0 end,
         }
-        nobody:close()
+        nobody:close
     end
     return outcome
 end

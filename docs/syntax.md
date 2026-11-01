@@ -233,6 +233,10 @@ The rules:
 8. **Statements on one line.** Two statements on one line where the first ends with a name and the second begins with one (`a = b c = d`) form an application; separate them with `;`. `f() g()` is unaffected: a name after `)` is not an argument.
 9. **Field shorthand.** In a table constructor, `.name` is `name = name`: `Point { .x, .y, z = 3 }` is `Point { x = x, y = y, z = 3 }`. A `.` never follows `{`, `,` or `;` in Lua, so no existing program changes. The shorthand is rewritten in the token stream, so it works in typed bodies and in the plain Lua code around them, and it is only spelling: the program is the one the long form writes. A bare `{x}` is not a shorthand, because it is already a one-element array table.
 
+10. **Zero-argument call statements.** A bare name or qualified name used as a whole statement invokes it with zero arguments: `refresh`, `screen.refresh` and `screen:refresh` mean `refresh()`, `screen.refresh()` and `screen:refresh()`. This applies in native bodies, callbacks and host Lua code. Opened-context lookup and lexical shadowing are exactly those of the explicit call. The rule does not inspect the callee's type or arity: a non-callable value is an error, not a no-op. Use separate lines or `;` between calls (`refresh; save`); `refresh save` still supplies an argument. Parenthesized or indexed callees retain explicit invocation: `(refresh)()` and `actions[i]()`.
+
+This is a statement-only rule. `local action = refresh` and `return refresh` still refer to the callable; `local result = refresh()` and `return refresh()` invoke it. A receiver-method expression still needs arguments, so `local action = screen:refresh` is not a new method-value form.
+
 The syntax remains independent of the runtime arity of the callee.
 
 ### 2.5 Words and host functions
@@ -953,7 +957,7 @@ uint32_t panel_extent(uint32_t n) {
 
 Known fields are materialized when storage is needed, for example when the record's address crosses a function boundary (§5.3). Existing reference, ownership, atomic, and string rules still apply; field-wise loop generalization does not bypass them.
 
-One case remains where a loop changes a place no syntax shows: a write through a reference taken before the loop, or by a word that captured the place. If a residual loop writes a tracked place that existed before it, the outermost such loop rolls its round back, the place becomes ordinary memory before the loop, and the round is evaluated again. The result is still exact (`hidden` in the examples); the place merely loses its compile-time tracking.
+A write through a reference taken before the loop, or through a captured local, can change state that the loop's syntax does not name. The outermost affected loop rolls its round back and adopts an initialized, unescaped ordinary local owned by the same native function as loop state. Its unchanged known fields stay known; adoption adds no callback argument and preserves the original place, so direct writes and reference aliases see the same state. If no invariant remains, or the local's address crosses a native boundary, it becomes ordinary memory. Storage is initialized before the affected loop, not on every round. Atomics, owning records and foreign locals retain their existing contracts.
 
 ### 6.5 Where unrolling comes from
 
@@ -1326,6 +1330,13 @@ Temporary resizable state (a worklist, a change log) created in an activity take
 
 `transaction(doc) do(draft..) ... end` is the application `transaction(doc)(body)`. On its own, `transaction(doc)` would be a partial application with a runtime argument, which §3.8 rejects. **A chain of applications on a word accumulates its arguments until the word is saturated**, as in Let; surplus arguments apply to the result. The same holds for method chains (`g:view() do(xs) ... end`) and for library functions with a declared arity. Any other Lua function applies each group in turn.
 
+In a typed body, a native-word chain concatenates its argument groups before
+applying the word. A rest requirement receives the remaining arguments from the
+whole chain, not just its first group. Regrouping still has to preserve each
+list's expansion rules and the separate trailing handler boundary (§11). Ordinary
+host Lua calls keep their application groups; their parentheses cannot be removed
+on the assumption that every callable is a native word.
+
 ### 10.5 Opening
 
 SLC uses `..` to contribute bindings or values: postfix in opening declarations, prefix in keyed and ordered spreads, and prefix in a rest parameter. `(..)` reads the anonymous home. Infix `a .. b` keeps its concatenation semantics and precedence; for example, `f(a .. b)` passes one concatenated value, while `f(..args)` expands a pack. Ordinary Lua `...` varargs outside typed bodies are unchanged; `...` is not an alternative spelling for SLC opening or expansion.
@@ -1345,7 +1356,7 @@ One parameter may be opened. What a context introduces:
 | a Lua table (a vocabulary) | its string keys |
 
 - **Open to work; bind to remember.** An introduced field name denotes the field's place: reading it reads the current value, assigning it stores to the field. `local before = cursor` takes the value at that point.
-- **Methods stay attached.** Opening introduces no method names. An otherwise-unbound bare call inside an opened region uses the innermost receiver that has such a member; actual members win over lexical words; locally bound callables stay ordinary calls. `(name)(args)` bypasses the receiver.
+- **Methods stay attached.** Opening introduces no method names. An otherwise-unbound bare call inside an opened region uses the innermost receiver that has such a member; actual members win over lexical words; locally bound callables stay ordinary calls. `(name)(args)` bypasses the receiver. `call` uses the same resolution, then applies the native boundary to the resolved callable: an outer lexical word is not rejected merely because the call appears in an opened region.
 - **Opening follows lexical shadowing.** Introduced names shadow earlier visible bindings, including names from earlier openings, program globals and the prelude. Later declarations and openings can shadow them in turn; leaving a scope restores the enclosing bindings. Initializers resolve names before the new binding is introduced. Opened record fields remain live places, not copied values. The receiver is retained independently of later bindings of its source name. Receiver-method lookup remains separate: methods are not introduced bindings, and locally bound callables remain ordinary calls.
 - **An opened context cannot be assigned whole (`context-use`).**
 
@@ -1542,6 +1553,8 @@ local area = do(s: Shape): U32 = s {
 `name(params) = body` in a headed supply is `name = do(params) = body`: `o { some(v) = v, none() = d }`.
 
 Every alternative must be handled exactly once, even when the tag is known: a missing, unknown or duplicate handler is rejected. A payload is reached only by matching; selecting it by name is rejected.
+
+An immediately applied handler table, such as `body(Ref draft) { commit() = true, abort(reason) = false }`, can consume the returns of that exact in-place producer directly. Returns with a known tag join at that tag's handler without constructing a runtime sum. Equal known payloads stay known; differing payloads join in a typed slot. The producer's mutations and the handler's result each have their own state join, and only the selected handler executes at runtime. Nested calls cannot take the producer's continuation. Unknown-tag returns, explicit `call` boundaries and materialized recursive calls keep ordinary sum dispatch. A table needed to saturate a word, or consumed by its rest requirement, remains an argument—not a handler continuation.
 
 ### 11.3 Binding times of a sum
 
@@ -2500,11 +2513,11 @@ The outcome is matched right where the activity ends: `with_fd(...) do ... end {
 
 ```c
 int32_t make_file(const char *path) {
-    Outcome r;
     Fd file;
+    int32_t payload;
     int32_t t = open(path, O_WRONLY | (O_CREAT | O_TRUNC), 420u);
     if (t < 0) {
-        r = (Outcome){ .tag = Outcome_failed, .as.failed = errno };
+        payload = errno;
         goto L1;
     }
     if (write(t, "SLC1", 4ull) < 0ll) {
@@ -2517,17 +2530,14 @@ int32_t make_file(const char *path) {
     }
     close(t);
     if (file.error != 0) {
-        r = (Outcome){ .tag = Outcome_failed, .as.failed = file.error };
+        payload = file.error;
         file.fd = t;
         goto L1;
     }
-    r = (Outcome){ .tag = Outcome_done };
     file.fd = t;
+    return 0;
 L1:;
-    if (r.tag == Outcome_done) {
-        return 0;
-    }
-    return r.as.failed;
+    return payload;
 }
 ```
 
@@ -3257,11 +3267,16 @@ uint32_t bump(uint32_t n) {
 |---|---|
 | `name` | the C name (made unique at file scope); required for `exported` and `imported` |
 | `thread_local` | one object per thread (`__thread`) |
+| `shared` | permit task writes under the program's own synchronization; not a lock or an atomic conversion |
 | `init` | a number the object starts with; otherwise it is zero |
 | `exported` | external linkage: another unit, or a header, can name it |
 | `imported`, `header` | defined elsewhere and declared by `header`, which the program includes |
 
 A global cannot be Unit, opaque, a reference, a channel, resizable storage or a view. Both backends emit it from the same IR (`gccjit` creates an internal, exported or imported global, with the TLS model for `thread_local`). An imported and an exported global of one name are one object.
+
+Tasks cannot write ordinary globals through compiler-visible addresses. The rule follows aliases, aggregate-held pointers, parameters, returns, known function pointers and blocking bodies. Direct reads and calls proved to read only are permitted. Actual atomic operations, thread-local storage and `global(T, { shared = true })` are exceptions. Declaring an Atomic global does not permit non-atomic writes through a cast.
+
+`shared = true` is an unchecked assertion that the program supplies the required synchronization; it changes neither representation nor scheduling. Declarations of the same imported/exported object must agree on `shared` and `thread_local`. The address analysis conservatively merges aggregate fields and array elements. If a possible writable origin is an ordinary global, the compiler rejects the task. Opaque code receiving such an address is considered able to write it, including through reachable pointer fields or callbacks. Raw pointer fabrication and foreign code's hidden state remain unchecked boundaries: this rule is not a whole-program proof of race freedom.
 
 ### 21.2 Function values
 

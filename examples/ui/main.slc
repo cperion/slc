@@ -2,7 +2,8 @@ local model = require "counter"
 local ui, App = model.ui, model.App
 local main = do(argc: I32, argv: Ptr CString): I32
     if argc < 2 then return 2 end
-    local result = ui.run(App, { font = argv[1], title = "SLC component counter", resizable = true })
+    local result = ui.run(App,
+        { font = argv[1], title = "SLC component counter", resizable = true })
     return result { done() = I32 0, failed(failure) = I32 1 }
 end
 export main

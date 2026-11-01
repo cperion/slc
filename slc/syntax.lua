@@ -16,7 +16,8 @@
 -- An argument is a primary expression with its postfix chain (`.x`, `[i]`,
 -- `:m(...)`, `(...)`); juxtaposition is left-associative, so `f a b` is f(a)(b).
 
-local M = {}
+local application = require 'slc.application'
+local M = { application_facts = application.analyze }
 
 local KEYWORDS = {}
 for w in ([[and break do else elseif end false for function if in local nil not or
@@ -367,7 +368,7 @@ function P:statement()
     elseif kw == 'return' then
         return self:retstat()
     end
-    if tk.t == 'iden' and tk.v == 'continue' then
+    if not self.lua and tk.t == 'iden' and tk.v == 'continue' then
         local nt = r:peek(2)
         if not (nt.t == '(' or nt.t == '=' or nt.t == '.' or nt.t == ':' or nt.t == '['
             or nt.t == 'string' or nt.t == '{' or nt.t == ',') then
@@ -375,13 +376,13 @@ function P:statement()
             return { k = 'continue', line = line }
         end
     end
-    if tk.t == 'iden' and tk.v == 'export' then
+    if not self.lua and tk.t == 'iden' and tk.v == 'export' then
         r:next()
         local n = r:name('after export')
         return { k = 'export', name = n.v, line = line }
     end
     -- expression statement: call or assignment
-    local e = self:suffixed()
+    local e = self:suffixed(nil, nil, true)
     if r:is('=') or r:is(',') then
         local targets = { e }
         while r:accept(',') do targets[#targets + 1] = self:suffixed() end
@@ -394,6 +395,7 @@ function P:statement()
         end
         return { k = 'assign', targets = targets, exprs = exprs, line = line }
     end
+    if self:named(e) then e = self:implicit_call(e) end
     if e.k ~= 'call' and e.k ~= 'method' then
         r:error('syntax error: an expression statement must be a call or an assignment', tk)
     end
@@ -688,13 +690,24 @@ function P:primary(hint, in_type)
     r:error('unexpected ' .. show(tk))
 end
 
-function P:suffixed(hint, in_type)
+-- Only names and qualified names gain implicit invocation, and only at the
+-- statement head. Arbitrary values/expressions are not expression statements.
+function P:named(e)
+    return e.k == 'name' or (e.k == 'field' and self:named(e.obj))
+end
+
+function P:implicit_call(e)
+    if e.k == 'method' then return e end
+    return { k = 'call', fn = e, args = {}, line = e.line }
+end
+
+function P:suffixed(hint, in_type, statement_head)
     local r = self.r
     local tk = r:peek(1)
     -- `call m:put(k, v)`: the application below is a real call (a function
     -- boundary), not evaluated in place. `call` is a keyword only before a name
     -- on the same line; `call(x)` stays an ordinary application.
-    if tk.t == 'iden' and tk.v == 'call' and not in_type then
+    if tk.t == 'iden' and tk.v == 'call' and not in_type and not self.lua then
         local nt = r:peek(2)
         if nt.t == 'iden' and not nt.nl and not KEYWORDS[nt.v] then
             r:next()
@@ -710,12 +723,13 @@ function P:suffixed(hint, in_type)
         end
     end
     local e, kind = self:primary(hint, in_type)
-    return self:suffixed_from(e, kind, false, in_type)
+    return self:suffixed_from(e, kind, false, in_type, statement_head)
 end
 
 -- can the next token start a juxtaposed argument after an expression that
 -- ended with `last` ('name', 'call', 'index', ...)?
 function P:starts_argument(last)
+    if self.lua then return false end -- expanded host code already has explicit arguments
     local tk = self.r:peek(1)
     if tk.t == 'number' then return true end
     if tk.kw == 'true' or tk.kw == 'false' then return true end
@@ -760,7 +774,7 @@ function P:args()
     return args
 end
 
-function P:suffixed_from(e, last, no_juxta, in_type)
+function P:suffixed_from(e, last, no_juxta, in_type, statement_head)
     local r = self.r
     while true do
         local tk = r:peek(1)
@@ -787,12 +801,14 @@ function P:suffixed_from(e, last, no_juxta, in_type)
                 args = self:args()
             elseif self:starts_argument('name') then
                 args = { self:argument() }
+            elseif statement_head and self:named(e) then
+                return self:implicit_call { k = 'method', obj = e, name = nt.v, args = {}, line = nt.line }
             else
                 r:error(("method call '%s' needs arguments"):format(nt.v))
             end
             e = { k = 'method', obj = e, name = nt.v, args = args, line = nt.line }
             last = 'call'
-        elseif tk.t == '(' and tk.nl then
+        elseif tk.t == '(' and tk.nl and not self.lua then
             -- `(` can begin a statement: a newline before it ends the expression
             break
         elseif tk.t == '(' or ((tk.t == 'string' or tk.t == '{') and last ~= 'literal') then
@@ -807,6 +823,65 @@ function P:suffixed_from(e, last, no_juxta, in_type)
         end
     end
     return e
+end
+
+-- LuaMacro leaves ordinary host bodies as Lua. Normalize their implicit call
+-- statements after expansion, using this same grammar; retain all other bytes
+-- and line numbers. Native bodies already contain explicit staged calls here.
+function M.statement_calls(source, filename)
+    local raw = require('macro.lexer').scan_raw_tokenlist(source)
+    local ts, pos, i = {}, 0, 1
+    while i <= #raw do
+        local t, v, line = unpack(raw[i])
+        pos = pos + #v
+        if t == 'number' and raw[i + 1] and raw[i + 1][1] == 'iden'
+            and raw[i + 1][2]:match('^[uU]?[lL][lL]$') then
+            i = i + 1; v = v .. raw[i][2]; pos = pos + #raw[i][2]
+        end
+        ts[#ts + 1] = { t = t, v = v, line = line, last = pos }
+        i = i + 1
+    end
+    local cursor, mapped, last, line = 0, 1, 0, 1
+    local r = M.reader(function()
+        cursor = cursor + 1
+        local tk = ts[cursor]
+        if tk then line = tk.line; return tk.t, tk.v end
+    end, nil, function() return line end, filename)
+    local fetch, next_token = r.fetch, r.next
+    function r:fetch()
+        local tk = fetch(self)
+        while ts[mapped] and (ts[mapped].t == 'space' or ts[mapped].t == 'comment') do mapped = mapped + 1 end
+        tk.index = mapped
+        -- Reader combines split dot tokens into .. and ... .
+        mapped = mapped + ((tk.t == '..' and 2) or (tk.t == '...' and 3) or 1)
+        return tk
+    end
+    function r:next()
+        local tk = next_token(self)
+        last = ts[tk.index] and ts[tk.index].last or last
+        return tk
+    end
+    local p, inserts = M.parser(r), {}
+    p.lua = true -- preserve ordinary Lua postfix continuations across newlines
+    local implicit_call, statement = p.implicit_call, p.statement
+    function p:implicit_call(e)
+        inserts[#inserts + 1] = last
+        return implicit_call(self, e)
+    end
+    function p:statement()
+        -- Ordinary Lua labels/goto need no staged representation.
+        if r:peek().t == 'iden' and r:peek().v == 'goto' then
+            r:next(); r:name('after goto'); return
+        end
+        if r:is(':') and r:peek(2).t == ':' then
+            r:next(); r:next(); r:name('in label'); r:expect(':'); r:expect(':'); return
+        end
+        return statement(self)
+    end
+    p:block(); r:expect('eof')
+    table.sort(inserts, function(a, b) return a > b end)
+    for _, at in ipairs(inserts) do source = source:sub(1, at) .. '()' .. source:sub(at + 1) end
+    return source
 end
 
 -- code generation ---------------------------------------------------------------------------
@@ -883,7 +958,10 @@ function G:lexical_name(name)
     return name
 end
 
-function G:expr(e)
+function G:expr(e, tail_chain)
+    -- The same non-executing word-application proof drives minimal formatting.
+    -- Unknown callees and semantic group boundaries keep the ordinary chain path.
+    if self.application_facts then e = self.application_facts.normal[e] or e end
     local k = e.k
     if k == 'name' then
         if e.name == '__S' or e.name == '__ENV' then self:err("'" .. e.name .. "' is reserved", e.line) end
@@ -917,28 +995,28 @@ function G:expr(e)
             node = node.fn
         end
         if node.k == 'method' then
-            return ('__S.%s(%s, %s, __S.args(%s), %s)'):format(node.boundary and 'bmchain' or 'mchain',
+            local code = ('__S.%s(%s, %s, __S.args(%s), %s)'):format(node.boundary and 'bmchain' or 'mchain',
                 self:prefix(node.obj), str(node.name), self:list(node.args), table.concat(groups, ', '))
-        end
-        if node.boundary and node.fn.k == 'name' and not self:lookup(node.fn.name) and #self:opens() > 0 then
-            self:err('call: a name from an opened region cannot be called across a boundary; qualify it', e.line)
+            return tail_chain and ('__S.ret(' .. code .. ')') or code
         end
         if node.fn.k == 'name' and not self:lookup(node.fn.name) and #self:opens() > 0 then
-            -- a chain headed by a free name in an opened region
-            return ('__S.ochain(%s, %s, function() return %s end, __S.args(%s), %s)'):format(self:open_list(),
+            -- Resolve the actual opened member or lexical fallback before
+            -- applying the boundary; syntax cannot know the opened vocabulary.
+            local code = ('__S.%s(%s, %s, function() return %s end, __S.args(%s), %s)'):format(
+                node.boundary and 'bochain' or 'ochain', self:open_list(),
                 str(node.fn.name), node.fn.name, self:list(node.args), table.concat(groups, ', '))
+            return tail_chain and ('__S.ret(' .. code .. ')') or code
         end
         local head = self:prefix(node.fn)
         if node.boundary then head = '__S.boundary(' .. head .. ')' end
-        return ('__S.chain(%s, __S.args(%s), %s)'):format(head, self:list(node.args), table.concat(groups, ', '))
+        return ('__S.%s(%s, __S.args(%s), %s)'):format(tail_chain and 'tail_chain' or 'chain',
+            head, self:list(node.args), table.concat(groups, ', '))
     elseif k == 'call' then
-        if e.boundary and e.fn.k == 'name' and not self:lookup(e.fn.name) and #self:opens() > 0 then
-            self:err('call: a name from an opened region cannot be called across a boundary; qualify it', e.line)
-        end
         if e.fn.k == 'name' and not self:lookup(e.fn.name) and #self:opens() > 0 then
             -- a bare call inside an opened region: the receiver's member wins
             local args = self:list(e.args)
-            return ('__S.ocall(%s, %s, function() return %s end%s)'):format(self:open_list(),
+            return ('__S.%s(%s, %s, function() return %s end%s)'):format(
+                e.boundary and 'bocall' or 'ocall', self:open_list(),
                 str(e.fn.name), e.fn.name, args ~= '' and (', ' .. args) or '')
         end
         if e.boundary then return '__S.boundary(' .. self:prefix(e.fn) .. ')(' .. self:list(e.args) .. ')' end
@@ -1077,6 +1155,8 @@ end
 
 function G:function_body(fn, kind, method_of)
     local saved = self.body
+    local saved_facts = self.application_facts
+    self.application_facts = saved_facts or application.analyze({ k = 'lambda', fn = fn })
     self.body = new_body(kind, saved)
     if method_of then self:declare('self', { immutable = true, param = true }) end
     for _, p in ipairs(fn.params) do
@@ -1101,6 +1181,7 @@ function G:function_body(fn, kind, method_of)
     local parts = table.concat(self.out)
     self.out = o
     self.body = saved
+    self.application_facts = saved_facts
     return parts
 end
 
@@ -1488,6 +1569,7 @@ function G:stat(s)
         end
         if word then
             local e = s.exprs[1]
+            if e and self.application_facts then e = self.application_facts.normal[e] or e end
             if has_spread(s.exprs) then
                 -- `return ..args`: the components, which must be exactly one value
                 self:emit(' do __S.ret_one(' .. self:list(s.exprs) .. ') return end')
@@ -1498,6 +1580,8 @@ function G:stat(s)
                 -- a tail call
                 local args = self:list(e.args)
                 self:emit(' do __S.tail(' .. self:prefix(e.fn) .. (args ~= '' and (', ' .. args) or '') .. ') return end')
+            elseif e.k == 'call' and (e.fn.k == 'call' or e.fn.k == 'method') then
+                self:emit(' do ' .. self:expr(e, true) .. ' return end')
             elseif e.k == 'method' and not e.boundary then
                 local args = self:list(e.args)
                 self:emit(' do local __o = ' .. self:prefix(e.obj) .. '; __S.tail(__o.' .. e.name .. ', __o'
@@ -1551,6 +1635,9 @@ function M.translate_function(reader, is_local, start_line)
         text = '__S.method(' .. target .. ', ' .. str(method) .. ', ' .. g:lambda(fn, true) .. ')'
     elseif is_local then
         if #path > 1 then reader:error('local function names cannot contain dots') end
+        -- Unlike a local lambda initializer, local function binds its own name
+        -- before the body. Preserve that fact for recursive tail applications.
+        g.application_facts = application.analyze({ k = 'localfunction', name = path[1], fn = fn })
         text = path[1] .. '; ' .. path[1] .. ' = ' .. g:lambda(fn)
     else
         text = table.concat(path, '.') .. ' = ' .. g:lambda(fn)

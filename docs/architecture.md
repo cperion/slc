@@ -51,6 +51,25 @@ Lua already provides a complete compile-time programming environment: lexical sc
 
 LuaMacro keeps the surface Lua's: macro.let gives lambdas and application, and the same token stream feeds the typed-body parser. Parsing is unavoidable: with token rewriting alone, staging `a < b and c` correctly would need operator precedence anyway, and comparisons cannot be staged by metamethods at all.
 
+Bare-name call statements are recognized by that parser, not by looking up a
+value's type or guessing its arity. Native bodies emit the same staged call as
+an explicit `()`. After macro expansion, `slc.translate` uses the same parser in
+Lua mode to insert `()` for remaining host call statements, preserving other
+bytes and line numbers. Expressions are never implicitly invoked; ordinary Lua
+postfix parsing is retained in expanded host code. The formatter reparses an
+omission and checks the same syntax tree before adopting it.
+
+Staged code generation and the formatter share the non-executing application
+analysis in [`slc/application.lua`](../slc/application.lua). It follows lexical
+local-word bindings and aliases, invalidates rebound/captured bindings, and
+normalizes proven native-word argument groups. Unknown Lua callees, expansion,
+explicit boundaries and potential immediate-match boundaries keep their groups.
+The formatter compares these compiler-owned normal forms; it does not execute
+imports or specialize user programs to discover callables. The evaluator uses the
+same argument-group collector and handler-boundary predicate. Returned plain
+chains use the word's tail-call path when no handler boundary is possible; unknown
+Lua calls and handler applications retain ordinary chain evaluation.
+
 #### Why tail recursion instead of loop syntax?
 
 Words are already evaluated in place, so a tail call that re-enters a word is a round of a loop, and the evaluator's existing tools decide its fate: compile-time evaluation while rounds stay known, generalization of what changes under dynamic control, rollback of a round to redo it in general form. Loop-carried state becomes explicit parameters — the sugar makes the locals a loop mentions into its parameters, so nothing has to be discovered — `break` and `continue` are exit and next, and `while` and `for` stay as sugar because they read well. One mechanism replaces two.
@@ -335,9 +354,9 @@ as a runtime address and length, since the callee cannot name the caller's local
 
 The boundary is the programmer's, and `slc size program.slc` finds it. It reports the generated C per function and, for each word that is evaluated in place at several sites, the residual statements one `call` would share, with the heaviest sites and their source lines (`maps.slc:121  x3  3,600 statements  m:put(k, v + 100)`). Words too small to repay a call are left out. A large program also prints a one-line note pointing at it.
 
-A library puts `call` at the words the report names in its own code, so that a program with a hundred map operations contains one probe, not a hundred: `lib/map.slc` at the key digest, the probe, growth, insertion and key copy; `lib/hash.slc` and `lib/key.slc` at hash finalization; `lib/storage.slc` at the `Id` check that `remove` and `borrow` share; `lib/storage_layout.slc` at the checked element address that a map read and a map write both take; `lib/stacks.slc` at its stack-set selection and at two stack growth steps. The runtime's policy words are libraries too: `withdraw`, `claim_waiter`, `drain`, `recv`/`checked_send`, `step_task` and `idle` each get a `call` where their own module applies them at several sites.
+The maintained libraries and runtime start without explicit `call` boundaries. Hash finalization, map probing and growth, checked storage access, and scheduler policy all remain visible to specialization. Deliberate language and compiler regression fixtures still exercise explicit boundaries; foreign calls and automatically materialized recursion retain their native semantics.
 
-The cost is a call where there was none, so it is measured, not assumed. Sharing the SipHash block costs 33% of a map loop and sharing its round 59%, for 5% and 1% of that program's C — so `lib/hash.slc` keeps its inner loop in place, and the size of a program hashing known text stays proportional to the text. Sharing the map element address costs nothing measurable, because the C compiler inlines the smaller function back at every site, and removes 12% of a map program's C. At a hot site, leave `call` out.
+Start from that boundary-free baseline. If a concrete program is too large, use a fresh size report and runtime measurements to consider a few boundaries. Neither old measurements nor a geometric mean is a target for inserting calls. A boundary can prevent specialization and register-local state even when it reduces generated C.
 
 ## 6. The residual command representation
 
@@ -364,6 +383,12 @@ Store  Let(temporary)  SetParameter  Expression  If  Loop(top, end)  Return  Got
 ```
 
 `Goto` and `Label` implement returns from inside inlined applications and the jumps of loops; the backend prints a jump to the innermost loop's top or end as `continue` or `break`. Emitted statements own their expressions (they are copied when emitted), so later rewrites of live values — lazy snapshots — cannot reach back into code already emitted.
+
+Immediate sum matching is owned by an application, not by an ambient next-frame flag. A callback registry maps its Lua closure to its descriptor; native words and callbacks receive explicit invocation options. Known-tag returns retain separate landing sites, with payload expressions captured before return-path stores. Each tag joins producer state once; differing payloads get a typed slot, while equal known payloads remain static. A separate inferred frame joins handler results. Its path blocks are spliced into residual IR only after join-time stores have been inserted. Unknown sums and materialized calls use ordinary matching. The resulting IR contains only the existing stores, labels and jumps.
+
+Reference-written loop state is likewise invocation-local. A loop retry can adopt an initialized local from the same native function without adding a source-level body parameter. Existing syntactic slots and reference aliases reuse the same owner. Per-field agreement retains invariants; address escape replays the outermost affected loop with storage initialized before it. For derived locals, a lazily bound scalar input can be snapshotted once at its original binding point instead of materializing each derived expression separately. Unbound reads retain the ordinary version checks.
+
+Internal widening forgets a changing sum tag as well as its payload; keeping a payload-free tag known would make retries fail to progress. Local lifetime checks use an opaque frame identity rather than retaining the completed frame and its snapshots. Rollback releases abandoned locals and this builder's statement graphs while preserving statement indices and independently materialized functions. Discarded trace positions contribute zero to size profiles.
 
 ### 6.1 Declarations
 
@@ -646,9 +671,11 @@ There are no independently owned or reference-counted node objects.
 
 The residual program has two ways to machine code. `slc.cgen` prints it as C;
 `slc.jitgen` builds the same program with libgccjit, calling gccjit where cgen writes
-C. Both start from one preparation of the IR (`G.prepare`: cleanup, data-stack
-planning, give-backs at every exit, a yield point in every loop round of a task),
+C. Both start from one preparation of the IR (`G.prepare`: task-global effects,
+cleanup, data-stack planning, give-backs at every exit, a yield point in every loop round of a task),
 done once per module whichever backends run, so neither can see a different program.
+
+Before cleanup, [task_globals.lua](../slc/task_globals.lua) checks the complete reachable call graph. Pointer origins, memory contents and function returns reach a monotone fixed point, with separate ordinary/task parameter and local contexts. Global cells are shared across those contexts so addresses stored before a spawn remain visible. Known indirect targets and callbacks supplied to opaque code participate; blocking bodies are traversed too. Aggregate fields and array indices conservatively share cells. Opaque calls may write through supplied addresses and reachable pointer fields. Only actual atomic operations, TLS or the explicit unchecked `shared` assertion permit a task's compiler-visible global writes. The analysis does not claim knowledge of fabricated pointers or foreign hidden globals. All residual backends use this check.
 
 After cleanup, `slc.layout` computes a module-local storage-field list for private
 records. A field used by any remaining read or write stays; folded configuration
@@ -1161,6 +1188,11 @@ specializer, backend or synchronization implementation has been audited.
 
 ## 16. Measuring code size
 
+The numerical reports and benchmarks below are historical examples from before the
+boundary-free library/runtime reset, not measurements of the current baseline.
+Rerun the tool for current evidence; its suggested savings and printed means do not
+justify adding a boundary without a concrete size problem and runtime measurements.
+
 `slc size` answers one question: which applications in place are worth a `call`
 boundary, and which module wrote the C. It is a measurement, not an estimate: the
 backend records how many lines each residual statement became, so a figure is lines of
@@ -1262,11 +1294,11 @@ that returns a reference produces a value that cannot be passed on as a `Ref`. T
 report says so instead of guessing. `--profile written|inline|share` prints the full
 report for one of them.
 
-**Neither extreme is the target.** The inlined end is a pile of copies and the shared
-end is a call on every path that reaches one, so a program wants to be inside the range,
-and the geometric mean of the two is the fair reference for sizes (the arithmetic mean
-is printed too, since it is the one people estimate by eye). The last lines of
-`--compare` say where the program as written sits against them:
+**The comparison is not a tuning target.** The inline and shared profiles expose
+the effects of boundaries. Start from the boundary-free baseline, not from a desired
+position between two sizes. The tool also prints geometric and arithmetic means;
+these historical report heuristics do not measure runtime cost or specialization.
+For example, older reports ended with:
 
 ```text
 the extremes bracket this program: 2,959 lines with everything in place, 652 all-shared;

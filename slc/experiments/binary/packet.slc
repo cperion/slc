@@ -60,5 +60,5 @@ if document then
     local out = assert(io.open(document, "w"))
     out:write("# Wire layouts\n\nGenerated from the executable descriptions.\n\n## Packet\n\n",
         binary.describe packet, "\n\n## Compact\n\n", binary.describe compact, "\n")
-    out:close()
+    out:close
 end

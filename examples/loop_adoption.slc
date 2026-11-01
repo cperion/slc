@@ -1,0 +1,139 @@
+-- Reference-written loop state shares the original local, including aliases.
+local Counting = struct { count: U32, step: U32 }
+function Counting:hit(): Unit
+    self.count = self.count + self.step
+end
+local counting = do(body): U32
+    local state = Counting { count = 0, step = 3 }
+    body(Ref state)
+    return state.count
+end
+local evens = do(n: U32): U32
+    return counting do(..)
+        for i: U32 = 1, n do
+            if i % 2 == 1 then hit end
+        end
+    end
+end
+export evens
+
+local mixed_aliases = do(n: U32): U32
+    local state = Counting { count = 0, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do
+        state.count = state.count + 1
+        alias:hit
+    end
+    return state.count
+end
+export mixed_aliases
+
+local nested_aliases = do(n: U32): U32
+    local state = Counting { count = 0, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do
+        for j: U32 = 1, i do
+            alias:hit
+        end
+    end
+    return state.count
+end
+export nested_aliases
+
+local widening = do(n: U32): U32
+    local state = Counting { count = 0, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do
+        if i == 4 then alias.step = 5 end
+        alias:hit
+    end
+    return state.count
+end
+export widening
+
+local change = do(state: Ref Counting): Unit
+    state.step = state.step + 1
+end
+local escape_inside = do(n: U32): U32
+    local state = Counting { count = 0, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do
+        alias:hit
+        call change alias
+    end
+    return state.count
+end
+export escape_inside
+
+local escape_between = do(n: U32): U32
+    local state = Counting { count = 0, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do alias:hit end
+    call change alias
+    for i: U32 = 1, n do alias:hit end
+    return state.count
+end
+export escape_between
+
+local exits = do(n: U32): U32
+    local state = Counting { count = 0, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do
+        if i > 10 then break end
+        if i % 2 == 0 then continue end
+        alias:hit
+    end
+    return state.count
+end
+export exits
+
+local early_return = do(n: U32): U32
+    return counting do(..)
+        for i: U32 = 1, n do
+            hit
+            if count >= 9 then return end
+        end
+    end
+end
+export early_return
+
+-- Derived values of one bound mutable read share its snapshot.
+local rotate = do(value: U32): U32
+    local left = shl value 3
+    local right = shr value 29
+    return bor left right
+end
+local spin = do(n: U32, seed: U32): U32
+    local state = Counting { count = seed, step = 3 }
+    local alias = Ref state
+    for i: U32 = 1, n do
+        alias.count = rotate alias.count + alias.step
+    end
+    return state.count
+end
+export spin
+
+-- Widening a sum must forget its tag, even when the initial payload is Unit.
+local Choice = oneof { none: Unit, some: U32 }
+local SumState = struct { choice: Choice, step: U32 }
+local sum_field = do(n: U32): U32
+    local state = SumState { choice = Choice.none(), step = 3 }
+    local i = U32 0
+    while i < n do
+        state.choice = Choice.some(i * state.step)
+        i = i + 1
+    end
+    return state.choice { none() = U32 100, some(p) = p + 3 }
+end
+export sum_field
+
+local sum_state = do(n: U32): U32
+    local value = Choice.none()
+    local i = U32 0
+    while i < n do
+        value = Choice.some i
+        i = i + 1
+    end
+    return value { none() = U32 100, some(p) = p + 1 }
+end
+export sum_state

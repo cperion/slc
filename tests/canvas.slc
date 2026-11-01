@@ -21,7 +21,7 @@ local exercise = do(mode: I32): U32
             return canvas.Result.done()
         end
         if mode == 5 then
-            stop()
+            stop
             frame do(..) clear canvas.Color.black end
             return canvas.Result.done()
         end
@@ -29,7 +29,7 @@ local exercise = do(mode: I32): U32
             key = do(..)
                 key_seen(code, pressed, repeated)
                 if pressed then
-                    if code == canvas.Key.escape then stop() end
+                    if code == canvas.Key.escape then stop end
                     if code == canvas.Key.right then x = x + 10 end
                 end
                 return
@@ -39,7 +39,7 @@ local exercise = do(mode: I32): U32
                 clear canvas.Color.black
                 fill_rect x 20 80 60 canvas.Color.orange
                 line 0 0 20 20 canvas.Color.white
-                if mode == 3 then stop() end
+                if mode == 3 then stop end
             end,
         }
     end {

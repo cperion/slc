@@ -1,0 +1,70 @@
+-- Bare names call with zero arguments only when they are whole statements.
+local host_count = 0
+local function host_tick() host_count = host_count + 1 end
+host_tick
+local host_vocabulary = { tick = host_tick }
+host_vocabulary.tick
+local saved_host = host_tick
+assert(saved_host == host_tick and host_count == 2)
+local function return_host() return host_tick end
+assert(return_host() == host_tick)
+local function drive_host()
+    host_tick
+end
+drive_host
+local host_receiver = { count = 0 }
+function host_receiver:tick() self.count = self.count + 1 end
+host_receiver:tick
+assert(host_count == 3 and host_receiver.count == 1)
+
+local Counter = struct { count: U32 }
+function Counter:tick(): Unit
+    self.count = self.count + 1
+end
+local counting = do(body): U32
+    local c = Counter { count = 0 }
+    body(Ref c)
+    return c.count
+end
+local bare_opened = do(n: U32): U32
+    return counting do(..)
+        for i: U32 = 1, n do
+            tick
+        end
+        tick; tick
+    end
+end
+export bare_opened
+
+local bare_method = do(n: U32): U32
+    local c = Counter { count = n }
+    c:tick
+    c:tick
+    return c.count
+end
+export bare_method
+
+local bare_qualified = do(n: U32): U32
+    local count = n
+    local words = { tick = do() count = count + 1 end }
+    words.tick
+    return count
+end
+export bare_qualified
+
+local bare_shadow = do(): U32
+    local total: U32 = 0
+    local tick = do() total = total + 10 end
+    local inside = counting do(..)
+        tick
+    end
+    return total + inside
+end
+export bare_shadow
+
+local answer = do(): U32 = 42
+local value_contexts = do(): U32
+    local action = answer
+    return action()
+end
+export value_contexts

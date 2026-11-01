@@ -20,7 +20,7 @@ local SpinLock = struct { held: Atomic Bool }
 local with_lock = do(lock: Ref SpinLock, body): Unit
     while not lock.held:cas(false, true, "acquire") do
     end
-    body()
+    body
     lock.held:store(false, "release")
 end
 

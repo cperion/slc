@@ -94,7 +94,7 @@ return function(t)
         if workers ~= null Char then n = strtol(workers, null CP, 10) else n = sysconf processors end
         if n < 1 then n = 1 end
         local i = I64 0
-        while i < n do start_worker(); i = i + 1 end
+        while i < n do start_worker; i = i + 1 end
     end
     export slc_idler_signal
     export slc_idler_enqueue

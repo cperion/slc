@@ -12,6 +12,7 @@ local ffi = require 'ffi'
 local types = require 'slc.types'
 local fold = require 'slc.fold'
 local Arrays = require 'slc.array_value'
+local application = require 'slc.application'
 
 local S = {}
 
@@ -231,6 +232,7 @@ local function new_builder(fn)
         regions = {},
         active = {},
         escapes = {},
+        emissions = {},
         lazy = {},
         recursive = {},
         memo = {},
@@ -318,6 +320,7 @@ function Builder:emit(stmt)
     if self.dead then return end
     emitted_stream[#emitted_stream + 1] = stmt
     stmt.id = #emitted_stream
+    self.emissions[#self.emissions + 1] = stmt.id
     local profile = S.size_profile
     if profile then
         stmt.module = profile:module()
@@ -471,8 +474,9 @@ end
 
 function Builder:new_local(t, name)
     local fn = self.fn
+    local frame = self.frames[#self.frames]
     local p = new_place { pk = 'local', T = t, name = name or 'v', id = uid(),
-                          frame = self.frames[#self.frames], owner = self.fn }
+                          frame = frame and frame.local_owner, owner = self.fn }
     if fn then fn.locals[#fn.locals + 1] = p end
     for _, l in ipairs(leaves(p)) do self.state[l] = { uninit = true } end
     return p
@@ -623,6 +627,7 @@ local function pendable(v)
 end
 
 local h = {}
+local Matched = {} -- private, invocation-owned staging result; never residual IR
 h.reads_under = function(e, p)
     local found = false
     local function walk(x)
@@ -707,6 +712,11 @@ function Builder:store(p, v)
     end
     if tracked(p) then
         self:loop_write(p)
+        -- Keep a derived local pending by freezing its already-bound scalar
+        -- inputs once, rather than storing each derived expression separately.
+        if v.k == 'dyn' and v.e.op ~= 'read' and size(v.e) <= PENDING_LIMIT and not free(v.e) then
+            self:freeze_bound_reads(v.e)
+        end
         self:invalidate(p)
         if pendable(v) then
             self.state[p] = { val = v, mat = false }
@@ -720,22 +730,47 @@ function Builder:store(p, v)
     self:emit { op = 'store', place = p, e = ex(v), what = 'a store' }
 end
 
+function Builder:snapshot_read(p, reg)
+    local en = self.state[p]
+    if not reg.done and en and en.mat and en.ver == reg.ver then
+        reg.done = true
+        local t = self:new_temp(p.T)
+        reg.hole.op = 'let'
+        reg.hole.place = t
+        reg.hole.e = read_expr(p)
+        for _, node in ipairs(reg.nodes) do node.place = t; node.ver = nil end
+    end
+end
+
+-- A protected argument read can feed several derived locals (e.g. the two
+-- halves of a rotate). Snapshot that shared input at its binding point, instead
+-- of forcing each derived expression into its own local. Unbound reads are not
+-- promoted: their version/lifetime rules remain unchanged.
+function Builder:freeze_bound_reads(e)
+    if type(e) ~= 'table' then return end
+    if e.op == 'read' then
+        local p = e.place
+        for _, reg in ipairs(self.lazy[p] or {}) do
+            if not reg.done then
+                for _, node in ipairs(reg.nodes) do
+                    if node == e then self:snapshot_read(p, reg); break end
+                end
+            end
+        end
+        return
+    end
+    for _, k in ipairs { 'a', 'b', 'e', 'ptr', 'i', 'n', 'idx', 'slot' } do
+        local child = e[k]
+        if type(child) == 'table' and child.op then self:freeze_bound_reads(child) end
+    end
+    for _, child in ipairs(e.args or {}) do self:freeze_bound_reads(child) end
+    for _, child in pairs(e.fields or {}) do self:freeze_bound_reads(child) end
+end
+
 -- place p is about to get a new version: values bound lazily from its current
 -- contents get their snapshot, written at the point where they were bound
 function Builder:invalidate(p)
-    local regs = self.lazy[p]
-    if not regs then return end
-    local en = self.state[p]
-    for _, reg in ipairs(regs) do
-        if not reg.done and en and en.mat and en.ver == reg.ver then
-            reg.done = true
-            local t = self:new_temp(p.T)
-            reg.hole.op = 'let'
-            reg.hole.place = t
-            reg.hole.e = read_expr(p)
-            for _, node in ipairs(reg.nodes) do node.place = t; node.ver = nil end
-        end
-    end
+    for _, reg in ipairs(self.lazy[p] or {}) do self:snapshot_read(p, reg) end
 end
 
 function Builder:expire(frame)
@@ -808,6 +843,7 @@ end
 function Builder:escape(p)
     local r = root_of(p)
     if r.pk ~= 'local' then return end
+    if not rawget(r, 'escaped') then self:loop_escape(r) end
     -- Escaped is shared across speculative paths; pending stores are not.
     -- A replayed branch must flush its own owner state before taking an address.
     for _, l in ipairs(leaves(r)) do self:materialize(l) end
@@ -2099,6 +2135,9 @@ local function frame_loc(f)
 end
 
 local function push_frame(b, f)
+    -- Locals need only a lifetime identity, not the frame's snapshots and paths.
+    -- Retaining full completed frames through fn.locals makes inlining quadratic.
+    f.local_owner = f.local_owner or {}
     f.region_base = #b.regions
     b.frames[#b.frames + 1] = f
 end
@@ -2110,11 +2149,21 @@ function Builder:snapshot()
     local owned = self.gs_owned and self.gs_owned[self.block]
     return { block = self.block, n = #self.block, state = copy(self.state), dead = self.dead,
              gs_live = self.gs_live and copy(self.gs_live), owned_n = owned and #owned or 0,
-             escapes = #self.escapes }
+             escapes = #self.escapes, emissions = #self.emissions,
+             locals = self.fn and #self.fn.locals }
 end
 
 function Builder:rollback(snap)
     self:bump_checked()
+    -- Preserve stream indices (and nested functions' statements), but release
+    -- this builder's abandoned IR and locals along with the discarded round.
+    for k = #self.emissions, snap.emissions + 1, -1 do
+        emitted_stream[self.emissions[k]] = false
+        self.emissions[k] = nil
+    end
+    if snap.locals then
+        for k = #self.fn.locals, snap.locals + 1, -1 do self.fn.locals[k] = nil end
+    end
     for k = #snap.block, snap.n + 1, -1 do snap.block[k] = nil end
     self.block = snap.block
     self.state = copy(snap.state)
@@ -2331,7 +2380,7 @@ local function static_arg(x, p, w)
     return x
 end
 
-function W:__call(...)
+h.apply_word = function(self, opts, ...)
     local n = select('#', ...)
     local new = { ... }
     for i = 1, n do S.no_pack(new[i]) end
@@ -2362,7 +2411,7 @@ function W:__call(...)
     end
     if self.rest and have + n >= need then
         -- saturated: no surplus to apply to the result
-        return invoke(self, all)
+        return invoke(self, all, opts)
     end
     if have + n < need then
         -- partial application binds static values only
@@ -2378,7 +2427,7 @@ function W:__call(...)
         for i = 1, have + n do w.supplied[i] = all[i] end
         return w
     end
-    local r = invoke(self, all)
+    local r = invoke(self, all, opts)
     if have + n > need then
         local rest = {}
         for i = need - have + 1, n do rest[#rest + 1] = new[i] end
@@ -2429,6 +2478,17 @@ h.each_leaf = function(v, place, other, visit)
     end
 end
 
+-- Widening must forget a sum's tag too. The public dynamic helper preserves
+-- tags, so a payload-free alternative would otherwise remain static forever.
+h.widen_value = function(v)
+    if v.k == 'agg' then
+        local fields = {}
+        for k, x in pairs(v.f) do fields[k] = h.widen_value(x) end
+        return agg(v.T, fields)
+    end
+    return dyn(v.T, ex(v))
+end
+
 -- Agreement is monotone: once a leaf is dynamic it cannot become known again.
 -- Keep the incoming expression when widening; it initializes the loop's storage.
 h.agree_record = function(a, b)
@@ -2440,7 +2500,7 @@ h.agree_record = function(a, b)
             local sub, changed = h.agree_record(x, y)
             fields[fd.name], wider = sub, wider or changed
         elseif static(x) and (y == nil or not static(y) or arg_key(x) ~= arg_key(y)) then
-            fields[fd.name], wider = S.dynamic(x), true
+            fields[fd.name], wider = h.widen_value(x), true
         else fields[fd.name] = x end
     end
     return agg(a.T, fields), wider
@@ -2512,7 +2572,7 @@ h.widened = function(args, positions)
         end
         local w = positions[i]
         if type(w) == 'table' and h.split_record(a) then out[i] = h.agree_record(a, w)
-        elseif w and (static(a) or h.split_record(a)) then out[i] = S.dynamic(a)
+        elseif w and (static(a) or h.split_record(a)) then out[i] = h.widen_value(a)
         else out[i] = a end
     end
     return out
@@ -2556,7 +2616,7 @@ function Builder:run_frame(desc, args, opts)
             key = desc.word and spec_key(desc.word, args), shape = shape_of(args),
             ret = desc.ret, base_block = self.block, sites = {}, rounds = rounds,
             tail_parent = opts.tail_parent, widen = widen, escape_list = escapes,
-            infer = desc.infer,
+            infer = desc.infer, match = mode == 'inline' and opts.match or nil,
         }
         frame.snap = self:snapshot()
         frame.iter_n, frame.iter_state = #self.block, copy(self.state)
@@ -2584,6 +2644,10 @@ function Builder:run_frame(desc, args, opts)
         elseif sig.slc_signal == 'restart' then
             self:rollback(frame.snap)
             if sig.escape then escapes[#escapes + 1] = sig.escape end
+            if sig.adopt then
+                local index, value = desc.adopt(sig.adopt)
+                args[index] = value
+            end
             for i, w in pairs(sig.widen or {}) do
                 if widen[i] == nil then widen[i] = w
                 elseif widen[i] == true or w == true then widen[i] = true
@@ -2653,15 +2717,24 @@ function run_loop_body(self, frame)
     -- that captured them) are plain memory from here on
     for _, p in ipairs(frame.escape_list or {}) do self:escape(p) end
     local vals, lvs = {}, {}
-    -- a loop's state variable is its own place: during the loop nothing else
-    -- reads it (the body works on its round copy), so it carries the state
-    local own = {}
+    -- Residual state reuses the original place. Adopted reference aliases must
+    -- see that same owner rather than a separate source-level round copy.
+    local own, adopted = {}, {}
     for _, sl in ipairs(desc.slots or {}) do
         if sl.idx then own[sl.idx] = sl.place end
+        if sl.adopted then adopted[sl.idx] = sl.place end
     end
     local partial = {}
     for i, a in ipairs(frame.args) do
-        if static(a) or a.k == 'ref' then
+        local ad = adopted[i]
+        if ad and not static(a) and not h.partly_known_record(a) and not rawget(ad, 'escaped') then
+            -- With no invariant leaf, adoption adds no precision. Replay as
+            -- ordinary memory using the same escape/rollback path as aliases.
+            signal('restart', frame, { escape = ad, mode = 'loop' })
+        end
+        if own[i] and rawget(root_of(own[i]), 'escaped') then
+            vals[i] = dyn(a.T, read_expr(own[i]))
+        elseif static(a) or a.k == 'ref' then
             vals[i] = a
         else
             local lv = own[i] and not rawget(own[i], 'escaped') and own[i]
@@ -2769,14 +2842,51 @@ function run_loop_body(self, frame)
     return nil
 end
 
--- a store to a tracked place that existed before a residual loop, from inside
--- it: the outermost such loop restarts its round with the place made memory
+-- Storage for an address exposed inside a residual loop must be initialized
+-- before that loop, not on every iteration. Replay the outermost affected loop
+-- as memory even when its owner had already been adopted as partial state.
+function Builder:loop_escape(p)
+    for _, frame in ipairs(self.frames) do
+        if frame.mode == 'loop' and frame.s0 then
+            for _, leaf in ipairs(leaves(p)) do
+                if frame.s0[leaf] ~= nil then
+                    signal('restart', frame, { escape = p, mode = 'loop' })
+                end
+            end
+        end
+    end
+end
+
+-- Adoption is for this function's initialized ordinary locals, not foreign
+-- owners, atomic/owning records, views, or places already exposed as addresses.
+h.adoptable = function(b, p)
+    if p.pk ~= 'local' or rawget(p, 'owner') ~= b.fn or not tracked(p) then return false end
+    local function ordinary(t)
+        if t.resizable or t.kind == 'atomic' or rawget(t, 'slice_elem') then return false end
+        for _, f in ipairs(t.fields or {}) do if not ordinary(f.type) then return false end end
+        return true
+    end
+    if not ordinary(p.T) then return false end
+    for _, l in ipairs(leaves(p)) do
+        if not b.state[l] or b.state[l].uninit then return false end
+    end
+    return true
+end
+
+-- A reference write not named in the loop's syntax restarts the outermost
+-- affected loop. Track its local owner as state when possible; otherwise expose
+-- it as memory before replaying the loop.
 function Builder:loop_write(p)
     if self.storeback then return end
     for i = 1, #self.frames do
         local f = self.frames[i]
-        if f.mode == 'loop' and f.s0 and f.s0[p] ~= nil and not (f.own and f.own[p]) then
-            signal('restart', f, { escape = root_of(p), mode = 'loop' })
+        local root = root_of(p)
+        if f.mode == 'loop' and f.s0 and f.s0[p] ~= nil and not (f.own and f.own[p])
+            and not (f.desc.adopted and f.desc.adopted[root]) then
+            if f.desc.adopt and h.adoptable(self, root) then
+                signal('restart', f, { adopt = root, mode = 'loop' })
+            end
+            signal('restart', f, { escape = root, mode = 'loop' })
         end
     end
 end
@@ -3034,7 +3144,39 @@ function Builder:apply(w, args, opts)
     return result
 end
 
--- the end of an inlined application: reconcile its returns
+-- A known outcome jumps directly to its owned handler landing. Payload holes
+-- precede frame stores, so a later payload join cannot move a read past mutation.
+function Builder:matched_return(frame, v, at_base)
+    frame.ret = frame.ret or v.T
+    frame.matches = frame.matches or {}
+    local tag = rawget(v, 'tag')
+    local group = frame.matches[tag]
+    if not group then
+        group = { alt = v.T.index[tag], sites = {}, label = 'L' .. uid() }
+        frame.matches[tag] = group
+    end
+    local payload = rawget(v, 'p')
+    local site = { state = self.state, block = self.block, payload = payload }
+    if payload then
+        site.expression = copy_expr(ex(payload))
+        self:check_reads(site.expression)
+        site.hole = { op = 'nop' }
+        self:emit(site.hole)
+    end
+    self:materialize_frame(frame)
+    if at_base then
+        group.base = site
+        frame.match_base = group
+    else
+        site.jump = { op = 'goto', label = group.label }
+        self:emit(site.jump)
+        group.sites[#group.sites + 1] = site
+    end
+    self.dead = true
+end
+
+-- The end of an inlined application: reconcile its returns. Matched producers
+-- leave their separate landings to the enclosing, inferred handler-result frame.
 function Builder:finish_frame(frame)
     if not self.dead then
         if frame.infer and frame.ret == nil then frame.ret = types.Unit end
@@ -3044,6 +3186,7 @@ function Builder:finish_frame(frame)
         end
         self:return_value(frame, nil)
     end
+    if frame.matches then return setmetatable({ frame = frame }, Matched) end
     if not frame.label then
         self.state = frame.direct_state
         return frame.direct
@@ -3067,6 +3210,11 @@ function Builder:finish_frame(frame)
     -- changes it. Use the ordinary join to store both values on their own paths.
     local out = self:join(paths, base)
     for _, site in ipairs(frame.sites) do site.block[#site.block + 1] = site.jump end
+    -- Handler landings are staged as separate paths until their state join has
+    -- inserted its stores. Only then splice them into the linear residual block.
+    for _, section in ipairs(frame.sections or {}) do
+        for _, stmt in ipairs(section) do self.block[#self.block + 1] = stmt end
+    end
     self.block[#self.block + 1] = { op = 'label', label = frame.label }
     self.state = out
     if frame.rvar then return dyn(frame.ret, read_expr(frame.rvar)) end
@@ -3091,7 +3239,7 @@ end
 function Builder:return_value(frame, v)
     if v and is_value(v) and v.k == 'ref' then
         local r = root_of(v.place)
-        if r.pk == 'local' and rawget(r, 'frame') == frame then
+        if r.pk == 'local' and frame.local_owner and rawget(r, 'frame') == frame.local_owner then
             fail(("word %s returns a reference to its own local '%s', which ends with it"):format(
                 frame_name(frame), r.name), 3)
         end
@@ -3113,7 +3261,12 @@ function Builder:return_value(frame, v)
         return
     end
     local at_base = self.block == frame.base_block
-    if at_base and not frame.label then
+    if frame.match and is_value(v) and v.k == 'sumv' and not frame.deferred
+        and (not frame.ret or frame.ret == v.T)
+        and (not at_base or frame.matches or frame.label) then
+        return self:matched_return(frame, v, at_base)
+    end
+    if at_base and not frame.label and not frame.matches then
         frame.direct = v
         frame.direct_state = self.state
         self.dead = true
@@ -3305,9 +3458,26 @@ function S.loop(params, args, body, opts)
             slots[j] = { place = pl }        -- memory, or not a place: used as it is
         end
     end
-    local nfixed = #params
+    local nfixed, nstate = #params, #state
     local desc = { kind = 'loop', params = all_params, ret = types.Unit, slots = slots, nfixed = nfixed,
-                   on_continue = opts.on_continue }
+                   on_continue = opts.on_continue, adopted = {} }
+    -- Invocation-local metadata survives this loop's retries, but is discarded
+    -- when an enclosing frame rolls back and constructs the loop again.
+    desc.adopt = function(pl)
+        assert(not desc.adopted[pl], 'a loop owner is adopted only once')
+        desc.adopted[pl] = true
+        -- An existing syntactic slot must use the same owner as a captured Ref,
+        -- not a second round copy. Keep its source-level parameter position.
+        for _, sl in ipairs(slots) do
+            if sl.place == pl and sl.idx then
+                sl.adopted = true
+                return sl.idx, b:read(pl)
+            end
+        end
+        all_params[#all_params + 1] = { name = pl.name, T = pl.T }
+        slots[#slots + 1] = { place = pl, idx = #all_params, adopted = true }
+        return #all_params, b:read(pl)
+    end
     desc.body = function(...)
         local frame = b.frames[#b.frames]
         local a = { ... }
@@ -3316,7 +3486,9 @@ function S.loop(params, args, body, opts)
         frame.fixed = call
         local round = {}
         for j, sl in ipairs(slots) do
-            if sl.idx and frame.mode == 'loop' and frame.lvs and frame.lvs[sl.idx] == sl.place then
+            if sl.adopted or (sl.idx and rawget(root_of(sl.place), 'escaped')) then
+                round[j] = sl.place
+            elseif sl.idx and frame.mode == 'loop' and frame.lvs and frame.lvs[sl.idx] == sl.place then
                 -- a residual round works on the loop's own variable
                 round[j] = sl.place
             elseif sl.idx then
@@ -3329,7 +3501,7 @@ function S.loop(params, args, body, opts)
             call[nfixed + j] = round[j]
         end
         frame.round = round
-        body(unpack(call, 1, nfixed + #slots))
+        body(unpack(call, 1, nfixed + nstate))
     end
     return b:run_frame(desc, vals, {})
 end
@@ -3665,9 +3837,9 @@ local function comptime(w, args)
     return r
 end
 
-function invoke(w, args)
+function invoke(w, args, opts)
     if not current then return comptime(w, args) end
-    return current:apply(w, args)
+    return current:apply(w, args, opts)
 end
 
 -- export a word as a C function; its remaining requirements become parameters
@@ -3851,18 +4023,18 @@ function S.method(t, name, spec)
 end
 
 -- a receiver that is a value rather than a place gets a temporary place
-local W_call = W.__call
-W.__call = function(w, ...)
+h.call_word = function(w, opts, ...)
     if w.receiver and #w.supplied == 0 and select('#', ...) > 0 then
         local self_arg = (...)
         if is_value(self_arg) and self_arg.k ~= 'ref' and self_arg.T == w.receiver and current then
             local tmp = current:new_local(w.receiver, 'self')
             current:store(tmp, self_arg)
-            return W_call(w, tmp, select(2, ...))
+            return h.apply_word(w, opts, tmp, select(2, ...))
         end
     end
-    return W_call(w, ...)
+    return h.apply_word(w, opts, ...)
 end
+W.__call = function(w, ...) return h.call_word(w, nil, ...) end
 
 -- foreign C functions: always residual effects ------------------------------------------------
 
@@ -3920,6 +4092,21 @@ function X:__tostring() return '<extern ' .. self.cname .. '>' end
 -- word, with staged control flow, and its `return` leaves only the callback.
 -- Its result type comes from its returns.
 
+h.callbacks = setmetatable({}, { __mode = 'kv' })
+h.call_callback = function(desc, opts, ...)
+    local args, n = { ... }, select('#', ...)
+    for i = 1, n do if args[i] == nil then args[i] = S.NIL end end
+    local b = current
+    local fresh = not b
+    if fresh then b = new_builder(nil); push_builder(b) end
+    opts = copy(opts or {})
+    opts.mode = fresh and 'comptime' or (b.fn and 'inline' or 'comptime')
+    local ok, r = pcall(b.run_frame, b, desc, args, opts)
+    if fresh then pop_builder() end
+    if not ok then error(r, 0) end
+    return r
+end
+
 function S.callback(name, loc, f)
     local body = function(...)
         local t, n = { ... }, select('#', ...)
@@ -3927,21 +4114,9 @@ function S.callback(name, loc, f)
         return f(unpack(t, 1, n))
     end
     local desc = { kind = 'word', name = name, loc = loc, body = body, infer = true }
-    return function(...)
-        local args = { ... }
-        local n = select('#', ...)
-        for i = 1, n do
-            if args[i] == nil then args[i] = S.NIL end
-        end
-        local b = current
-        local fresh = not b
-        if fresh then b = new_builder(nil); push_builder(b) end
-        local mode = fresh and 'comptime' or (b.fn and 'inline' or 'comptime')
-        local ok, r = pcall(b.run_frame, b, desc, args, { mode = mode })
-        if fresh then pop_builder() end
-        if not ok then error(r, 0) end
-        return r
-    end
+    local callback = function(...) return h.call_callback(desc, nil, ...) end
+    h.callbacks[callback] = desc
+    return callback
 end
 
 -- a placeholder for a nil argument, so argument lists keep their length
@@ -4033,9 +4208,9 @@ function S.expand(...)
 end
 
 -- saturating chains --------------------------------------------------------------------------------
--- f(a)(b) do ... end: on a word, the arguments accumulate until it is saturated
--- (surplus applies to the result); on a Lua function with a declared arity the
--- same; on any other function each group is its own application.
+-- f(a)(b) do ... end: native words receive the concatenated supply (including
+-- rest arguments); surplus applies to the result. A Lua function with a declared
+-- arity accumulates groups to that arity; other functions apply each group in turn.
 
 S.arity = setmetatable({}, { __mode = 'k' })
 for _, name in ipairs { 'band', 'bor', 'bxor', 'shl', 'shr' } do S.arity[S[name]] = 2 end
@@ -4048,9 +4223,26 @@ function S.chain(f, ...)
     local groups = { ... }
     local all, k = {}, 0
     local function take(g) for i = 1, g.n do k = k + 1; all[k] = g[i] end end
+    local last = groups[#groups]
+    local handlers = last and last.n == 1 and last[1]
+    if current and current.fn and #groups >= 2 and type(handlers) == 'table'
+        and not is_staged(handlers) and not getmetatable(handlers) then
+        if is_word(f) and not f.rest and f.ret.kind == 'sum' then
+            local n = 0
+            for i = 1, #groups - 1 do n = n + groups[i].n end
+            if #f.supplied + n == #f.params then
+                for i = 1, #groups - 1 do take(groups[i]) end
+                return h.finish_match(h.call_word(f, { match = handlers }, unpack(all, 1, k)), handlers)
+            end
+        elseif h.callbacks[f] and #groups == 2 then
+            local args = groups[1]
+            return h.finish_match(h.call_callback(h.callbacks[f], { match = handlers },
+                unpack(args, 1, args.n)), handlers)
+        end
+    end
     if is_word(f) then
-        for _, g in ipairs(groups) do take(g) end
-        return f(unpack(all, 1, k))
+        local args, n = application.word_arguments(groups)
+        return f(unpack(args, 1, n))
     end
     local arity = S.arity[f]
     if arity then
@@ -4063,6 +4255,19 @@ function S.chain(f, ...)
     local r = f
     for _, g in ipairs(groups) do r = r(unpack(g, 1, g.n)) end
     return r
+end
+
+-- A returned chain must retain the same tail behavior as a grouped word call,
+-- including when its lexical declaration lives outside the parsed typed body.
+-- Leave Lua applications and possible immediate matches on the normal path.
+function S.tail_chain(f, ...)
+    if is_word(f) then
+        local args, n = application.word_arguments { ... }
+        if application.without_handler(#f.params - #f.supplied, f.rest, n) then
+            return S.tail(f, unpack(args, 1, n))
+        end
+    end
+    return S.ret(S.chain(f, ...))
 end
 
 -- obj:m(a)(b) do ... end
@@ -4192,38 +4397,50 @@ function S.oname(ctxs, name, lexical)
     return lexical()
 end
 
--- a bare call: an actual member of the innermost receiver that has one wins
-function S.ocall(ctxs, name, lexical, ...)
+-- Resolve once, with identical precedence for ordinary and boundary calls.
+-- Only an actual method introduces a receiver argument; a vocabulary entry or
+-- lexical word does not. In particular, an opening cannot hide an absent name.
+local function opened_callable(ctxs, name, lexical)
     for _, c in ipairs(ctxs) do
         local t = record_type(c)
-        if t and rawget(t, 'methods')[name] then
-            return t.methods[name](c, ...)
-        end
-        if has_name(c, name) then
-            local f = introduced(ctxs, name)
-            return f(...)
-        end
+        if t and rawget(t, 'methods')[name] then return t.methods[name], c end
+        if has_name(c, name) then return introduced(ctxs, name) end
     end
     local f = lexical()
-    if f == nil then fail(("'%s' is not defined"):format(name), 2) end
+    if f == nil then fail(("'%s' is not defined"):format(name), 3) end
+    return f
+end
+
+function S.ocall(ctxs, name, lexical, ...)
+    local f, receiver = opened_callable(ctxs, name, lexical)
+    if receiver ~= nil then return f(receiver, ...) end
     return f(...)
 end
 
--- a saturating chain headed by a free name: a receiver's member, an introduced
--- name, or the binding outside
-function S.ochain(ctxs, name, lexical, first, ...)
-    for _, c in ipairs(ctxs) do
-        local t = record_type(c)
-        if t and rawget(t, 'methods')[name] then
-            local g = { n = first.n + 1, c }
-            for i = 1, first.n do g[i + 1] = first[i] end
-            return S.chain(t.methods[name], g, ...)
-        end
-        if has_name(c, name) then return S.chain(introduced(ctxs, name), first, ...) end
+function S.bocall(ctxs, name, lexical, ...)
+    local f, receiver = opened_callable(ctxs, name, lexical)
+    f = S.boundary(f)
+    if receiver ~= nil then return f(receiver, ...) end
+    return f(...)
+end
+
+local function opened_chain(boundary, ctxs, name, lexical, first, ...)
+    local f, receiver = opened_callable(ctxs, name, lexical)
+    if boundary then f = S.boundary(f) end
+    if receiver ~= nil then
+        local g = { n = first.n + 1, receiver }
+        for i = 1, first.n do g[i + 1] = first[i] end
+        first = g
     end
-    local f = lexical()
-    if f == nil then fail(("'%s' is not defined"):format(name), 2) end
     return S.chain(f, first, ...)
+end
+
+function S.ochain(ctxs, name, lexical, first, ...)
+    return opened_chain(false, ctxs, name, lexical, first, ...)
+end
+
+function S.bochain(ctxs, name, lexical, first, ...)
+    return opened_chain(true, ctxs, name, lexical, first, ...)
 end
 
 -- assignment to a free name inside opened regions: a field place
@@ -4294,9 +4511,7 @@ h.payload_of = function(e, alt)
 end
 
 -- matching is keyed application of a sum value: one handler per alternative
-local function match(s, handlers)
-    if is_place(s) then s = cur():read(s) end
-    local t = s.T
+h.match_handlers = function(t, handlers)
     if type(handlers) ~= 'table' or is_staged(handlers) or getmetatable(handlers) then
         fail(('matching a %s takes one handler per alternative: s { %s = do(p) ... end, ... }'):format(
             t.display, t.alts[1].name), 3)
@@ -4320,6 +4535,13 @@ local function match(s, handlers)
         if alt.type.kind == 'unit' then return h() end
         return h(payload)
     end
+    return call
+end
+
+local function match(s, handlers)
+    if is_place(s) then s = cur():read(s) end
+    local t = s.T
+    local call = h.match_handlers(t, handlers)
     if s.k == 'sumv' then
         -- a known tag: only the selected handler runs
         return call(t.index[rawget(s, 'tag')], rawget(s, 'p'))
@@ -4345,6 +4567,73 @@ local function match(s, handlers)
     return b:run_frame(desc, {}, {})
 end
 S.match = match
+
+h.land_match = function(b, producer, group)
+    local paths, base = {}, {}
+    for _, site in ipairs(group.sites) do
+        assert(table.remove(site.block) == site.jump)
+        paths[#paths + 1] = site
+    end
+    if group.base then
+        b:materialize_frame(producer, group.base.block, group.base.state)
+        paths[#paths + 1] = group.base
+    end
+    for _, site in ipairs(paths) do for p in pairs(site.state) do base[p] = true end end
+    b.state = b:join(paths, base)
+    for _, site in ipairs(group.sites) do site.block[#site.block + 1] = site.jump end
+    b:emit { op = 'label', label = group.label }
+    if group.unknown or group.alt.type.kind == 'unit' then return nil end
+    local first = paths[1].payload
+    local same = static(first)
+    for _, site in ipairs(paths) do
+        if not static(site.payload) or arg_key(site.payload) ~= arg_key(first) then same = false end
+    end
+    if same then return first end
+    -- Differing known payloads also need a slot: never reuse the first return's
+    -- constant for another edge with the same tag.
+    local slot = b:new_var(group.alt.type, 'rvar', 'payload')
+    for _, site in ipairs(paths) do
+        site.hole.op, site.hole.place, site.hole.e = 'store', slot, site.expression
+    end
+    return dyn(group.alt.type, read_expr(slot))
+end
+
+h.finish_match = function(result, handlers)
+    if getmetatable(result) ~= Matched then return result(handlers) end
+    local producer, b = result.frame, cur()
+    local call = h.match_handlers(producer.ret, handlers)
+    local groups, first = {}, producer.match_base
+    local unknown
+    if #producer.sites > 0 or producer.base_state then
+        unknown = { unknown = true, sites = producer.sites, label = producer.label or ('L' .. uid()) }
+        if producer.base_state then
+            unknown.base = { state = producer.base_state, block = producer.base_block }
+            first = unknown
+        end
+    end
+    if first then groups[#groups + 1] = first end
+    for _, alt in ipairs(producer.ret.alts) do
+        local group = producer.matches[alt.name]
+        if group and group ~= first then groups[#groups + 1] = group end
+    end
+    if unknown and unknown ~= first then groups[#groups + 1] = unknown end
+    local desc = { kind = 'word', name = 'immediate match on ' .. producer.ret.display, infer = true,
+        body = function()
+            local frame = b.frames[#b.frames]
+            frame.sections = {}
+            for _, group in ipairs(groups) do
+                local section = b:sub(function()
+                    local payload = h.land_match(b, producer, group)
+                    if group.unknown then
+                        S.ret(match(dyn(producer.ret, read_expr(producer.rvar)), handlers))
+                    else S.ret(call(group.alt, payload)) end
+                end, copy(b.state), 'dyn')
+                frame.sections[#frame.sections + 1] = section
+            end
+            b.dead = true -- every landing returned through this inferred frame
+        end }
+    return b:run_frame(desc, {}, {})
+end
 
 -- Fn values: C function pointers --------------------------------------------------------
 -- fnptr(word) materializes the word as a residual function and is its address.
@@ -4432,7 +4721,8 @@ function S.global(t, opts)
     end
     local g = { T = t, name = opts.name or 'global', exported = opts.exported and true or nil,
                 imported = opts.imported and true or nil, header = opts.header,
-                tls = opts.thread_local and true or nil, init = opts.init }
+                tls = opts.thread_local and true or nil, shared = opts.shared and true or nil,
+                init = opts.init }
     local pt = types.ptr(t)
     return dyn(pt, { op = 'gaddr', global = g, T = pt })
 end

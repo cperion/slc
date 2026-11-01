@@ -26,6 +26,16 @@ check('inferred snapshots and references', inferred.inferred_snapshot(7) == 25)
 check('inferred array and Text constructors', inferred.inferred_storage(8) == 14)
 check('mixed explicit and inferred locals', inferred.inferred_mixed(7) == 17)
 
+-- Bare call statements retain receiver resolution and callable expressions.
+local bare = slc.load(root .. '/examples/bare_statements.slc')
+for i = 0, 16 do
+    check('bare opened calls ' .. i, bare.bare_opened(i) == i + 2)
+    check('bare method calls ' .. i, bare.bare_method(i) == i + 2)
+    check('bare qualified calls ' .. i, bare.bare_qualified(i) == i + 1)
+end
+check('bare lexical callable shadows opened method', bare.bare_shadow() == 10)
+check('callable expression does not invoke', bare.value_contexts() == 42)
+
 -- Tail calls retain compile-time callbacks and the activity's completion.
 local ar = slc.load(root .. '/examples/activity_returns.slc')
 for i = 0, 16 do
@@ -54,6 +64,41 @@ for i = 0, 16 do
     check('loop multiple exits ' .. i, lf.multiple_exits(i) == (i < 3 and 39 or i % 2 == 1 and 55 or 82))
     check('loop boolean exit ' .. i, lf.bool_exit(i) == (i >= 3))
 end
+
+-- Opened boundary calls resolve the callable before applying the boundary.
+local opened = slc.load(root .. '/examples/opened_boundaries.slc')
+local adopted = slc.load(root .. '/examples/loop_adoption.slc')
+local matched = slc.load(root .. '/examples/immediate_matches.slc')
+for i = 0, 16 do
+    check('opened lexical boundary ' .. i, opened.opened_lexical(i) == 1 + 2 * i)
+    check('opened home boundary ' .. i, opened.opened_home(i) == 1 + i)
+    check('opened member boundary ' .. i, opened.opened_member(i) == 1 + 4 * i)
+    check('opened local boundary ' .. i, opened.opened_local(i) == 7 * i)
+    check('opened vocabulary boundary ' .. i, opened.opened_vocabulary(i) == i + 10)
+    check('sum field widens its tag ' .. i, adopted.sum_field(i) == (i == 0 and 100 or 3 * i))
+    check('sum loop state widens its tag ' .. i, adopted.sum_state(i) == (i == 0 and 100 or i))
+    check('adopted loop invariant ' .. i, adopted.evens(i) == 3 * math.floor((i + 1) / 2))
+    check('adopted syntactic alias ' .. i, adopted.mixed_aliases(i) == 4 * i)
+    check('adopted nested alias ' .. i, adopted.nested_aliases(i) == 3 * i * (i + 1) / 2)
+    check('adopted widening ' .. i, adopted.widening(i) == 3 * math.min(i, 3) + 5 * math.max(i - 3, 0))
+    check('adopted in-loop escape ' .. i, adopted.escape_inside(i) == 3 * i + i * (i - 1) / 2)
+    check('adopted between-loop escape ' .. i, adopted.escape_between(i) == 7 * i)
+    check('adopted exits ' .. i, adopted.exits(i) == 3 * math.floor((math.min(i, 10) + 1) / 2))
+    check('adopted callback return ' .. i, adopted.early_return(i) == 3 * math.min(i, 3))
+    local value = i == 0 and 10 or i == 1 and 20 or i == 2 and 32 or 0
+    local expected = i < 3 and value + 1 or 99
+    check('immediate native tags ' .. i, matched.native_match(i) == expected)
+    check('immediate explicit boundary ' .. i, matched.boundary_match(i) == expected)
+    check('immediate nested callback ' .. i, matched.callback_match(i) == (i == 1 and 122 or i == 2 and 134 or 7))
+    check('immediate same-tag state join ' .. i, matched.state_join(i) == (i % 2 == 0 and 11022 or 21043))
+    check('immediate constant payload ' .. i, matched.constant_payload(i) == 101)
+    check('immediate unknown tag ' .. i, matched.mixed_unknown(i) == (i == 0 and 1007 or (i < 3 and value or 90) + 900))
+    check('immediate recursive producer ' .. i, matched.recursive_match(i) == 2 * (i + 1))
+    check('immediate required table argument ' .. i, matched.required_table(i) == i + 9)
+    check('immediate ordered effects ' .. i, matched.side_effects(i) == (i % 2 == 0 and 110111 + i or 220220))
+    check('immediate record payload join ' .. i, matched.record_payload(i) == (i % 2 == 0 and 3 or 7))
+end
+check('adopted shared snapshot', adopted.spin(2, 123) == 7899)
 
 -- Native type descriptors use the same compact layouts as generated C.
 local compact = slc.load(root .. '/examples/storage_layout.slc', { check_layouts = true })

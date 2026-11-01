@@ -213,7 +213,7 @@ return function(t)
     local push = do(task: Ptr Task): Unit
         task.run = RUN_QUEUED
         sched_push(run_queue, task)
-        wake_one_idler()
+        wake_one_idler
     end
 
     local pop = do(): Ptr Task
@@ -261,7 +261,7 @@ return function(t)
     export slc_wake_locked
 
     local slc_task_wake = do(task: Ptr Task): Unit
-        ensure()
+        ensure
         lock sched
         slc_wake_locked task
         unlock sched
@@ -271,7 +271,7 @@ return function(t)
     -- timers: allocation/growth, heap ordering and cancellation are policy words;
     -- the wakeup stays inside the scheduler's synchronization envelope
     local timer_add = do(op: Ptr Op): Unit
-        if heap_add(timers, op) then wake_one_idler() end
+        if heap_add(timers, op) then wake_one_idler end
     end
     local timer_remove = do(op: Ptr Op): Unit = heap_remove(timers, op)
     local fire_timers = do(): Bool = heap_fire(timers, slc_now_ns())
@@ -283,7 +283,7 @@ return function(t)
     end
 
     local slc_timer_register = do(op: Ptr Op): Unit
-        ensure()
+        ensure
         lock sched
         timer_add op
         unlock sched
@@ -291,7 +291,7 @@ return function(t)
     export slc_timer_register
 
     local slc_timer_cancel = do(op: Ptr Op): Unit
-        ensure()
+        ensure
         lock sched
         timer_remove op
         unlock sched
@@ -299,7 +299,7 @@ return function(t)
     export slc_timer_cancel
 
     local slc_select_ticket = do(): U64
-        ensure()
+        ensure
         if det_mode[0] ~= 0 then
             lock sched
             local value = sched_random rng
@@ -319,7 +319,7 @@ return function(t)
     end
 
     local slc_scope_new = do(me_task: Ptr Task): Ptr Scope
-        ensure()
+        ensure
         local scope = scope_allocate me_task
         if scope == null Scope then trap "out of memory for a tasks scope" end
         if me_task.blocking ~= 0 then
@@ -333,7 +333,7 @@ return function(t)
     export slc_scope_new
 
     local slc_retire_channel_sync = do(index: U32): Unit
-        ensure()
+        ensure
         local r = channel_at index
         lock(Ptr r.mu)
         local list = channel_retire r
@@ -346,7 +346,7 @@ return function(t)
     export slc_retire_channel_sync
 
     local slc_retire_pool_sync = do(index: U32): Unit
-        ensure()
+        ensure
         local r = pool_at index
         lock(Ptr r.mu)
         local list = pool_retire r
@@ -359,7 +359,7 @@ return function(t)
     export slc_retire_pool_sync
 
     local slc_pool_new = do(scope: Ptr Scope, elem: U64, n: U32): PoolHandle
-        ensure()
+        ensure
         if n == 0 then trap "a pool needs at least one slot" end
         lock registry
         local acquired = pool_acquire(pool_table[0], pool_metas[0], pfree_head, npools, n, elem)
@@ -389,7 +389,7 @@ return function(t)
     export slc_pool_new
 
     local slc_scope_end = do(task: Ptr Task, ops: Ptr Op, scope: Ptr Scope, site: CString): I32
-        ensure()
+        ensure
         task.cur_scope = scope.parent
         lock sched
         if task.blocking ~= 0 then
@@ -411,7 +411,7 @@ return function(t)
     export slc_scope_end
 
     local slc_chan_new = do(scope: Ptr Scope, elem: U64, cap: U32): Handle
-        ensure()
+        ensure
         lock registry
         local acquired = channel_acquire(channel_table[0], free_head, nrecs)
         if acquired < 0 then
@@ -453,24 +453,24 @@ return function(t)
             task = task.next
         end
         fflush stderr()
-        abort()
+        abort
     end
 
     -- nothing runs, nothing can fire, nobody outside can act: nothing will ever wake
     local check_deadlock = do(): Unit
         if nrunning[0] == 0 and run_queue.len == 0 and nlocal[0] == 0 and timers.len == 0
         and nio[0] == 0 and nactive_plain[0] == 0 and nparked[0] + nblocked[0] > 0 then
-            deadlock()
+            deadlock
         end
     end
 
     -- wait for work or a timer (sched held)
     local idle = do(): Unit
-        init_me()
+        init_me
         -- a fired timer may have woken this very thread: let the caller look again
         if fire_timers() then return end
         if run_queue.len ~= 0 or runnext[0] ~= null Task then return end
-        check_deadlock()
+        check_deadlock
         idler_enqueue(idlers, me)
         if timers.len ~= 0 then
             local deadline = timers.data[0].deadline
@@ -532,7 +532,7 @@ return function(t)
         lock sched
         while true do
             local task = pop()
-            if task ~= null Task then step_task task else idle() end
+            if task ~= null Task then step_task task else idle end
         end
         return null Void
     end
@@ -550,7 +550,7 @@ return function(t)
     export slc_worker_start
 
     local slc_spawn = do(scope: Ptr Scope, frame: U64, step: Fn({ Ptr Task }, I32)): Ptr Task
-        ensure()
+        ensure
         local task = alloc_task(1, frame)
         if task == null Task then trap "out of memory for a task" end
         task.step = step
@@ -566,7 +566,7 @@ return function(t)
     export slc_spawn
 
     local slc_start = do(task: Ptr Task): Unit
-        ensure()
+        ensure
         lock sched
         push task
         unlock sched
@@ -588,7 +588,7 @@ return function(t)
             self_stub.id = new_id()
             self_stub.run = RUN_RUNNING
             self_stub.claimed = 1
-            init_me()
+            init_me
             self_stub.park = (Ptr Void)(Ptr me.cv)
             self_init[0] = 1
         end
@@ -598,7 +598,7 @@ return function(t)
 
     -- a plain thread waits; meanwhile it runs tasks
     local slc_block = do(task: Ptr Task): Unit
-        ensure()
+        ensure
         while true do
             lock sched
             if task.woken == 0 then
@@ -610,7 +610,7 @@ return function(t)
             end
             while task.woken == 0 do
                 local other = pop()
-                if other ~= null Task then call step_task other else idle() end
+                if other ~= null Task then step_task other else idle end
             end
             task.woken = 0
             unlock sched
@@ -630,7 +630,7 @@ return function(t)
     -- I/O ----------------------------------------------------------------------------------------
     -- Only synchronized accounting remains here.
     local slc_io_notify = do(task: Ptr Task): Unit
-        ensure()
+        ensure
         lock sched
         nio[0] = nio[0] - 1
         slc_wake_locked task
@@ -639,7 +639,7 @@ return function(t)
     export slc_io_notify
 
     local slc_io_publish = do(op: Ptr Op): Unit
-        ensure()
+        ensure
         set_claimable op.task
         lock sched
         nio[0] = nio[0] + 1
@@ -670,7 +670,7 @@ return function(t)
     local blocking_fn = fnptr blocking_thread
 
     local slc_run_blocking = do(fn: JobFn, arg: Ptr Void): Unit
-        ensure()
+        ensure
         local job = alloc_job(size_of Job)
         if job == null Job then trap "out of memory for blocking work" end
         job.fn = fn
@@ -706,7 +706,7 @@ return function(t)
     local run_task_job_fn = fnptr run_task_job
 
     local slc_blocking = do(task: Ptr Task, ops: Ptr Op, job: JobFn, env: Ptr Void, site: CString): I32
-        ensure()
+        ensure
         local op = Ptr ops[0]
         begin(task, ops, 1, site)
         op.task = task

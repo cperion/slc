@@ -366,6 +366,18 @@ check('map types: recursive key/value rules', okm, errm)
 local okl, errl = pcall(dofile, root .. '/tests/storage_layout.lua')
 check('record storage layouts: residual use and ABI preservation', okl, errl)
 
+local okt, errt = pcall(dofile, root .. '/tests/task_globals.lua')
+check('task global writes: aliases calls callbacks and blocking', okt, errt)
+
+local okloop, errloop = pcall(dofile, root .. '/tests/loop_adoption.lua')
+check('reference-written loop state: invariants escapes and snapshots', okloop, errloop)
+
+local okretain, errretain = pcall(dofile, root .. '/tests/staging_retention.lua')
+check('staging retention: local identities and rollback storage', okretain, errretain)
+
+local okmatch, errmatch = pcall(dofile, root .. '/tests/immediate_matches.lua')
+check('immediate outcome matching: owned continuations and payload joins', okmatch, errmatch)
+
 local okr, errr = pcall(dofile, root .. '/tests/recursive_foreign.lua')
 check('recursive foreign layouts: construction and rejection', okr, errr)
 

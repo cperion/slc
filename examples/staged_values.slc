@@ -227,7 +227,7 @@ local stage_task_copy = do(byte: U8): U32
         local out = channel(U32, 1)
         spawn do
             out:send(U32 c:str()[0] + a[0] + U32 fixed:str()[0] - 97)
-            out:close()
+            out:close
         end
         c.bytes[0] = 99
         a[0] = 100

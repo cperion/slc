@@ -1,6 +1,6 @@
 local model = require "ui.counter"
 local App, ui = model.App, model.ui
-local layout, dispatch = ui.layout(App), ui.dispatch(App)
+local layout, dispatch = ui.layout App, ui.dispatch App
 local missing_metrics = extern("slc_trap", { CString }, Unit)
 local no_metrics = do(caption: Ref Chars(256), size: F32, font: U32): ui.Size
     missing_metrics "this fixed-size example must not request font metrics"
@@ -37,4 +37,4 @@ local fixed_increment_y = do(): F32
     return app.counter.increment_button.y
 end
 export fixed_increment_y
-return { App = App, ui = ui, metrics = no_metrics }
+return { .App, .ui, metrics = no_metrics }

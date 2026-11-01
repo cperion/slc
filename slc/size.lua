@@ -54,8 +54,8 @@ function Profile:measure()
     local prefix, hot = { [0] = 0 }, { [0] = 0 }
     for i = 1, stream do
         local st = S.statement(i)
-        prefix[i] = prefix[i - 1] + (st.lines or 0)
-        hot[i] = hot[i - 1] + (st.loop and 1 or 0)
+        prefix[i] = prefix[i - 1] + (st and st.lines or 0)
+        hot[i] = hot[i - 1] + (st and st.loop and 1 or 0)
     end
     self.prefix = prefix
     for _, a in ipairs(self.apps) do
@@ -124,7 +124,7 @@ function Profile:by_module()
     local totals, order, counted = {}, {}, 0
     for i = 1, S.emitted() do
         local st = S.statement(i)
-        local lines = st.lines or 0
+        local lines = st and st.lines or 0
         if lines > 0 then
             local name = st.module or '(generated)'
             if not totals[name] then totals[name] = 0; order[#order + 1] = name end

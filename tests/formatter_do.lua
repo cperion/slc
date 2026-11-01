@@ -16,7 +16,7 @@ end
 formatted('host method block', 'items:each(do(item)\nconsume item\nend)',
     'items:each do(item)\n    consume item\nend\n')
 formatted('host plain block', 'visit(do\nwork()\nend)',
-    'visit do\n    work()\nend\n')
+    'visit do\n    work\nend\n')
 formatted('inline block', 'visit(do(x) return x end)', 'visit do(x) return x end\n')
 formatted('comments in body', 'visit(do(x) -- keep this\n-- and this\nconsume x\nend)',
     'visit do(x)  -- keep this\n    -- and this\n    consume x\nend\n')
@@ -24,8 +24,8 @@ formatted('already bare', 'visit do(x)\nconsume x\nend',
     'visit do(x)\n    consume x\nend\n')
 formatted('preserve option', 'visit(do(x)\nconsume x\nend)',
     'visit(do(x)\n        consume x\n    end)\n', { call_style = 'preserve' })
-formatted('next-line do stays delimited', 'visit(\ndo(x)\nconsume x\nend)',
-    'visit(\n    do(x)\n        consume x\n    end)\n')
+formatted('next-line do joins owning call', 'visit(\ndo(x)\nconsume x\nend)',
+    'visit do(x)\n    consume x\nend\n')
 check('invalid split owning call rejected', not pcall(fmt.format, 'visit\n(do end)'))
 formatted('multiple arguments stay together', 'visit(1, do(x)\nconsume x\nend)',
     'visit(1, do(x)\n        consume x\n    end)\n')
@@ -81,4 +81,38 @@ local f = do(x: U32): U32
 end
 export f
 ]])
+equivalent('host_minimal_calls.slc', [=[
+local identity = do(x) = x
+local curry = do(x) = do(y) = x + y
+local total = 0
+local consume = do(x) total = total + x end
+consume(
+    identity(--[[ argument ]] 3)
+)
+local n = curry(
+    4
+)(
+    5
+)
+local visit = do(body) body(2) end
+visit(
+    do(x)
+        consume(x -- keep this newline
+        )
+    end
+)
+assert(total == 5)
+assert(n == 9)
+]=], true)
+equivalent('native_minimal_calls.slc', [=[
+local f = do(x: U32): U32
+    local n = U32(
+        x
+    )
+    return add(--[[ argument ]] x)(
+        n
+    )
+end
+export f
+]=])
 print(('%d do-block formatter checks passed'):format(passed))

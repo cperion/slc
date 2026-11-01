@@ -16,7 +16,8 @@ local Observation = struct {
 local Button = struct { x: U32, y: U32, width: U32, height: U32, color: U32, enabled: Bool }
 local Number = struct { x: U32, y: U32, width: U32, height: U32, color: U32, value: U32 }
 local Confirmation = struct { visible: Bool, reset_button: Button, keep_button: Button }
-local Counter = struct { count: Number, increment_button: Button, reset_button: Button, confirm: Confirmation }
+local Counter = struct { count: Number,
+    increment_button: Button, reset_button: Button, confirm: Confirmation }
 local App = struct { counter: Counter }
 
 Confirmation.Event = oneof { reset_button: Unit, keep_button: Unit }
@@ -27,7 +28,7 @@ local Reply = oneof { stay: Unit, quit: Unit }
 
 function Button:contains(x: U32, y: U32): Bool
     return self.enabled and x >= self.x and x < self.x + self.width
-        and y >= self.y and y < self.y + self.height
+    and y >= self.y and y < self.y + self.height
 end
 
 function Button:draw(frame: Ref Frame, index: U32, control: U32): Unit
@@ -46,7 +47,7 @@ function Confirmation:close(): Unit
 end
 
 function Confirmation:handle(event: Confirmation.Event): Confirmation.Outcome
-    self:close()
+    self:close
     return event {
         reset_button() = Confirmation.Outcome.reset(),
         keep_button() = Confirmation.Outcome.keep(),
@@ -65,11 +66,11 @@ end
 
 function Counter:handle(event: Counter.Event): Unit
     event {
-        increment_button = do() self:increment() end,
-        reset_button = do() self.confirm:open() end,
+        increment_button = do() self:increment end,
+        reset_button = do() self.confirm:open end,
         confirm = do(decision)
             decision {
-                reset = do() self:reset() end,
+                reset = do() self:reset end,
                 keep = do() end,
             }
         end,
@@ -81,17 +82,17 @@ end
 function Counter:route(x: U32, y: U32): Unit
     if self.confirm.visible then
         if self.confirm.reset_button:contains(x, y) then
-            local decision = self.confirm:handle(Confirmation.Event.reset_button())
-            self:handle(Counter.Event.confirm(decision))
+            local decision = self.confirm:handle Confirmation.Event.reset_button()
+            self:handle(Counter.Event.confirm decision)
         elseif self.confirm.keep_button:contains(x, y) then
-            local decision = self.confirm:handle(Confirmation.Event.keep_button())
-            self:handle(Counter.Event.confirm(decision))
+            local decision = self.confirm:handle Confirmation.Event.keep_button()
+            self:handle(Counter.Event.confirm decision)
         end
     else
         if self.increment_button:contains(x, y) then
-            self:handle(Counter.Event.increment_button())
+            self:handle Counter.Event.increment_button()
         elseif self.reset_button:contains(x, y) then
-            self:handle(Counter.Event.reset_button())
+            self:handle Counter.Event.reset_button()
         end
     end
 end
@@ -103,7 +104,7 @@ end
 function App:route(kind: U32, x: U32, y: U32): Bool
     local quit: Bool = false
     if kind == 1 then
-        local reply = self:handle(App.Event.close_requested())
+        local reply = self:handle App.Event.close_requested()
         quit = reply { stay() = false, quit() = true }
     elseif kind == 0 then
         self.counter:route(x, y)
@@ -130,12 +131,16 @@ end
 local make_app = do(initial: U32): App = App {
     counter = Counter {
         count = Number { x = 20, y = 20, width = 208, height = 24, color = 66051, value = initial },
-        increment_button = Button { x = 20, y = 60, width = 100, height = 30, color = 263430, enabled = initial < 999999 },
-        reset_button = Button { x = 128, y = 60, width = 100, height = 30, color = 460809, enabled = true },
+        increment_button = Button { x = 20,
+            y = 60, width = 100, height = 30, color = 263430, enabled = initial < 999999 },
+        reset_button = Button { x = 128,
+            y = 60, width = 100, height = 30, color = 460809, enabled = true },
         confirm = Confirmation {
             visible = false,
-            reset_button = Button { x = 40, y = 140, width = 80, height = 30, color = 658188, enabled = true },
-            keep_button = Button { x = 128, y = 140, width = 100, height = 30, color = 855567, enabled = true },
+            reset_button = Button { x = 40,
+                y = 140, width = 80, height = 30, color = 658188, enabled = true },
+            keep_button = Button { x = 128,
+                y = 140, width = 100, height = 30, color = 855567, enabled = true },
         },
     },
 }
@@ -164,8 +169,8 @@ export run_counter_generated
 -- Native logic checks do not require an input source or a renderer.
 local counter_limit = do(initial: U32): U32
     local application = make_app initial
-    application.counter:handle(Counter.Event.increment_button())
-    application.counter:handle(Counter.Event.increment_button())
+    application.counter:handle Counter.Event.increment_button()
+    application.counter:handle Counter.Event.increment_button()
     if application.counter.increment_button.enabled then return 0 end
     return application.counter.count.value
 end
@@ -174,16 +179,16 @@ export counter_limit
 local counter_reset_limit = do(): Bool
     local application = make_app(U32 999999)
     application.counter.increment_button.enabled = false
-    application.counter:handle(Counter.Event.confirm(Confirmation.Outcome.reset()))
+    application.counter:handle(Counter.Event.confirm Confirmation.Outcome.reset())
     return application.counter.count.value == 0 and application.counter.increment_button.enabled
 end
 export counter_reset_limit
 
 local known_counter = do(): U32
     local application = make_app(U32 0)
-    application.counter:handle(Counter.Event.increment_button())
-    application.counter:handle(Counter.Event.increment_button())
-    application.counter:handle(Counter.Event.confirm(Confirmation.Outcome.reset()))
+    application.counter:handle Counter.Event.increment_button()
+    application.counter:handle Counter.Event.increment_button()
+    application.counter:handle(Counter.Event.confirm Confirmation.Outcome.reset())
     return application.counter.count.value
 end
 assert(host(known_counter()) == 0)

@@ -148,6 +148,19 @@ local _, unsupported = slc.compile('local missing = extern("slc_direct_missing_f
 local ok, err = pcall(direct.compile, unsupported)
 check(not ok and tostring(err):find('unresolved native symbol slc_direct_missing_fixture',1,true), tostring(err))
 check(not pcall(actual.deep), 'arity mismatch was accepted')
+-- Staging mechanisms must leave the same ordinary IR for every backend.
+for _, name in ipairs {'opened_boundaries', 'loop_adoption', 'immediate_matches'} do
+    local path = 'examples/' .. name .. '.slc'
+    local f = assert(io.open(path, 'rb')); local text = f:read('*a'); f:close()
+    baseline = slc.load(path)
+    actual = without_processes(function() return slc.load(path, {backend='direct'}) end)
+    c = c_baseline(text, path, actual, 'c-' .. name)
+    for fn in pairs(actual.raw) do
+        for n = 0, 20 do
+            if fn == 'spin' then same(fn, n, n + 1234567) else same(fn, n) end
+        end
+    end
+end
 for _, handle in ipairs(c_handles) do check(ffi.C.dlclose(handle) == 0, 'C baseline unload') end
 checks = checks + require('tests.storage_boundaries')(slc, true)
 print(('direct prepared IR: %d differential/diagnostic checks passed (C/gccjit/direct)'):format(checks))

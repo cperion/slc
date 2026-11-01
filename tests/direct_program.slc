@@ -126,7 +126,8 @@ local float_pointer = do(p: Ptr F32, delta: F32): F32
     return p[0]
 end
 export float_pointer
-local float10 = extern("cp_fixture_float10", { F64, F64, F64, F64, F64, F64, F64, F64, F64, F64 }, F64)
+local float10 = extern("cp_fixture_float10",
+    { F64, F64, F64, F64, F64, F64, F64, F64, F64, F64 }, F64)
 local native_float = do(a: F64): F64 = float10(a, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 export native_float
 local varsum = extern("cp_fixture_variadic", { U32 }, F64, { variadic = true })
@@ -149,7 +150,7 @@ local large_external = extern("cp_fixture_large", { U64, U64 }, Large)
 local rollback_external = extern("cp_fixture_rollback", { U64, U64, U64, U64, U64, Two, U64 }, U64)
 local native_record = do(a: U64, b: F64): F64
     local m = mixed_external(Mixed { .a, .b }, 7)
-    return F64(m.a) + m.b
+    return F64 m.a + m.b
 end
 export native_record
 local native_large = do(a: U64, b: U64): U64
@@ -173,7 +174,8 @@ local function mixed_recursive(m: Mixed, n: U64): Mixed
     local previous = mixed_recursive(m, n - 1)
     return Mixed { a = previous.a + 1, b = previous.b + 0.5 }
 end
-local recursive_record_callback = do(a: U64, b: F64): F64 = call_mixed(fnptr mixed_recursive, a, b, 7)
+local recursive_record_callback = do(a: U64, b: F64): F64 = call_mixed(fnptr mixed_recursive,
+    a, b, 7)
 export recursive_record_callback
 
 local checked = do(n: U32): U32
@@ -206,7 +208,7 @@ export sum_value
 local tls_counter = global(U64, { thread_local = true, init = 7 })
 local tls_value = do(): U64 = tls_counter[0]
 export tls_value
-local tls_probe = do(errors: Ptr (Atomic U64), n: U32): Unit
+local tls_probe = do(errors: Ptr(Atomic U64), n: U32): Unit
     for i: U32 = 1, n do
         tls_counter[0] = tls_counter[0] + 1
         if tls_counter[0] ~= U64 i + 7 then errors[0]:add(1, "relaxed") end

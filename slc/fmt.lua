@@ -170,19 +170,37 @@ local function parse(source, filename)
         lambdas[#lambdas + 1] = { fn = node.fn, closer = closer, native = native }
         return node
     end
+    local item, item_ends = p.item, {}
+    function p:item(...)
+        local result = item(self, ...)
+        item_ends[result] = last
+        return result
+    end
     function p:args()
-        local callee = last
         local start = r:peek().index
         local result = args(self)
-        if ts[start].v == '(' and #result == 1 then
+        if ts[start].v == '(' and #result == 0 then
+            -- Reparsing below permits omission only for named call statements;
+            -- value/return expressions and ambiguous adjacent calls keep ().
+            calls[#calls + 1] = { start, last, empty_host = native_depth == 0 }
+        elseif ts[start].v == '(' and #result > 1 and native_depth > 0 then
+            -- The compiler's application analysis will filter these once the
+            -- whole tree (including later writes and captured aliases) is known.
+            local separators = {}
+            for i = 1, #result - 1 do
+                local at = item_ends[result[i]] + 1
+                while ts[at].t == 'space' or ts[at].t == 'comment' do at = at + 1 end
+                assert(ts[at].t == ',')
+                separators[#separators + 1] = at
+            end
+            calls[#calls + 1] = { start, last, arguments = result, separators = separators }
+        elseif ts[start].v == '(' and #result == 1 then
             local first = start + 1
-            while ts[first] and ts[first].t == 'space' do first = first + 1 end
-            -- Only the opening do must share the owning call's line. The body
-            -- and closing end may span lines; their comments remain untouched.
-            local lambda_block = result[1].k == 'lambda' and result[1].fn.body ~= nil
+            while ts[first] and (ts[first].t == 'space' or ts[first].t == 'comment') do first = first + 1 end
+            -- Boundary whitespace can put do on the owning call's line without
+            -- changing any line boundaries inside its body.
+            local do_block = result[1].k == 'lambda' and result[1].fn.body ~= nil
                 and ts[first].v == 'do'
-            local do_block = lambda_block and ts[callee] ~= nil
-                and ts[first].line == lexer.sync(ts[callee].line, ts[callee].v)
             local arg = result[1]
             while arg.k == 'field' do arg = arg.obj end
             -- The outer LuaMacro layer and native-body parser differ for a
@@ -191,9 +209,8 @@ local function parse(source, filename)
             -- AST equivalence to justify a host-macro rewrite.
             local host_safe = arg.k == 'name' or arg.k == 'num' or arg.k == 'str'
                 or arg.k == 'true' or arg.k == 'false' or arg.k == 'table' or do_block
-            if (not lambda_block or do_block)
-                and (native_depth > 0 or (host_safe and host_argument_depth == 0)) then
-                calls[#calls + 1] = { start, last, do_block = do_block }
+            if native_depth > 0 or (host_safe and host_argument_depth == 0) then
+                calls[#calls + 1] = { start, last }
             end
         end
         return result
@@ -296,29 +313,44 @@ local function parse(source, filename)
             local open = stack[#stack]; open.commas[#open.commas + 1] = i
         end
     end
+    local facts = syntax.application_facts(ast)
+    local function eligible(list)
+        local out = {}
+        for _, call in ipairs(list) do
+            if not call.arguments or facts.arguments[call.arguments] then out[#out + 1] = call end
+        end
+        return out
+    end
+    calls = eligible(calls)
+    for i, chain in ipairs(chains) do chains[i] = eligible(chain) end
     return { ast = ast, tokens = ts, ranges = ranges, calls = calls, colons = colons, commas = commas,
              unary = unary, chains = chains, lambdas = lambdas, typespans = typespans, locals = locals,
              parameter_names = parameter_names }
 end
 
--- Source locations and application spelling do not affect the parsed program.
--- Only the parser's synthetic literal parentheses are erased, not expression
--- grouping (which can also affect Lua's multiple-result adjustment).
-local function fingerprint(node)
-    if type(node) ~= 'table' then
-        local value = tostring(node)
-        return type(node) .. ':' .. #value .. ':' .. value
+-- Compare the compiler's proven application normal forms, not just spelling.
+-- Unknown argument groups and expression grouping retain their exact structure.
+local function fingerprint(root)
+    local facts = syntax.application_facts(root)
+    local function encode(node)
+        if type(node) ~= 'table' then
+            local value = tostring(node)
+            return type(node) .. ':' .. #value .. ':' .. value
+        end
+        node = facts.normal[node] or node
+        -- Only the parser's synthetic literal parentheses are erased.
+        if node.k == 'paren' and (node.e.k == 'num' or node.e.k == 'str') then return encode(node.e) end
+        local keys = {}
+        for k in pairs(node) do
+            if k ~= 'line' and k ~= 'end_line' and k ~= 'juxta' then keys[#keys + 1] = k end
+        end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        local out = { '{' }
+        for _, k in ipairs(keys) do out[#out + 1] = tostring(k) .. '=' .. encode(node[k]) .. ';' end
+        out[#out + 1] = '}'
+        return table.concat(out)
     end
-    if node.k == 'paren' and (node.e.k == 'num' or node.e.k == 'str') then return fingerprint(node.e) end
-    local keys = {}
-    for k in pairs(node) do
-        if k ~= 'line' and k ~= 'end_line' and k ~= 'juxta' then keys[#keys + 1] = k end
-    end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-    local out = { '{' }
-    for _, k in ipairs(keys) do out[#out + 1] = tostring(k) .. '=' .. fingerprint(node[k]) .. ';' end
-    out[#out + 1] = '}'
-    return table.concat(out)
+    return encode(root)
 end
 
 -- A spine is a maximal chain of trailing block lambdas whose bodies end at the
@@ -605,20 +637,60 @@ local function minimal(source, info, filename, signature)
         local candidate = source
         for _, call in ipairs(calls) do
             local a, b = info.tokens[call[1]], info.tokens[call[2]]
-            if not call.do_block then
-                if a.line ~= b.line then return end
-                for i = call[1] + 1, call[2] - 1 do
-                    if info.tokens[i].t == 'comment' then return end
+            if call.empty_host then
+                local next = call[2] + 1
+                while info.tokens[next] and (info.tokens[next].t == 'space' or info.tokens[next].t == 'comment') do
+                    next = next + 1
+                end
+                -- A following '(' is ambiguous in Lua host code. Retain the
+                -- explicit call rather than reinterpret f()\n(g)() as f(g)().
+                if info.tokens[next] and info.tokens[next].t == '(' then return end
+            end
+            if call.arguments then
+                local function blank(tk)
+                    candidate = candidate:sub(1, tk.first - 1) .. string.rep(' ', tk.last - tk.first + 1)
+                        .. candidate:sub(tk.last + 1)
+                end
+                -- Parser-owned separators, not every comma at this delimiter
+                -- depth: a do argument can itself contain local/return lists.
+                for _, i in ipairs(call.separators) do
+                    blank(info.tokens[i])
+                    local before = i - 1
+                    while info.tokens[before].t == 'space' do before = before - 1 end
+                    if info.tokens[before].t ~= 'comment' then
+                        for j = before + 1, i - 1 do blank(info.tokens[j]) end
+                    end
+                    local after = i + 1
+                    while info.tokens[after].t == 'space' do
+                        blank(info.tokens[after]); after = after + 1
+                    end
                 end
             end
-            candidate = candidate:sub(1, a.first - 1) .. ' ' .. candidate:sub(a.last + 1, b.first - 1)
-                .. ' ' .. candidate:sub(b.last + 1)
+            -- Join only boundary whitespace inside the delimiters. A bare name
+            -- argument must share its callee's line. Never flatten the argument
+            -- itself: it may contain a block, a comment or a long literal.
+            local first = a.last + 1
+            local i = call[1] + 1
+            while i < call[2] and info.tokens[i].t == 'space' do
+                first = info.tokens[i].last + 1
+                i = i + 1
+            end
+            local finish = b.first - 1
+            local j = call[2] - 1
+            while j >= i and info.tokens[j].t == 'space' do j = j - 1 end
+            -- Keep the newline terminating a line comment (and conservatively
+            -- any trailing comment); otherwise a following token can be eaten.
+            if j >= i and info.tokens[j].t ~= 'comment' then finish = info.tokens[j].last end
+            candidate = candidate:sub(1, a.first - 1) .. string.rep(' ', first - a.first)
+                .. candidate:sub(first, finish) .. string.rep(' ', b.last - finish)
+                .. candidate:sub(b.last + 1)
         end
         local ok, result = pcall(parse, candidate, filename)
         if ok and fingerprint(result.ast) == signature then source = candidate end
     end
     -- f(a)(b) needs both pairs removed together; removing either alone can
-    -- attach b to a or end the application chain. Never split f(a, b).
+    -- attach b to a or end the application chain. Multi-argument candidates
+    -- have already been proved to be regroupable native-word applications.
     for _, chain in ipairs(info.chains) do attempt(chain) end
     for _, call in ipairs(info.calls) do attempt { call } end
     return source
@@ -737,8 +809,14 @@ function M.format(source, options, filename)
     if options.call_style == 'minimal' then
         -- Remove call parentheses first: a sole `do` block argument carries no
         -- parentheses, and only then are the spine's closers adjacent.
-        source = minimal(source, info, filename, signature)
-        info = parse(source, filename)
+        -- A successful removal can unlock another candidate or chain. Reparse
+        -- and reach a fixed point so a second formatting is a no-op.
+        repeat
+            local previous = source
+            source = minimal(source, info, filename, signature)
+            info = parse(source, filename)
+            if source == previous then break end
+        until false
         source = fold_spines(source, info, filename, signature)
         info = parse(source, filename)
     end

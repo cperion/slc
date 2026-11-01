@@ -139,7 +139,8 @@ end
 - Indentation follows parsed blocks and delimiters, including trailing lambdas,
   context openings and `endall`; `spine_style` decides how a spine's link bodies
   indent.
-- Existing statement/application line boundaries stay in place, except that a
+- Existing statement/application line boundaries stay in place, except that safe
+  call rewrites join whitespace just inside removed argument delimiters, and a
   folded spine's run of closers becomes one `endall` line. Single-line blocks
   stay single-line; runs of empty lines become one empty line.
 - Long delimited lists can wrap after commas. Long application chains, comments,
@@ -150,18 +151,61 @@ end
 - Inferred declarations stay inferred, and explicit annotations remain explicit.
 
 With `call_style = "minimal"`, `Ref(h)` becomes `Ref h`, and a safe unary-call
-chain such as `f(a)(b)` can become `f a b`. A sole `do` block argument also loses
-its call parentheses when `do` is on the owning call's line: `items:each(do(item)
-... end)` becomes `items:each do(item) ... end`, even with a multiline body.
-Comments inside the block are preserved. A next-line `do` remains delimited;
-`call_style = "preserve"` leaves the original parentheses intact.
+chain such as `f(a)(b)` can become `f a b`. Unary call statements also use this
+style: `consume(value)` becomes `consume value`. Whitespace just inside the call
+delimiters can be joined, so multiline arguments and chains get the same treatment.
+A sole `do` block argument also loses its call parentheses: `items:each(do(item)
+... end)` becomes `items:each do(item) ... end`, even with a multiline body or a
+next-line `do`. The block body's line boundaries remain intact.
+Comments are not a blanket barrier: `f(--[[ note ]] x)` becomes
+`f --[[ note ]] x`, and `f(x -- note` followed by a newline and `)` can become
+`f x -- note`. Comment and literal bytes are preserved. Rewrites repeat until no
+further safe removal is available; `call_style = "preserve"` retains the original
+parentheses and argument line boundaries.
 
-Necessary grouping, empty calls, other commented argument lists and uncertain
-rewrites remain delimited. In particular,
-`f(a, b)` is **not** blindly changed to `f a b`: one two-argument host call is not
-necessarily the same as two successive calls. Complex host-macro argument
-rewrites are deliberately conservative, even when the native-body grammar would
-permit them.
+Minimal style also omits empty parentheses from named call **statements**:
+`refresh()` becomes `refresh`, `screen.refresh()` becomes `screen.refresh`, and
+`screen:refresh()` becomes `screen:refresh`. It never does this in a value or
+return expression: `local result = refresh()` and `return refresh()` keep `()`.
+`call_style = "preserve"` retains both explicit and already-bare spellings.
+Reparsing prevents adjacent statements from becoming an argument chain; host
+Lua postfix ambiguities are also kept delimited.
+
+### Compiler-informed word applications
+
+In typed bodies, minimal style also rewrites `add(x, y)` to `add x y` when the
+callee is provably an SLC word. This uses the same non-executing application
+analysis as staged code generation ([application.lua](<../slc/application.lua>)), rather than assuming
+that every callable follows word saturation:
+
+```lua
+local add = do(a: U32, b: U32): U32 = a + b
+local plus = add
+local run = do(x: U32, y: U32): U32
+    return plus(x, y)                     -- return plus x y
+end
+```
+
+The analysis follows local typed lambdas/functions, immutable aliases and provably
+unsaturated partial applications. It respects lexical scopes, shadowing and writes
+in captured closures. A later write conservatively invalidates the binding; an
+opened context prevents guessing which vocabulary supplies a name. Imports and
+user code are never executed, and method/field callees remain unknown.
+
+Native word chains collect all argument groups, including for rest words. Ordinary
+Lua functions do not. Host call sites therefore retain multi-argument groups even
+when a local word declaration is visible. Unknown callees inside typed bodies also
+retain their groups.
+
+Regrouping must preserve list expansion and immediate matching: a call/spread
+argument that could return multiple values, an explicit `call` boundary, and
+non-rest overapplication stay grouped. This preserves the distinction between
+supplying a handler as an argument and applying it to a saturated producer's result.
+
+Necessary expression grouping and uncertain rewrites remain delimited: for example,
+`f(x + 1, y)` and `f(x, y).value`. A leading line comment can still require argument
+delimiters because a bare name argument must share its callee's line. Complex
+host-macro argument rewrites remain conservative.
 
 ## Trailing-block spines
 
@@ -192,7 +236,9 @@ the closers blocks the fold, and host Lua keeps its `end`s because `endall` is a
 typed-body form.
 
 Formatting reparses candidate call rewrites and the final output and compares
-syntax trees, ignoring only source positions and equivalent application spelling.
+syntax trees in the compiler's proven application normal form, ignoring source
+positions and equivalent application spelling. Unknown call groups retain their
+original structure.
 A parse failure or a changed tree is an error; the input is not rewritten.
 This check is not a type checker or a substitute for compiling the program.
 Custom macro grammars outside the supported SLC/Lua forms are not interpreted by

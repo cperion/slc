@@ -1,0 +1,131 @@
+local Choice = oneof { yes: U32, no: Unit }
+local Box = struct { value: U32 }
+local choose = do(n: U32): Choice
+    if n == 0 then return Choice.yes(U32 10) end
+    if n == 1 then return Choice.yes(U32 20) end
+    if n == 2 then return Choice.yes(n + 30) end
+    return Choice.no()
+end
+local native_match = do(n: U32): U32
+    return choose(n) { yes(p) = p + 1, no() = U32 99 }
+end
+export native_match
+
+local callback_match = do(n: U32): U32
+    local body = do()
+        -- A nested producer must not take the outer callback's continuation.
+        local inner = choose(n) { yes(p) = p, no() = U32 4 }
+        if inner > 15 then return Choice.yes(inner + 100) end
+        return Choice.no()
+    end
+    return body() { yes(p) = p + 2, no() = U32 7 }
+end
+export callback_match
+
+local state_join = do(n: U32): U32
+    local state = Box { value = 0 }
+    local body = do()
+        if n % 2 == 0 then
+            state.value = 10
+            return Choice.yes(U32 11)
+        end
+        state.value = 20
+        return Choice.yes(U32 22)
+    end
+    local result = body() {
+        yes = do(p)
+            state.value = state.value + 1
+            return p + state.value
+        end,
+        no() = U32 0,
+    }
+    return result + state.value * 1000
+end
+export state_join
+
+local constant_payload = do(n: U32): U32
+    local body = do()
+        if n > 0 then return Choice.yes(U32 100) end
+        return Choice.yes(U32 100)
+    end
+    return body() { yes(p) = p + 1, no() = U32 0 }
+end
+export constant_payload
+
+local pass = do(value: Choice, n: U32): Choice
+    if n == 0 then return Choice.yes(U32 7) end
+    return value
+end
+local pass_other = do(value: Choice, n: U32): Choice
+    if n == 0 then return value end
+    return Choice.yes(U32 9)
+end
+local mixed_unknown = do(n: U32): U32
+    local value = call choose n
+    local a = pass(value, n) { yes(p) = p, no() = U32 90 }
+    local b = pass_other(value, n) { yes(p) = p, no() = U32 80 }
+    return a + 100 * b
+end
+export mixed_unknown
+
+local boundary_match = do(n: U32): U32
+    return call choose(n) { yes(p) = p + 1, no() = U32 99 }
+end
+export boundary_match
+
+local recursive
+recursive = do(state: Ref Box, n: U32): Choice
+    state.value = state.value + 1
+    if n == 0 then return Choice.yes state.value end
+    return recursive(state, n - 1)
+end
+local recursive_match = do(n: U32): U32
+    local state = Box { value = 0 }
+    return recursive(state, n) { yes(p) = p + state.value, no() = U32 0 }
+end
+export recursive_match
+
+local takes_table = do(n: U32, options): Choice = Choice.yes(n + options.extra)
+local required_table = do(n: U32): U32
+    -- This table saturates the producer; it is not a handler application.
+    local value = takes_table(n) { extra = 9 }
+    return value { yes(p) = p, no() = U32 0 }
+end
+export required_table
+
+local side_effects = do(n: U32): U32
+    local state = Box { value = 0 }
+    local body = do()
+        state.value = state.value + 1
+        if n % 2 == 0 then
+            local payload = state.value + n
+            state.value = 10
+            return Choice.yes payload
+        end
+        state.value = 20
+        return Choice.no()
+    end
+    local result = body() {
+        yes = do(p)
+            state.value = state.value + 100
+            return p + state.value
+        end,
+        no = do()
+            state.value = state.value + 200
+            return state.value
+        end,
+    }
+    return result + 1000 * state.value
+end
+export side_effects
+
+local Pair = struct { a: U32, b: U32 }
+local RecordChoice = oneof { value: Pair, none: Unit }
+local record_payload = do(n: U32): U32
+    local body = do()
+        if n % 2 == 0 then return RecordChoice.value Pair { a = 1, b = 2 } end
+        return RecordChoice.value Pair { a = 3, b = 4 }
+    end
+    return body() { value(p) = p.a + p.b, none() = U32 0 }
+end
+export record_payload

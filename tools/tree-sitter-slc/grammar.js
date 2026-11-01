@@ -5,7 +5,7 @@ module.exports = grammar({
   extras: $ => [/\s/, $.comment, $._endall_reset],
   externals: $ => [$.long_string, $.long_comment, $.name_argument, $._endall, $._implicit_end, $._error_sentinel, $._endall_reset],
   word: $ => $.identifier,
-  conflicts: $ => [[$.expression_statement, $._expression], [$.parameter, $._expression], [$.field, $._expression], [$.parameter, $.vararg_expression], [$.handler, $._expression]],
+  conflicts: $ => [[$.expression_statement, $._expression], [$.bare_method_call, $._expression], [$.parameter, $._expression], [$.field, $._expression], [$.parameter, $.vararg_expression], [$.handler, $._expression]],
   rules: {
     source_file: $ => repeat($._statement),
     comment: $ => choice(token(seq('--', /[^\r\n]*/)), $.long_comment),
@@ -25,7 +25,8 @@ module.exports = grammar({
     type_call: $ => prec.left(15, seq($._type, '(', optional(sep($._expression)), ')')),
     type_member: $ => prec.left(15, seq($._type, '.', $.identifier)),
     assignment_statement: $ => seq(sep($._expression), '=', sep($._expression)),
-    expression_statement: $ => choice($.call_expression, $.lambda),
+    expression_statement: $ => choice($.call_expression, $.lambda, $.identifier, $.member_expression, $.bare_method_call),
+    bare_method_call: $ => seq(field('function', choice($.identifier, $.member_expression)), ':', field('method', $.identifier)),
     return_statement: $ => prec.right(seq('return', optional(sep($._expression)))),
     break_statement: _ => choice('break', 'continue'),
     export_statement: $ => seq('export', sep($._expression)),

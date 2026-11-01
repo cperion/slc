@@ -48,6 +48,7 @@ test-macros: dirs
 
 test-format: dirs
 	$(LUA) tests/formatter_do.lua
+	$(LUA) tests/formatter_application.lua
 	$(LUA) tests/formatter.lua
 
 test-modules: dirs

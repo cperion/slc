@@ -29,7 +29,7 @@ end
 local type_text = do(doc: Ref Document, n: U32): Unit
     transaction doc do(..)
         insert n
-        move_left()
+        move_left
         if cursor > 3 then
             insert 1
         end
@@ -42,7 +42,7 @@ local back_and_forth = do(doc: Ref Document): U32
     local moved: U32 = 0
     transaction doc do(..)
         local before = cursor
-        move_left()
+        move_left
         moved = before - cursor
     end
     return moved
@@ -74,7 +74,7 @@ local evens = do(n: U32): U32 =
 counting do(..)
     for i: U32 = 1, n do
         if i % 2 == 0 then
-            tick()
+            tick
         end
     end
 end
@@ -132,7 +132,7 @@ export to_base
 local trace = extern("trace", { U32 }, Unit)
 local traced = do(tag, body): Unit
     trace tag
-    body()
+    body
     trace(tag + 100)
 end
 local import_rows = do(doc: Ref Document, n: U32): Unit
@@ -218,7 +218,7 @@ local shadow_fields = do(n: U32): U32
             total = count
         end
         total = total + count
-        local a = 99 -- must not change the retained receiver
+        local a = 99  -- must not change the retained receiver
         while count < n do
             count = count + 1
         end
@@ -234,11 +234,11 @@ local shadow_parameter = do(count..: Ref Counting): U32
 end
 local shadow_activity = do(n: U32): U32
     local c = Counting { count = n }
-    return shadow_parameter (Ref c)
+    return shadow_parameter(Ref c)
 end
 export shadow_activity
 
-local base_vocab = { kilo = 2, enabled = true, twice = twice }
+local base_vocab = { kilo = 2, enabled = true, .twice }
 local custom_vocab = { kilo = 3, enabled = false, twice = do(x: U32): U32 = x + 7 }
 local shadow_vocab = do(n: U32): U32
     local kilo = 100
@@ -285,9 +285,9 @@ local forward_one = do(..args): U32
 end
 local sum_rest = do(..args): U32 = add3(1, ..args)
 local two_dot_values = do(x: U32): U32
-    local a, b = ..pair(x)
+    local a, b = ..pair x
     local text = "a" .. "b" .. "c"
     local text_length = #text
-    return sum_rest(a, b) + forward_one(text_length)
+    return sum_rest(a, b) + forward_one text_length
 end
 export two_dot_values

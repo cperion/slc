@@ -35,7 +35,7 @@ formatted('two-dot anonymous home', 'local f=do(..:T):T=(..)',
 formatted('two-dot named opening', 'local f=do(ctx..:T):U32=x',
     'local f = do(..: T): U32 = x\n')
 formatted('unused opened callback name', 'activity do(ctx..) tick() end',
-    'activity do(..) tick() end\n')
+    'activity do(..) tick end\n')
 formatted('used opened callback name', 'activity do(ctx..) use ctx end',
     'activity do(ctx..) use ctx end\n')
 formatted('opened name in a nested callback', 'activity do(ctx..) each do(v) use ctx end end',
@@ -69,9 +69,9 @@ formatted('duplicate parameter names keep their binding order', 'local f = do(ct
 formatted('rest parameter can hide the opened parameter', 'local f = do(ctx.., ..ctx): U32 = value',
     'local f = do(ctx.., ..ctx): U32 = value\n')
 formatted('ordinary unused parameter stays', 'activity do(ctx) tick() end',
-    'activity do(ctx) tick() end\n')
+    'activity do(ctx) tick end\n')
 formatted('preserve named opening', 'activity do(ctx..) tick() end',
-    'activity do(ctx..) tick() end\n', { opening_style = 'preserve' })
+    'activity do(ctx..) tick end\n', { opening_style = 'preserve' })
 formatted('two-dot binding', 'local ctx..=value', 'local ctx.. = value\n')
 formatted('spread operand concatenation', 'local r=f(..a..b)', 'local r = f(..a .. b)\n')
 formatted('ordinary Lua varargs', 'local function f(...) return ... end',
@@ -83,6 +83,31 @@ formatted('expression grouping', 'local r=f(a+b)', 'local r = f(a + b)\n')
 formatted('result suffix', 'local r=f(x).value', 'local r = f(x).value\n')
 formatted('nil argument', 'local r=f(nil)', 'local r = f(nil)\n')
 formatted('empty call', 'local r=f()', 'local r = f()\n')
+formatted('bare call statements', 'refresh()\nscreen.refresh()\nscreen:refresh()',
+    'refresh\nscreen.refresh\nscreen:refresh\n')
+formatted('preserve empty calls', 'refresh()\nscreen:refresh()',
+    'refresh()\nscreen:refresh()\n', { call_style = 'preserve' })
+formatted('bare statements stay bare', 'refresh; save', 'refresh; save\n')
+formatted('same-line calls remain separated', 'refresh() save()', 'refresh() save\n')
+formatted('return still invokes explicitly', 'local f=do():U32 return answer() end',
+    'local f = do(): U32 return answer() end\n')
+formatted('return still refers to a callable', 'local f=function() return answer end',
+    'local f = function() return answer end\n')
+formatted('parenthesized callable bypass stays explicit', '(refresh)()', '(refresh)()\n')
+formatted('indexed callable stays explicit', 'actions[i]()', 'actions[i]()\n')
+formatted('comments survive bare statement calls', 'refresh(-- keep\n)', 'refresh  -- keep\n')
+formatted('unary statement call', 'consume(value)', 'consume value\n')
+formatted('multiline unary argument', 'local r=f(\n x\n)', 'local r = f x\n')
+formatted('multiline call chain', 'local r=f(\n a\n)(\n b\n)', 'local r = f a b\n')
+formatted('inline argument comment', 'local r=f(--[[ note ]] x)', 'local r = f  --[[ note ]] x\n')
+formatted('trailing argument comment', 'local r=f(x -- keep\n)', 'local r = f x  -- keep\n')
+formatted('leading line comment needs delimiters', 'local r=f(-- keep\n x)',
+    'local r = f(  -- keep\n    x)\n')
+formatted('typed argument groups stay intact', 'local f=do():U32 return g(a,b) end',
+    'local f = do(): U32 return g(a, b) end\n')
+formatted('preserve multiline call', 'local r=f(\n x\n)', 'local r = f(\n    x\n)\n',
+    { call_style = 'preserve' })
+formatted('host newline postfix call stays', 'refresh()\n(other)()', 'refresh()\n(other)()\n')
 formatted('preserve calls', 'local r=Ref(h)', 'local r = Ref(h)\n', { call_style = 'preserve' })
 formatted('type repeated by its constructor', [[local f = do(n: U32): U32
     local p: P = P { x = n }

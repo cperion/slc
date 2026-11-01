@@ -20,10 +20,10 @@ local no_input = Input { kind = 0, target = 0, ticket = 0 }
 local vocabulary = function(phase, turn)
     return {
         row = do(body): Unit
-            body()
+            body
         end,
         column = do(body): Unit
-            body()
+            body
         end,
         label = do(text): Unit
             if phase == "paint" then turn.stats.labels = turn.stats.labels + 1 end
@@ -42,7 +42,7 @@ local vocabulary = function(phase, turn)
                         turn.claimed = true
                         if fire then
                             turn.stats.actions = turn.stats.actions + 1
-                            activated()
+                            activated
                         end
                     elseif turn.input.kind == 3 then
                         home.armed = false
@@ -52,7 +52,7 @@ local vocabulary = function(phase, turn)
                         home.armed = false
                         turn.claimed = true
                         turn.stats.actions = turn.stats.actions + 1
-                        activated()
+                        activated
                     end
                 end
             end
@@ -88,8 +88,7 @@ local confirmation = do(home: Ref Confirmation, ui, accepted, cancelled): Unit
         row do
             save home.accept accepted
             keep_editing home.cancel cancelled
-        end
-    end
+        endall
 end
 
 local counter = do(home: Ref Counter, ui, changed): Unit
@@ -117,27 +116,24 @@ local editor = do(home: Ref Editor, ui, closed): Unit
             label "Editing"
             save_and_close home.open do
                 home.mode = Mode.confirming()
-            end
-        end,
+            endall,
         confirming = do
-            -- Both continuation blocks are ordinary SLC arguments at this site.
-            confirmation home.confirmation ui do
-                begin_save home ui
-            end do
-                home.mode = Mode.editing()
-            end
-        end,
+        -- Both continuation blocks are ordinary SLC arguments at this site.
+        confirmation home.confirmation ui do
+            begin_save home ui
+        end do
+            home.mode = Mode.editing()
+        endall,
         saving = do(ticket)
             label "Saving"
             completion home.id ticket do(ok)
                 if ok then
                     home.mode = Mode.closed()
-                    closed()
+                    closed
                 else
                     home.mode = Mode.failed()
                 end
-            end
-        end,
+            endall,
         failed = do
             label "Save failed"
             retry home.retry do
@@ -145,8 +141,7 @@ local editor = do(home: Ref Editor, ui, closed): Unit
             end
             back home.back do
                 home.mode = Mode.editing()
-            end
-        end,
+            endall,
         closed = do end,
     }
 end
@@ -155,7 +150,7 @@ local application = do(home: Ref App, ui, finished): Unit
     if not home.done then
         editor home.editor ui do
             home.done = true
-            finished()
+            finished
         end
         counter home.counter ui do(value)
             home.observed = value
@@ -168,7 +163,8 @@ local probe_init = do(base: U32, document: U32): App = App {
     editor = Editor {
         id = base, .document, serial = 0, mode = Mode.editing(),
         open = button_home(base + 1),
-        confirmation = Confirmation { accept = button_home(base + 2), cancel = button_home(base + 3) },
+        confirmation = Confirmation { accept = button_home(base + 2),
+            cancel = button_home(base + 3) },
         retry = button_home(base + 4), back = button_home(base + 5),
     },
     counter = Counter { plus = button_home(base + 6), value = 0 },
