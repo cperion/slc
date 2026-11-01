@@ -213,6 +213,42 @@ local function capture(value, what)
     return dyn(value.T, S.read_expr(tmp))
 end
 
+-- An index or key fixed where it is written, so a checked place denotes the
+-- element it named then. A free expression is already its own value; one that
+-- reads tracked locals at known versions names one value, captured once while
+-- the lookups that could reuse it hold. Equal indices then give equal checked
+-- keys, and `m[k] = m[k] + 1` resolves its element once.
+local EFFECTS = { call = true, calli = true, rtcall = true, atomic = true, wait = true,
+                  slot_at = true, task = true }
+local function named_value(e)
+    if type(e) ~= 'table' then return true end
+    if EFFECTS[e.op] then return false end
+    if e.op == 'read' then return S.free(e) or e.ver ~= nil end
+    for k, c in pairs(e) do
+        if type(c) == 'table' and k ~= 'T' and k ~= 'place' and k ~= 'fn' and k ~= 'ext'
+            and rawget(c, 'op') and not named_value(c) then return false end
+    end
+    for _, a in ipairs(e.args or {}) do if not named_value(a) then return false end end
+    for _, a in pairs(e.fields or {}) do if not named_value(a) then return false end end
+    return true
+end
+local function fix_index(value, what)
+    value = S.value_of(value)
+    if S.is_known(value) then return value end
+    local e = S.ex(value)
+    if S.free(e) and not EFFECTS[e.op] and named_value(e) then return value end
+    if not named_value(e) then return capture(value, what) end
+    local b = S.cur()
+    local key, here, epoch = S.expr_key(e), b.path or '', b.cepoch or 0
+    b.fixed_indices = b.fixed_indices or {}
+    local hit = b.fixed_indices[key]
+    if hit and hit.epoch == epoch and here:sub(1, #hit.path) == hit.path then return hit.value end
+    local fixed = capture(value, what)
+    b.fixed_indices[key] = { epoch = epoch, path = here, value = fixed }
+    return fixed
+end
+Mem.fix_index = fix_index
+
 -- slot borrows: while an activity borrows a slot of a store, nothing may change
 -- the store's structure (its slots could move)
 local function root(p)
@@ -317,9 +353,9 @@ local function grow_methods(t)
             local st = types.slice(elem)
             local pt = types.ptr(elem)
             local b = S.cur()
-            local ptr = storage_library(t).layout.address(S.Ref(p), 0)
+            local ptr = storage_library(t).items(S.Ref(p))
             -- the length cannot change while the view lasts (pushing is rejected)
-            local len = storage_library(t).layout.get(S.Ref(p), 'len')
+            local len = storage_library(t).length(S.Ref(p))
             local token = {}
             local xs = S.make_slice(st, b:bind(ptr), b:bind(len), token)
             b.slot_borrows = b.slot_borrows or {}
@@ -344,21 +380,17 @@ local function grow_methods(t)
     }
 end
 
--- s[id] and g[i]: an element as a place whose address is computed (and checked:
--- the Id is current, the index in range) at every use, so storage that moves
--- when it grows is found again each time
+-- s[id] and g[i]: an element as a checked place. Its address is computed (and
+-- checked: the Id is current, the index in range) when used, and reused for the
+-- same index until something could move the storage, which is found again then
 local function index_hook(t)
     local n = cname_of(t)
     return function(x, key)
         local p = receiver(x, t.kind == 'store' and n .. '[id]' or n .. '[i]')
         local kt = t.kind == 'store' and types.id(t.elem) or types.U32
         local k = S.coerce(key, kt, t.kind == 'store' and 'Id' or 'index')
-        if not S.is_known(k) then k = capture(k, 'capturing a storage index') end
-        local pt = types.ptr(t.elem)
-        local function resolve()
-            local slot = storage_library(t).borrow(S.Ref(p), k)
-            return S.ex(storage_library(t).layout.address(S.Ref(p), slot))
-        end
+        k = fix_index(k, 'capturing a storage index')
+        local function resolve() return S.ex(storage_library(t).locate(S.Ref(p), k)) end
         local b = S.cur()
         if b.fn then b.fn.uses_rt = true end
         return S.checked_place(t.elem, nil, nil, true, resolve,
@@ -368,8 +400,7 @@ end
 
 local function length(x)
     local p = receiver(x, 'length')
-    local field = p.T.kind == 'store' and 'live' or 'len'
-    return storage_library(p.T).layout.get(S.Ref(p), field)
+    return storage_library(p.T).length(S.Ref(p))
 end
 
 -- type constructors ----------------------------------------------------------------------------

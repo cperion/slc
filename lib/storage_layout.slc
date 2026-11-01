@@ -30,8 +30,9 @@ local ReadMap = cstruct("const slc_map", h, {
 local ReadMapPtr = Ptr ReadMap
 layout.map_address = do(map: ReadMapPtr, slot: U32): VP
     if slot >= map.cap then trap "Map: invalid bucket" end
-    local s = stacks.get map.stack
-    return VP(Ptr s.data[map.base + U64 slot * map.width])
+    local width = map.width
+    local at = map.base + U64 slot * width
+    return VP stacks.region(map.stack, at, width)
 end
 layout.store_new = do(stack: U64): layout.Store
     local base = stacks.begin stack
@@ -57,65 +58,37 @@ layout.strmap_new = do(table_stack: U64, arena_stack: U64, width: U64): layout.S
         .arena_stack, arena_base = base, arena_len = 0, dead = 0 }
 end
 layout.iter_new = do(stack: U64, map: Ptr layout.Map): layout.Grow
-    local s = stacks.get stack
+    local s = stacks.claim stack
     if stack == map.stack or s.map_counter ~= null U32 then trap "Map: invalid iteration guard stack" end
     if map.iterating == U32 0xffffffff then trap "Map: too many nested iterations" end
     local id = token()
     local guard = layout.grow_new stack
     stacks.push stack 1
     guard.len = 1
-    s = stacks.get stack
+    s = stacks.at stack
     s.map_counter = Ptr map.iterating
     s.map_guard_base = guard.base
     s.map_guard_token = id
     map.iterating = map.iterating + 1
     return guard
 end
+-- A representation supplies its header and acquires its items: one stack
+-- resolution and one range check, valid until the next push onto the stack.
 function layout.storage(T, R, Elem, Slot, view, make_id, components)
     local is_store = Slot ~= nil
-    local Storage = Slot or Elem
-    local Data = Ptr Storage
-    local at = do(self: Ref T, index: U32): Data
-        local h = view self
-        local stack = stacks.get h.stack
-        local data = Data(Ptr stack.data[h.base])
-        return Ptr data[index]
-    end
-    local p = {}
+    local Item = Slot or Elem
+    local Items = Ptr Item
+    local p = { .Item }
     p.init = do(self: Ref T, stack: U64): Unit
         local h = view self
         if is_store then h[0] = layout.store_new stack else h[0] = layout.grow_new stack end
     end
-    p.get = function(self, field)
-        local Result = R.index[field].type
-        local get = do(owner: Ref T): Result return view(owner)[field] end
-        return get self
-    end
-    p.set = function(self, field, value)
-        local Value = R.index[field].type
-        local set = do(owner: Ref T, value: Value): Unit
-            view(owner)[field] = value
-        end
-        return set(self, value)
-    end
-    p.width = do(): U64 = size_of Storage
-    p.top = do(self: Ref T): U64 = stacks.top view(self).stack
-    p.push = do(self: Ref T, n: U64): U64 = stacks.push(view(self).stack, n)
-    p.reset = do(self: Ref T, n: U64): Unit = stacks.reset(view(self).stack, n)
-    p.maximum = do(): U64 = maximum
-    p.at = at
-    p.address = do(self: Ref T, index: U32): Ptr Elem
-        local entry = at self index
-        if is_store then return Ptr entry.value end
-        return entry
-    end
-    p.write = do(self: Ref T, index: U32, value: Elem): Unit
-        local entry = p.address self index
-        entry[0] = value
-    end
-    p.slot_get = do(self: Ref T, index: U32, field): U32 return at(self, index)[field] end
-    p.slot_set = do(self: Ref T, index: U32, field, value: U32): Unit
-        at(self, index)[field] = value
+    p.header = do(self: Ref T): Ptr R return view self end
+    p.width = do(): U64 = size_of Item
+    p.items = do(self: Ref T): Items
+        local h = view self
+        local bytes = U64 h.len * size_of Item
+        return Items stacks.region(h.stack, h.base, bytes)
     end
     local IdType = is_store and Id Elem or U32
     p.id = do(self: Ref T, index: U32, gen: U32): IdType
@@ -126,99 +99,57 @@ function layout.storage(T, R, Elem, Slot, view, make_id, components)
         local ptr, len = slice_parts text
         return pin(view(self).stack, ptr, U64 len)
     end
-    p.bytes = do(self: Ref T, at: U64, len: U32): Str
-        return make_slice(Str, stacks.bytes(view(self).stack, at, U64 len), len)
-    end
-    p.write_bytes = do(self: Ref T, at: U64, text: Str): Unit
-        local ptr, len = slice_parts text
-        stacks.write(view(self).stack, at, ptr, U64 len)
-    end
+    p.maximum = do(): U64 = maximum
     return p
 end
 function layout.maps(T, Entry, view)
     local str = T.kind == "strmap"
     local EP = Ptr Entry
-    local table_of = do(self: Ref T): Ptr layout.Map
+    local Stored = Entry.index.key.type
+    -- One acquisition of a table: its buckets and, for text keys, the live
+    -- arena bytes the stored keys point into.
+    local View = struct { entries: EP, cap: U32 }
+    if str then View = struct { entries: EP, cap: U32, arena: Ptr U8 } end
+    local header = do(self: Ref T): Ptr layout.Map
         local h = view self
         if str then return Ptr h.entries end
         return h
     end
-    local p = {}
+    local entries = do(self: Ref T, base: U64, capacity: U32): EP
+        local h = header self
+        local bytes = U64 capacity * size_of Entry
+        return EP stacks.region(h.stack, base, bytes)
+    end
+    local p = { .View, .header, .entries }
     p.init = do(self: Ref T, stack: U64, arena: U64): Unit
         local h = view self
         if str then h[0] = layout.strmap_new(stack, arena, size_of Entry)
         else h[0] = layout.map_new(stack, size_of Entry) end
     end
     p.iter = do(self: Ref T, guard: Ptr layout.Grow, stack: U64): Unit
-        guard[0] = layout.iter_new(stack, table_of self)
+        guard[0] = layout.iter_new(stack, header self)
     end
-    p.get = function(self, field)
-        local arena = field == "dead" or field:sub(1, 6) == "arena_"
-        local Result = (arena and layout.StrMap or layout.Map).index[field].type
-        local get = do(owner: Ref T): Result
-            if arena then return view(owner)[field] end
-            return table_of(owner)[field]
+    p.strmap = do(self: Ref T): Ptr layout.StrMap return view self end
+    p.acquire = do(self: Ref T): View
+        local h = header self
+        local table = entries self h.base h.cap
+        if str then
+            local s = view self
+            local arena = stacks.region(s.arena_stack, s.arena_base, s.arena_len)
+            return View { entries = table, cap = h.cap, .arena }
         end
-        return get self
+        return View { entries = table, cap = h.cap }
     end
-    p.set = function(self, field, value)
-        local arena = field == "dead" or field:sub(1, 6) == "arena_"
-        local Value = (arena and layout.StrMap or layout.Map).index[field].type
-        local set = do(owner: Ref T, value: Value): Unit
-            if arena then view(owner)[field] = value else table_of(owner)[field] = value end
-        end
-        return set(self, value)
-    end
-    local at = do(self: Ref T, base: U64, slot: U32): EP
-        return EP stacks.bytes(table_of(self).stack,
-            base + U64 slot * size_of Entry, size_of Entry)
-    end
-    p.read = do(self: Ref T, base: U64, slot: U32): Entry
-        local entry = at(self, base, slot)
-        return entry[0]
-    end
-    p.write = do(self: Ref T, base: U64, slot: U32, entry: Entry): Unit
-        local at_slot = at(self, base, slot)
-        at_slot[0] = entry
-    end
-    p.address = do(self: Ref T, slot: U32): Ptr T.elem
-        local entry = EP layout.map_address(ReadMapPtr(table_of self), slot)
-        return Ptr entry.value
-    end
-    p.replace = do(self: Ref T, slot: U32, value: T.elem): Unit
-        p.address(self, slot)[0] = value
+    -- the key a stored key denotes, inside the view that holds its bytes
+    p.key = do(table: View, stored: Stored): T.key
+        if str then return make_slice(Str, Ptr table.arena[stored.offset], stored.len) end
+        return stored
     end
     p.maximum = do(): U64 = maximum
-    for _, area in ipairs { "", "arena_" } do
-        local stack = do(self: Ref T): U64
-            if area == "" then return table_of(self).stack end
-            return view(self).arena_stack
-        end
-        p[area .. "top"] = do(self: Ref T): U64 = stacks.top(stack self)
-        p[area .. "push"] = do(self: Ref T, n: U64): U64 = stacks.push(stack self, n)
-        p[area .. "reset"] = do(self: Ref T, at: U64): Unit = stacks.reset(stack self, at)
-        p[area .. "copy"] = do(self: Ref T, dst: U64, src: U64, n: U64): Unit = stacks.copy(stack self,
-            dst, src, n)
-    end
-    p.zero = do(self: Ref T, at: U64, n: U64): Unit = stacks.zero(table_of(self).stack, at, n)
-    p.arena_view = do(self: Ref T, at: U64, len: U32): Str
-        return make_slice(Str, stacks.bytes(view(self).arena_stack, at, U64 len), len)
-    end
     p.pin = do(self: Ref T, text: Str): U64
         local ptr, len = slice_parts text
         return pin(view(self).arena_stack, ptr, U64 len)
     end
-    p.arena_write = do(self: Ref T, at: U64, text: Str): Unit
-        local ptr, len = slice_parts text
-        stacks.write(view(self).arena_stack, at, ptr, U64 len)
-    end
-    p.key = do(self: Ref T, entry: Entry): T.key
-        if str then return p.arena_view(self,
-                view(self).arena_base + entry.key.offset, entry.key.len) end
-        return entry.key
-    end
-    p.capacity = do(self: Ref T): U32 = table_of(self).cap
-    p.occupied = do(self: Ref T, slot: U32): Bool = p.read(self, table_of(self).base, slot).hash ~= 0
     return p
 end
 local function project(value, path)

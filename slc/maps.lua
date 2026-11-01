@@ -43,6 +43,7 @@ local function decorate(t)
     end
     local function capture_key(kv)
         if S.is_known(kv) then return kv end
+        if not is_str then return Mem.fix_index(kv, 'capturing a map key') end
         local view = rawget(kv, 'view')
         kv = Mem.capture(kv, 'capturing a map key')
         if view then rawset(kv, 'view', view) end
@@ -63,12 +64,13 @@ local function decorate(t)
             -- Eager by-value capture, including ensure's unused replacement.
             local v = Mem.capture(S.coerce(value, t.elem, 'Map value'), 'capturing a map value')
             S.bump_checked()
-            return S.boundary(library().put)(S.Ref(p), kv, v, method == 'ensure')
+            return library().put(S.Ref(p), kv, v, method == 'ensure')
         end
     end
-    storage.visit = function(self, slot, body)
-        local entry = storage.read(self, storage.get(self, 'base'), slot)
-        local k, v = storage.key(self, entry), S.dot(entry, 'value')
+    -- An entry's key and value go to an activity; a text key is a view of the
+    -- arena that ends when the activity returns.
+    storage.lend = function(table, entry, body)
+        local k, v = storage.key(table, S.dot(entry, 'key')), S.dot(entry, 'value')
         if is_str then
             local ptr, len = S.slice_parts(k)
             local token = {}
@@ -78,7 +80,7 @@ local function decorate(t)
             if not ok then error(err, 0) end
         else body(k, v) end
     end
-    S.arity[storage.capacity], S.arity[storage.occupied], S.arity[storage.visit] = 1, 2, 3
+    S.arity[storage.lend] = 3
     ms.each = function(self, body)
         if type(body) ~= 'function' and not S.is_word(body) then fail(t.display .. ':each needs an activity') end
         local b, p = S.cur(), receiver(self)
@@ -96,14 +98,11 @@ local function decorate(t)
     end
     for name, fn in pairs(ms) do S.arity[fn] = (name == 'put' or name == 'ensure') and 3 or 2 end
     t.builtin_methods = ms
-    t.properties = { length = function(self) return storage.get(self, 'len') end }
+    t.properties = { length = function(self) return library().length(S.Ref(receiver(self))) end }
     S.member_tables(t)
     t.__index = function(self, k)
         local p, kv = receiver(self), capture_key(key(k))
-        local function resolve()
-            local slot = library().borrow(S.Ref(p), kv)
-            return ex(storage.address(S.Ref(p), slot))
-        end
+        local function resolve() return ex(library().locate(S.Ref(p), kv)) end
         return S.checked_place(t.elem, nil, nil, not is_str, resolve,
             n .. '/' .. S.expr_key(Mem.addr(p)) .. '/' .. S.expr_key(ex(kv)))
     end

@@ -735,6 +735,8 @@ With globals and function values the runtime's remaining C is SLC. [process.slc]
 
 Because programs and runtime are SLC, a program reads some runtime state in place. `lib/stacks.slc` reads the thread-local stack set as imported globals, so a data-stack access is two loads instead of a call; `lib/hash.slc` reads the process hash key the same way once it exists, taking the out-of-line path only on first use.
 
+Container operations share one shape: establish valid storage once, perform a bounded operation, and acquire again after anything that can move it. Only allocation (`stacks.claim`, used when an owner begins and by the raw `push`) extends a thread's stack set. Access (`stacks.at`, `stacks.region`) never allocates and traps on a stack that was never claimed, while `top` and `reset` treat one as empty. A representation in `lib/storage_layout.slc` supplies its header and one acquisition: the items of a `Store` or `Grow`, or the buckets of a map together with its text-key arena, checked against the stack top once. `lib/storage.slc` and `lib/map.slc` probe, read and write inside that acquisition, and acquire again only after a push (growth, owner extension, arena compaction) or an opaque iteration body. `m[k]`, `s[id]` and `g[i]` resolve through one `locate` word that returns the element address from the same acquisition, so a lookup is not followed by a second resolution of its slot.
+
 What stays C, and why:
 
 | File | Why |

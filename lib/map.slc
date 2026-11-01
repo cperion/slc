@@ -12,11 +12,15 @@ function map.each(T, storage, body)
     if by_body[body] then return by_body[body] end
     -- Distinct activities are distinct specializations: a nested traversal is
     -- not recursion with a changing compile-time callback parameter.
+    -- The iteration guard rejects structural mutation, so the capacity holds;
+    -- the body is opaque, so the table is acquired again for every entry.
     local each = do(m: Ref T): Unit
-        local capacity = storage.capacity m
+        local capacity = storage.header(m).cap
         local slot = U32 0
         while slot < capacity do
-            if storage.occupied m slot then storage.visit m slot body end
+            local table = storage.acquire m
+            local entry = table.entries[slot]
+            if entry.hash ~= 0 then storage.lend(table, entry, body) end
             slot = slot + 1
         end
     end
@@ -26,17 +30,23 @@ end
 
 local hash = require "slc.hash"
 local keys = require "slc.key"
+local stacks = require "slc.stacks"
 local trap = extern("slc_trap", { CString }, Unit)
+local slice_parts = __S.slice_parts
 local none = U32 0xffffffff
 local libraries = {}
 
+-- Every operation acquires the table once and probes, reads and writes inside
+-- that acquisition. Only growth (a push onto the table's stack) and arena
+-- compaction move storage; the table is acquired again after them.
 function map.library(T, storage, Entry, Result, string_keys)
     if libraries[T] then return libraries[T] end
     local K, V = T.key, T.elem
+    local EP, View = Ptr Entry, storage.View
     local equal = keys.equal K
     local digest = string_keys and hash.text or keys.hash K
-    local get, set = storage.get, storage.set
-    local read, write = storage.read, storage.write
+    local header, acquire, entries, stored_key = storage.header, storage.acquire, storage.entries, storage.key
+    local maximum = storage.maximum
     local api = {}
 
     local distance = do(h: U64, slot: U32, capacity: U32): U32
@@ -45,62 +55,64 @@ function map.library(T, storage, Entry, Result, string_keys)
         local mask = capacity - 1
         return band delta mask
     end
-    local byte_count = do(m: Ref T, capacity: U32): U64
+    local byte_count = do(capacity: U32): U64
         local count = U64 capacity
         count = count + 1
-        local width = get(m, "width")
-        local maximum = storage.maximum()
-        if count > maximum / width then trap "Map is full" end
+        local width = size_of Entry
+        if count > maximum() / width then trap "Map is full" end
         return count * width
     end
     local check_top = do(m: Ref T): Unit
-        local capacity = get(m, "cap")
+        local h = header m
         local bytes = U64 0
-        if capacity ~= 0 then bytes = byte_count m capacity end
-        local base = get(m, "base")
-        local top = storage.top m
-        if top - base ~= bytes then trap "Map grew while it was not at the top of its data stack" end
+        if h.cap ~= 0 then bytes = byte_count h.cap end
+        local top = stacks.top h.stack
+        if top - h.base ~= bytes then trap "Map grew while it was not at the top of its data stack" end
     end
     local check_mutation = do(m: Ref T): Unit
-        local active = get(m, "iterating")
-        if active ~= 0 then trap "Map structural mutation during iteration" end
+        local h = header m
+        if h.iterating ~= 0 then trap "Map structural mutation during iteration" end
     end
-    api.slot = do(m: Ref T, key: K, hashed: U64): U32
-        local capacity = get(m, "cap")
-        local base = get(m, "base")
+    -- the slot holding key, or none
+    local probe = do(table: View, key: K, hashed: U64): U32
+        local capacity = table.cap
         local steps = U32 0
         local mask = capacity - 1
         local low = U32 hashed
         while steps < capacity do
             local candidate = low + steps
             local slot = band candidate mask
-            local entry = read m base slot
-            if entry.hash == 0 then return none end
-            local prior = distance entry.hash slot capacity
+            local entry = Ptr table.entries[slot]
+            local resident = entry.hash
+            if resident == 0 then return none end
+            local prior = distance resident slot capacity
             if prior < steps then return none end
-            if entry.hash == hashed then
-                local found = storage.key m entry
+            if resident == hashed then
+                local found = stored_key table entry.key
                 if equal found key then return slot end
             end
             steps = steps + 1
         end
         return none
     end
-    local insert_raw = do(m: Ref T, base: U64, capacity: U32, value: Entry): Unit
+    -- Robin Hood insertion of an absent key into an acquired table with room
+    local insert = do(table: EP, capacity: U32, value: Entry): Unit
         local entry = value
         local mask = capacity - 1
         local low = U32 entry.hash
         local slot = band low mask
         local steps = U32 0
         while true do
-            local old = read m base slot
-            if old.hash == 0 then
-                write m base slot entry
+            local at = Ptr table[slot]
+            local resident = at.hash
+            if resident == 0 then
+                at[0] = entry
                 return
             end
-            local prior = distance old.hash slot capacity
+            local prior = distance resident slot capacity
             if prior < steps then
-                write m base slot entry
+                local old = at[0]
+                at[0] = entry
                 entry = old
                 steps = prior
             end
@@ -110,92 +122,109 @@ function map.library(T, storage, Entry, Result, string_keys)
         end
     end
     local grow = do(m: Ref T): Unit
-        local old_capacity = get(m, "cap")
+        local h = header m
+        local old_capacity = h.cap
         if old_capacity >= 0x80000000 then trap "Map is full" end
         local capacity = U32 8
         if old_capacity ~= 0 then capacity = old_capacity * 2 end
-        local bytes = byte_count m capacity
-        local base = get(m, "base")
-        local fresh = storage.push m bytes
-        storage.zero m fresh bytes
+        local bytes = byte_count capacity
+        local base = h.base
+        local used = U64 0
+        if old_capacity ~= 0 then used = byte_count old_capacity end
+        local fresh = stacks.extend(h.stack, base, used, bytes,
+            "Map grew while it was not at the top of its data stack")
+        -- the push moved the stack: resolve it once after it
+        local s = stacks.at h.stack
+        local spare = stacks.span(s, fresh, bytes)
+        stacks.fill spare bytes
+        local old_bytes = U64 old_capacity * size_of Entry
+        local source = EP stacks.span(s, base, old_bytes)
+        local target = EP spare
         local slot = U32 0
         while slot < old_capacity do
-            local entry = read m base slot
-            if entry.hash ~= 0 then insert_raw m fresh capacity entry end
+            local entry = Ptr source[slot]
+            if entry.hash ~= 0 then insert target capacity entry[0] end
             slot = slot + 1
         end
-        storage.copy m base fresh bytes
+        stacks.move(stacks.span(s, base, bytes), spare, bytes)
         local top = base + bytes
-        storage.reset m top
-        set(m, "cap", capacity)
+        stacks.reset h.stack top
+        h.cap = capacity
     end
     local append
     if string_keys then
+        -- key's bytes at target; pinned is where they were in this stack, if
+        -- they were, since the push that made room may have moved them
+        -- key's bytes at target in a resolved arena; pinned is where they were
+        -- in this stack, if they were, since the push may have moved them
+        local place = do(s: Ptr stacks.Stack, target: U64, pinned: U64, key: Str): Unit
+            local n = U64 key.length
+            local destination = stacks.span(s, target, n)
+            if pinned ~= maximum() then stacks.move(destination, stacks.span(s, pinned, n), n)
+            else
+                local ptr, len = slice_parts key
+                stacks.move destination ptr n
+            end
+        end
         append = do(m: Ref T, key: Str): U64
-            local base = get(m, "arena_base")
-            local length = get(m, "arena_len")
-            local dead = get(m, "dead")
-            local top = storage.arena_top m
-            if top - base ~= length then trap "StrMap grew while its arena was not at the top of its data stack" end
+            local a = storage.strmap m
+            local stack = a.arena_stack
+            local base = a.arena_base
+            local length = a.arena_len
+            local dead = a.dead
             local pinned = storage.pin m key
             local n = U64 key.length
             local offset = length
             if dead >= 4096 and dead >= length / 2 then
                 local live = length - dead
-                local maximum = storage.maximum()
-                if n > maximum - live then trap "StrMap key arena is full" end
+                if n > maximum() - live then trap "StrMap key arena is full" end
                 local bytes = live + n
-                local fresh = storage.arena_push m bytes
+                local fresh = stacks.extend(stack, base, length, bytes,
+                    "StrMap grew while its arena was not at the top of its data stack")
+                -- compact the live keys above the arena, then move them down;
+                -- the push moved the arena, which holds no table entries
+                local s = stacks.at stack
+                local keys_now = stacks.span(s, base, length)
+                local compacted = stacks.span(s, fresh, bytes)
+                local table = acquire m
                 local out = U64 0
                 local slot = U32 0
-                local capacity = get(m, "cap")
-                local table_base = get(m, "base")
-                while slot < capacity do
-                    local entry = read m table_base slot
+                while slot < table.cap do
+                    local entry = Ptr table.entries[slot]
                     if entry.hash ~= 0 then
-                        local source = base + entry.key.offset
-                        local target = fresh + out
                         local size = U64 entry.key.len
-                        storage.arena_copy m target source size
+                        stacks.move(Ptr compacted[out], Ptr keys_now[entry.key.offset], size)
                         entry.key.offset = out
                         out = out + size
-                        write m table_base slot entry
                     end
                     slot = slot + 1
                 end
                 offset = out
-                local target = fresh + out
-                if pinned ~= maximum then
-                    local pending = storage.arena_view(m, pinned, key.length)
-                    storage.arena_write m target pending
-                else storage.arena_write m target key end
-                storage.arena_copy m base fresh bytes
+                place(s, fresh + out, pinned, key)
+                stacks.move(stacks.span(s, base, bytes), compacted, bytes)
                 local end_at = base + bytes
-                storage.arena_reset m end_at
-                set(m, "arena_len", bytes)
-                set(m, "dead", n)
+                stacks.reset stack end_at
+                a.arena_len = bytes
+                a.dead = n
             else
-                storage.arena_push m n
-                local maximum = storage.maximum()
-                local target = base + offset
-                if pinned ~= maximum then
-                    local pending = storage.arena_view(m, pinned, key.length)
-                    storage.arena_write m target pending
-                else storage.arena_write m target key end
-                local new_length = length + n
-                local new_dead = dead + n
-                set(m, "arena_len", new_length)
-                set(m, "dead", new_dead)
+                stacks.extend(stack, base, length, n,
+                    "StrMap grew while its arena was not at the top of its data stack")
+                place(stacks.at stack, base + offset, pinned, key)
+                a.arena_len = length + n
+                a.dead = dead + n
             end
             return offset
         end
     end
     api.put = do(m: Ref T, key: K, value: V, only_missing): Unit
         local hashed = digest key
-        local slot = api.slot m key hashed
-        local base = get(m, "base")
+        local table = acquire m
+        local slot = probe table key hashed
         if slot ~= none then
-            if not only_missing then storage.replace m slot value end
+            if not only_missing then
+                local entry = Ptr table.entries[slot]
+                entry.value = value
+            end
             return
         end
         check_mutation m
@@ -207,82 +236,81 @@ function map.library(T, storage, Entry, Result, string_keys)
             entry.key.offset = append m key
             entry.key.len = key.length
         else entry.key = key end
-        local capacity = get(m, "cap")
-        local length = get(m, "len")
-        if capacity == 0 or length >= capacity - capacity / 8 then grow m end
-        capacity = get(m, "cap")
-        insert_raw m base capacity entry
-        local new_length = length + 1
-        set(m, "len", new_length)
+        local h = header m
+        local length = h.len
+        if h.cap == 0 or length >= h.cap - h.cap / 8 then grow m end
+        local capacity = h.cap
+        local target = entries(m, h.base, capacity)
+        insert target capacity entry
+        h.len = length + 1
         if string_keys then
-            local dead = get(m, "dead")
+            local a = storage.strmap m
             local n = U64 key.length
-            dead = dead - n
-            set(m, "dead", dead)
+            a.dead = a.dead - n
         end
     end
     api.has = do(m: Ref T, key: K): Bool
         local hashed = digest key
-        local slot = api.slot m key hashed
+        local table = acquire m
+        local slot = probe table key hashed
         return slot ~= none
     end
     api.find = do(m: Ref T, key: K): Result
         local hashed = digest key
-        local slot = api.slot m key hashed
+        local table = acquire m
+        local slot = probe table key hashed
         if slot == none then return Result.missing() end
-        local base = get(m, "base")
-        local entry = read m base slot
+        local entry = Ptr table.entries[slot]
         return Result.found entry.value
     end
-    api.borrow = do(m: Ref T, key: K): U32
+    api.locate = do(m: Ref T, key: K): Ptr V
         local hashed = digest key
-        local slot = api.slot m key hashed
+        local table = acquire m
+        local slot = probe table key hashed
         if slot == none then trap "map-key: missing key" end
-        return slot
+        local entry = Ptr table.entries[slot]
+        return Ptr entry.value
     end
     api.remove = do(m: Ref T, key: K): Bool
         local hashed = digest key
-        local slot = api.slot m key hashed
+        local table = acquire m
+        local slot = probe table key hashed
         if slot == none then return false end
         check_mutation m
-        local base = get(m, "base")
-        local capacity = get(m, "cap")
-        local removed = read m base slot
+        local capacity = table.cap
         local mask = capacity - 1
+        local removed = Ptr table.entries[slot]
+        local removed_bytes = U64 0
+        if string_keys then removed_bytes = U64 removed.key.len end
         local moving = Bool true
         while moving do
             local next_slot = slot + 1
             next_slot = band next_slot mask
-            local entry = read m base next_slot
-            local prior = distance entry.hash next_slot capacity
-            if entry.hash == 0 or prior == 0 then moving = false
+            local entry = Ptr table.entries[next_slot]
+            local resident = entry.hash
+            local prior = distance resident next_slot capacity
+            if resident == 0 or prior == 0 then moving = false
             else
-                write m base slot entry
+                table.entries[slot] = entry[0]
                 slot = next_slot
             end
         end
-        local width = get(m, "width")
-        local index = U64 slot
-        local at = base + index * width
-        storage.zero m at width
-        local length = get(m, "len")
-        length = length - 1
-        set(m, "len", length)
+        table.entries[slot] = zero Entry
+        local h = header m
+        local length = h.len - 1
+        h.len = length
         if string_keys then
-            local n = U64 removed.key.len
-            local dead = get(m, "dead")
-            dead = dead + n
-            set(m, "dead", dead)
+            local a = storage.strmap m
+            a.dead = a.dead + removed_bytes
             if length == 0 then
-                local arena_base = get(m, "arena_base")
-                storage.arena_reset m arena_base
-                local zero = U64 0
-                set(m, "arena_len", zero)
-                set(m, "dead", zero)
+                stacks.reset a.arena_stack a.arena_base
+                a.arena_len = 0
+                a.dead = 0
             end
         end
         return true
     end
+    api.length = do(m: Ref T): U32 return header(m).len end
     libraries[T] = api
     return api
 end

@@ -852,33 +852,33 @@ Put `call` before one application, measure again, and keep the change only if th
 The report says how much C each module wrote, names the largest functions, and gives the lines one shared copy would save for each word evaluated in place at several sites:
 
 ```text
-examples/stores.slc: 1,484 lines of C from 108 source lines (14x), 19 functions
+examples/stores.slc: 1,546 lines of C from 108 source lines (14x), 16 functions
 
 where the C comes from
-       732   49%  lib/stacks.slc
-       163   11%  lib/storage.slc
-        70    5%  lib/storage_layout.slc
-        44    3%  examples/stores.slc
+       852   55%  lib/stacks.slc
+       142    9%  lib/storage.slc
+        47    3%  lib/storage_layout.slc
+        43    3%  examples/stores.slc
         10    1%  runtime/tasks.slc
          9    1%  runtime/process.slc
-         6    0%  lib/key.slc
-       450   30%  declarations, headers and function prologues
+       443   29%  declarations, headers and function prologues
 
 largest functions
-      514  uint32_t churn(uint32_t n)
-      174  uint32_t run(uint32_t n)
-      159  uint32_t sum_depths(uint32_t n)
+      506  uint32_t churn(uint32_t n)
+      200  uint32_t run(uint32_t n)
+      192  uint32_t sum_depths(uint32_t n)
 
 words evaluated in place at several sites (what one `call` would share)
       saves   sites       each  word
-        523       6        105  add  (./lib/storage.slc:19)
-      examples/stores.slc:13  x6  628 lines  (in a loop)   return self.nodes:add Node {
-        497      41         12  get  (./lib/stacks.slc:41)
-      lib/storage_layout.slc:80  x41  509 lines  (in a loop)   local stack = stacks.get h.stack
-        485      40         12  at  (./lib/storage_layout.slc:78)
-      lib/storage_layout.slc:116  x18  231 lines  (in a loop)   p.slot_get = do(self: Ref T, index: U32, field): U32 return at(self, index)[field] end
-      lib/storage_layout.slc:118  x15  180 lines  (in a loop)   at(self, index)[field] = value
-      lib/storage_layout.slc:108  x7  86 lines  (in a loop)   local entry = at self index
+        463       6         93  add  (./lib/storage.slc:45)  every site is in a loop
+      examples/stores.slc:13  x6  555 lines  (in a loop)   return self.nodes:add Node {
+        321      18         19  region  (./lib/stacks.slc:120)
+      lib/storage_layout.slc:91  x17  323 lines  (in a loop)   return Items stacks.region(h.stack, h.base, bytes)
+      lib/stacks.slc:150  x1  17 lines   if n ~= 0 then move(stacks.region(index, dst, n), src, n) end
+        300      16         20  items  (./lib/storage_layout.slc:88)
+      lib/storage.slc:58  x6  120 lines  (in a loop)   local items = p.items s
+      lib/storage.slc:50  x6  120 lines  (in a loop)   local items = p.items s
+      lib/storage.slc:31  x4  80 lines   local items = p.items s
 
 "saves" and "each" count lines of C. Put `call` before the application at a
 site above (`call m:put(k, v)`), or inside the library word that is applied

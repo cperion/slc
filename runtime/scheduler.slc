@@ -2,7 +2,7 @@
 -- Runtime entry. Leaf collections run under their caller's lock;
 -- protocol/backend words preserve the enclosing synchronization transactions.
 local stacks = require "slc.stacks"
-local slc_gs, slc_gs_slow, slc_gs_top = stacks.get, stacks.get, stacks.top
+local slc_gs, slc_gs_slow, slc_gs_top = stacks.claim, stacks.claim, stacks.top
 local slc_gs_begin, slc_gs_push, slc_gs_reset = stacks.begin, stacks.push, stacks.reset
 local slc_release, slc_gs_bytes = stacks.reset, stacks.bytes
 local slc_gs_copy, slc_gs_write_bytes, slc_gs_zero = stacks.copy, stacks.write, stacks.zero

@@ -28,7 +28,7 @@ local maximum = U64 0xffffffffffffffffULL
 local stacks = { .Stack, .Set }
 -- Growing the set of stacks, and a stack's buffer, is the cold path.
 -- Keep its policy visible to specialization with the surrounding access.
-local extend = do(context: Ptr Set, index: U64): Unit
+local add_stacks = do(context: Ptr Set, index: U64): Unit
     local n = context.n
     if n == 0 then n = 4 end
     while n <= index do n = n * 2 end
@@ -38,9 +38,17 @@ local extend = do(context: Ptr Set, index: U64): Unit
     context.stacks = data
     context.n = n
 end
-stacks.get = do(index: U64): Ptr Stack
+-- Claiming makes a stack exist; only allocation (begin, push) extends the set.
+-- Access never allocates: an owner's stack was claimed when the owner began,
+-- so a missing one is a broken invariant.
+stacks.claim = do(index: U64): Ptr Stack
     local context = current()
-    if index >= context.n then extend(context, index) end
+    if index >= context.n then add_stacks context index end
+    return Ptr context.stacks[index]
+end
+stacks.at = do(index: U64): Ptr Stack
+    local context = current()
+    if index >= context.n then trap "data stack was never claimed" end
     return Ptr context.stacks[index]
 end
 local expand = do(s: Ptr Stack, need: U64): Unit
@@ -57,21 +65,26 @@ local expand = do(s: Ptr Stack, need: U64): Unit
 end
 local reserve = do(s: Ptr Stack, need: U64): Unit
     if need <= s.cap then return end
-    expand(s, need)
+    expand s need
 end
+-- An unclaimed stack is empty: function prologues and epilogues record and
+-- restore the tops of every index they may use, claimed or not.
 stacks.top = do(index: U64): U64
-    local s = stacks.get index
-    return s.top
+    local context = current()
+    if index >= context.n then return 0 end
+    return context.stacks[index].top
 end
 stacks.begin = do(index: U64): U64
-    local s = stacks.get index
+    local s = stacks.claim index
     local top = band(s.top + 15, bnot(U64 15))
     reserve s top
     s.top = top
     return top
 end
+-- Pushing allocates, so it may claim, and it is the only operation that moves
+-- a stack's bytes: every pointer into the stack must be acquired again after it.
 stacks.push = do(index: U64, n: U64): U64
-    local s = stacks.get index
+    local s = stacks.claim index
     local at = s.top
     if n > maximum - at then trap "data stack too large" end
     reserve(s, at + n)
@@ -86,25 +99,58 @@ local release_guard = do(s: Ptr Stack): Unit
     end
 end
 stacks.reset = do(index: U64, top: U64): Unit
-    local s = stacks.get index
+    local context = current()
+    if index >= context.n then
+        if top ~= 0 then trap "data stack reset above its top" end
+        return
+    end
+    local s = Ptr context.stacks[index]
     if top > s.top then trap "data stack reset above its top" end
     if s.map_counter ~= null U32 and top <= s.map_guard_base then release_guard s end
     s.top = top
 end
-stacks.bytes = do(index: U64, at: U64, n: U64): Ptr U8
-    local s = stacks.get index
+-- The bytes [at, at + n) of one stack, checked once. The pointer stays valid
+-- until the next push onto the stack; a bounded operation acquires a region,
+-- works inside it, and acquires again after anything that can move it.
+local region = do(s: Ptr Stack, at: U64, n: U64): Ptr U8
     if at > s.top or n > s.top - at then trap "data stack view out of range" end
     if n == 0 then return null U8 end
     return Ptr s.data[at]
 end
+stacks.region = do(index: U64, at: U64, n: U64): Ptr U8
+    return region(stacks.at index, at, n)
+end
+-- Regions of a stack already resolved once, for work after a push.
+stacks.span = region
+-- An owner occupying [base, base + used) at the top of its stack takes n more
+-- bytes; returns where they begin. The check and the push resolve it once;
+-- the owner claimed the stack when it began.
+stacks.extend = do(index: U64, base: U64, used: U64, n: U64, what: CString): U64
+    local s = stacks.at index
+    local at = s.top
+    if at - base ~= used then trap what end
+    if n > maximum - at then trap "data stack too large" end
+    reserve(s, at + n)
+    s.top = at + n
+    return at
+end
+stacks.fill = do(at: Ptr U8, n: U64): Unit
+    if n ~= 0 then zero(at, 0, n) end
+end
+stacks.move = do(dst: Ptr U8, src: Ptr U8, n: U64): Unit
+    if n ~= 0 then move(dst, src, n) end
+end
+stacks.bytes = stacks.region
 stacks.copy = do(index: U64, dst: U64, src: U64, n: U64): Unit
-    if n ~= 0 then move(stacks.bytes(index, dst, n), stacks.bytes(index, src, n), n) end
+    if n == 0 then return end
+    local s = stacks.at index
+    move(region s dst n, region s src n, n)
 end
 stacks.write = do(index: U64, dst: U64, src: Ptr U8, n: U64): Unit
-    if n ~= 0 then move(stacks.bytes(index, dst, n), src, n) end
+    if n ~= 0 then move(stacks.region(index, dst, n), src, n) end
 end
 stacks.zero = do(index: U64, at: U64, n: U64): Unit
-    if n ~= 0 then zero(stacks.bytes(index, at, n), 0, n) end
+    if n ~= 0 then zero(stacks.region(index, at, n), 0, n) end
 end
 stacks.free = do(set: Ptr Set): Unit
     local i = U64 0
