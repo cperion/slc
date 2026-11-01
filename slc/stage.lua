@@ -787,13 +787,13 @@ function Builder:flush_pending(p)
     if en and not en.mat and not en.uninit then self:materialize(p) end
 end
 
--- Write out the stores this frame may have made, and no others. A place that
--- still holds what it held when the frame began is pending on every path the
--- frame can leave by, so the join keeps it pending and its store lands once,
--- where the value is finally needed, instead of at each way out.
+-- Write out the stores this frame may have made, and no others. Unchanged
+-- entry values stay pending on this exit. If they differ on another exit,
+-- the return join materializes them on the corresponding paths; otherwise
+-- their stores wait until the values are actually needed.
 function Builder:materialize_frame(frame, block, state)
     state = state or self.state
-    local entry = frame.s0
+    local entry = frame.s0 or frame.iter_state
     local ps = {}
     for p, en in pairs(state) do
         if not en.mat and not en.uninit and not (entry and same_entry(en, entry[p])) then
@@ -3050,27 +3050,23 @@ function Builder:finish_frame(frame)
     end
     -- some returns jumped here: join their states with the base-level one
     local paths = {}
-    for _, s in ipairs(frame.sites) do paths[#paths + 1] = { state = s } end
+    for _, site in ipairs(frame.sites) do
+        -- Join-time stores must precede the return jump, not land after it.
+        assert(table.remove(site.block) == site.jump)
+        paths[#paths + 1] = site
+    end
     if frame.base_state then
         self.dead = false
         self:materialize_frame(frame, nil, frame.base_state)
-        paths[#paths + 1] = { state = frame.base_state }
+        paths[#paths + 1] = { state = frame.base_state, block = self.block }
     end
     local base = {}
     for _, p in ipairs(paths) do for k in pairs(p.state) do base[k] = true end end
     self.dead = false
-    local out = {}
-    for _, place in ipairs(sorted_places(base)) do
-        local first = paths[1].state[place]
-        local same = true
-        for i = 2, #paths do if not same_entry(first, paths[i].state[place]) then same = false break end end
-        if same then out[place] = first
-        else
-            local un = false
-            for _, p in ipairs(paths) do local e = p.state[place]; if not e or e.uninit then un = true end end
-            out[place] = un and { uninit = true } or { mat = true, ver = new_version() }
-        end
-    end
+    -- An unchanged entry can stay pending on one return while another return
+    -- changes it. Use the ordinary join to store both values on their own paths.
+    local out = self:join(paths, base)
+    for _, site in ipairs(frame.sites) do site.block[#site.block + 1] = site.jump end
     self.block[#self.block + 1] = { op = 'label', label = frame.label }
     self.state = out
     if frame.rvar then return dyn(frame.ret, read_expr(frame.rvar)) end
@@ -3166,8 +3162,9 @@ function Builder:return_value(frame, v)
     end
     frame.label = frame.label or ('L' .. uid())
     self:materialize_frame(frame)
-    self:emit { op = 'goto', label = frame.label }
-    frame.sites[#frame.sites + 1] = self.state
+    local jump = { op = 'goto', label = frame.label }
+    self:emit(jump)
+    frame.sites[#frame.sites + 1] = { state = self.state, block = self.block, jump = jump }
     self.dead = true
 end
 

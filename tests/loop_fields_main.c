@@ -17,6 +17,10 @@ extern uint32_t native_mutation(uint32_t);
 extern uint32_t tail_fields(uint32_t);
 extern uint32_t multiple_exits(uint32_t);
 extern bool bool_exit(uint32_t);
+extern float inline_early_return(uint32_t, float);
+extern uint32_t inline_early_mutation(uint32_t);
+extern uint32_t inline_return_join(bool);
+extern uint32_t inline_return_join_reverse(bool);
 
 int main(void) {
     for (uint32_t n = 0; n <= 32; ++n) {
@@ -41,7 +45,15 @@ int main(void) {
         assert(tail_fields(n) == 3 * n + 3);
         assert(multiple_exits(n) == (n < 3 ? 39u : n % 2 ? 55u : 82u));
         assert(bool_exit(n) == (n >= 3));
+        assert(inline_early_return(n, -1.0f) == 92.0f);
+        assert(inline_early_return(n, 16.0f) == 92.0f);
+        assert(inline_early_return(n, 64.0f) == 92.0f);
+        assert(inline_early_mutation(n) == (n == 0 ? 36u : n == 1 ? 42u : 85u));
     }
-    puts("loop fields: 462 checks passed");
+    assert(inline_return_join(false) == 7);
+    assert(inline_return_join(true) == 9);
+    assert(inline_return_join_reverse(false) == 9);
+    assert(inline_return_join_reverse(true) == 7);
+    puts("loop fields: 598 checks passed");
     return 0;
 }

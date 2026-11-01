@@ -223,6 +223,30 @@ do
                     check(word .. ': known construction leaves no copy loop',
                         body and not body:find('for%s*%(') and not body:find('while%s*%('))
                 end
+            elseif name == 'ui_counter' then
+                local generated = assert(io.open(c))
+                local source = generated:read('*a'); generated:close()
+                local body = source:match('replay_counter%b()%s*(%b{})')
+                check('UI library: no whole-component materialization', body
+                    and not body:find('app%s*=') and not body:find('app.counter.visible', 1, true))
+                local allowed = { ['.counter.count.value'] = true,
+                    ['.counter.increment_button.enabled'] = true, ['.counter.confirm.visible'] = true }
+                for _, button in ipairs { '.counter.increment_button', '.counter.reset_button',
+                    '.counter.confirm.reset_button', '.counter.confirm.keep_button' } do
+                    allowed[button .. '.hovered'], allowed[button .. '.pressed'] = true, true
+                end
+                local only_mutable = body ~= nil
+                for path in (body or ''):gmatch('app(%.counter[%w_%.]+)') do
+                    if not allowed[path] then only_mutable = false end
+                end
+                check('UI library: only mutable leaves remain in replay', only_mutable)
+                local constants = body ~= nil
+                for field, value in pairs { increment_x = 24, increment_y = 76, reset_x = 176, reset_y = 220 } do
+                    if not (body or ''):find('observation->' .. field .. ' = ' .. value .. '.0f;', 1, true) then
+                        constants = false
+                    end
+                end
+                check('UI library: layout remains constant through replay', constants)
             elseif name == 'ui_counter_generated' then
                 local generated = assert(io.open(c))
                 local source = generated:read('*a'); generated:close()
@@ -469,6 +493,10 @@ do
           'unchanged record fields stay known after a loop' },
         { 'loop_fields', 't.odd = t.odd + 1u;', true,
           'unchanged record fields stay known inside a loop' },
+        { 'loop_fields', 'return 92.0f;', true,
+          'inline early returns preserve unchanged caller fields' },
+        { 'loop_fields', 'app.w', false,
+          'inline early returns do not materialize caller layout' },
         { 'boundary', 'uint32_t t = weigh(a);\n    return t + weigh(b) + (a * 3u + a * 3u + a);', true,
           'call makes a shared function, a plain application stays inline' },
         { 'channels', 'slc_poll_recv(', true, 'first_of makes its attempts in the program' },

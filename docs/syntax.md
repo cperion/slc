@@ -2373,7 +2373,6 @@ end
 
 ```c
 bool report(const char *path, uint32_t n, double ratio) {
-    FILE *h;
     FILE *t = fopen(path, "w");
     if (t == NULL) {
         return false;
@@ -2381,13 +2380,11 @@ bool report(const char *path, uint32_t n, double ratio) {
     fputs("report\n", t);
     fprintf(t, "n = %u, ratio = %g\n", (unsigned)n, (double)ratio);
     if (n > 10u) {
-        h = t;
         goto L1;
     }
     fprintf(t, "small\n");
-    h = t;
 L1:;
-    fclose(h);
+    fclose(t);
     return true;
 }
 ```
@@ -2544,8 +2541,9 @@ end
 ```
 
 ```c
-        t = mmap(NULL, 4ull, PROT_READ, MAP_PRIVATE, file.fd, 0ll);
+        t = mmap(NULL, 4ull, PROT_READ, MAP_PRIVATE, t2, 0ll);
         if (t == MAP_FAILED) {
+            found = 0u;
             goto L3;
         }
         found = (uint32_t)t[0u] * 16777216u + (uint32_t)t[1u] * 65536u + (uint32_t)t[2u] * 256u + (uint32_t)t[3u];
@@ -3084,11 +3082,9 @@ uint32_t timeout_then_data(void) {
     int32_t r8;
     if (slc_io_pipe(&reader, &writer, &io) == 0) {
         r = (IoPipe){ .tag = IoPipe_done, .as.done = (Pipe){ .reader = (File){ .fd = reader }, .writer = (File){ .fd = writer } } };
-        outcome = 0u;
         goto L1;
     }
     r = (IoPipe){ .tag = IoPipe_failed, .as.failed = (int32_t)io };
-    outcome = 0u;
 L1:;
     if (r.tag == IoPipe_done) {
         buf = (U8x8){ .e = { 0 } };
@@ -3145,6 +3141,8 @@ L1:;
         r8 = slc_tk->result;
         if (r8 != 0) {
         }
+    } else {
+        outcome = 0u;
     }
     return outcome;
 }

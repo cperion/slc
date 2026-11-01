@@ -171,3 +171,59 @@ local bool_exit = do(n: U32): Bool
     return flags.enabled
 end
 export bool_exit
+
+-- An inline early return must not flush unchanged pending caller fields.
+local Layout = struct { w: F32, gap: F32, value: F32 }
+local maximum = do(a: F32, b: F32): F32
+    if a > b then return a end
+    return b
+end
+local inline_early_return = do(n: U32, value: F32): F32
+    local app = Layout { w = 80, gap = 12, value = 0 }
+    for i: U32 = 0, n do app.value = maximum(value, F32 i) end
+    return app.w + app.gap
+end
+export inline_early_return
+
+-- Fields the inline word actually changes must still survive both return paths.
+local change_before_return = do(p: Ref Panel): Unit
+    if p.count > 0 then
+        p.gap = 55
+        return
+    end
+    p.padding = 30
+end
+local inline_early_mutation = do(n: U32): U32
+    local p = Panel { gap = 12, padding = 24, count = 0 }
+    while p.count < n do
+        change_before_return p
+        p.count = p.count + 1
+    end
+    return p.gap + p.padding
+end
+export inline_early_mutation
+
+-- The unchanged path still needs its initial store when another return writes.
+local maybe_change = do(p: Ref U32, change: Bool): Unit
+    if change then
+        p = 9
+        return
+    end
+end
+local inline_return_join = do(change: Bool): U32
+    local value = U32 7
+    maybe_change value change
+    return value
+end
+export inline_return_join
+
+local maybe_keep = do(p: Ref U32, keep: Bool): Unit
+    if keep then return end
+    p = 9
+end
+local inline_return_join_reverse = do(keep: Bool): U32
+    local value = U32 7
+    maybe_keep value keep
+    return value
+end
+export inline_return_join_reverse
