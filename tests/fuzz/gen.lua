@@ -48,7 +48,9 @@ function Gen.const_of(r, t)
     local v
     if r:chance(0.6) then v = r:int(0, math.min(hi, 20)) else v = r:int(lo, hi) end
     if d.signed and r:chance(0.3) then v = -v end
+    -- negating the minimum leaves the range: a literal must fit its type (§7.2)
     if v < lo then v = lo end
+    if v > hi then v = hi end
     return v
 end
 
