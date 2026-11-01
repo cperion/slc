@@ -696,7 +696,7 @@ local function minimal(source, info, filename, signature)
     return source
 end
 
-local function gap(prev, tk, colon, unary)
+local function gap(prev, tk, colon, unary, spaced)
     if not prev then return '' end
     local a, b = prev.v, tk.v
     if tk.t == 'comment' then return '  ' end
@@ -708,7 +708,12 @@ local function gap(prev, tk, colon, unary)
     if unary and not (a == '-' and b == '-') then return '' end
     if a == '(' or a == '[' or b == '[' then return '' end
     if b == '(' then
-        if prev.t == 'iden' or a == ')' or a == ']' or a == '}' or a == 'do' or a == 'function' then return '' end
+        if a == 'do' or a == 'function' then return '' end
+        -- whether a `(` is spaced is syntax: a spaced one is the next argument
+        -- group (syntax 2.4, rule 3), so keep the source's choice
+        if prev.t == 'iden' or prev.t == 'string' or prev.t == 'number' or a == ')' or a == ']' or a == '}' then
+            return spaced and ' ' or ''
+        end
     end
     if a == '{' and b == '}' then return '' end
     if (a == '..' and prev.concat) or (b == '..' and tk.concat) then return ' ' end
@@ -774,7 +779,8 @@ local function layout(info, options)
                 end
                 emit(string.rep(' ', levels * options.indent_width))
             elseif #out > 0 then
-                emit(gap(prev, tk, prev_index and info.colons[prev_index], prev_index and info.unary[prev_index]))
+                emit(gap(prev, tk, prev_index and info.colons[prev_index], prev_index and info.unary[prev_index],
+                    pending ~= ''))
             end
             emit(tk.v)
             prev, prev_index, pending = tk, i, ''

@@ -748,18 +748,18 @@ function P:argument()
     if tk.kw == 'do' then return self:lambda() end
     if tk.t == 'number' then
         r:next()
-        return self:suffixed_from({ k = 'paren', e = { k = 'num', text = tk.v } }, 'literal', true)
+        return self:suffixed_from({ k = 'paren', e = { k = 'num', text = tk.v } }, 'literal', true, nil, nil, true)
     end
     if tk.kw == 'true' or tk.kw == 'false' then
         r:next()
-        return self:suffixed_from({ k = tk.kw }, 'literal', true)
+        return self:suffixed_from({ k = tk.kw }, 'literal', true, nil, nil, true)
     end
     local e = self:primary()
     return self:postfix_only(e)
 end
 
 function P:postfix_only(e)
-    return self:suffixed_from(e, 'name', true)
+    return self:suffixed_from(e, 'name', true, nil, nil, true)
 end
 
 function P:args()
@@ -774,7 +774,9 @@ function P:args()
     return args
 end
 
-function P:suffixed_from(e, last, no_juxta, in_type, statement_head)
+-- `argument` marks a juxtaposed argument's own postfix chain: a spaced `(` ends
+-- it, so `f a (b + 1)` is f(a)(b + 1) while `f a(b)` is f(a(b)).
+function P:suffixed_from(e, last, no_juxta, in_type, statement_head, argument)
     local r = self.r
     while true do
         local tk = r:peek(1)
@@ -811,10 +813,14 @@ function P:suffixed_from(e, last, no_juxta, in_type, statement_head)
         elseif tk.t == '(' and tk.nl and not self.lua then
             -- `(` can begin a statement: a newline before it ends the expression
             break
+        elseif tk.t == '(' and argument and tk.ws ~= '' and not self.lua then
+            -- a spaced `(` starts the next argument group of the enclosing chain
+            break
         elseif tk.t == '(' or ((tk.t == 'string' or tk.t == '{') and last ~= 'literal') then
             -- a literal argument's chain stops at a table or string: `f 21 {}` is f(21)({})
             e = { k = 'call', fn = e, args = self:args(), line = tk.line }
-            last = 'call'
+            -- a spaced group is an argument, so names go on applying: `f (g x) y`
+            last = (tk.t == '(' and tk.ws ~= '' and not self.lua) and 'arg' or 'call'
         elseif not no_juxta and self:starts_argument(last) then
             e = { k = 'call', fn = e, args = { self:argument() }, line = tk.line, juxta = true }
             last = 'arg'

@@ -1,0 +1,23 @@
+-- A spaced `(` starts the next argument group; an attached `(` continues the
+-- argument before it (syntax §2.4, rule 3). Compound arguments need no commas.
+local add = do(a: U32, b: U32): U32 = a + b
+local add3 = do(a: U32, b: U32, c: U32): U32 = a + b + c
+local twice = do(x: U32): U32 = x * 2
+
+local spaced = do(x: U32, y: U32): U32
+    local r = add x (y + 1)  -- add(x, y + 1)
+    r = r + add (twice x) y  -- add(twice(x), y)
+    r = r + add3 x (y * 2) (twice y)  -- add3(x, y * 2, twice(y))
+    r = r + add x twice(y)  -- attached: add(x, twice(y))
+    r = r + add 1 (y - 1)  -- after a literal argument: add(1, y - 1)
+    return r
+end
+assert(host(spaced(3, 4)) == 8 + 10 + 19 + 11 + 4)
+export spaced
+
+-- Host code follows the same rule.
+local pair = function(a) return function(b) return a .. "+" .. b end end
+local x = 7
+assert(pair 4 (x - 2) == "4+5")
+assert(pair (x * 2) x == "14+7")
+assert(pair 4 (x + 1) == "4+8")

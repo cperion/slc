@@ -31,13 +31,14 @@ A literal after an expression is its argument too, with the literal's postfix ch
     f 1 2                    f(1)(2)
     f 21 do ... end          f(21)(do ... end)
 
-Newlines are whitespace, as in Let: a literal's whole postfix chain attaches whatever
-the spacing, so `f 21 (2)` is f(21(2)) and `f "x" [1]` is f(("x")[1]); write
-`f(21)(2)` or `(f 21)(2)` to apply the call's result instead. A chain `(` that would
-start a line is written at the end of the previous line, so Lua 5.1 never sees a line
-that starts with '(' after an expression ("ambiguous syntax"). A lambda on the line
-after its call is still the call's argument, and an expression body goes on to the
-next line when it can.
+A literal's postfix chain attaches across newlines: `f "x" [1]` is f(("x")[1]). One
+spacing rule differs from Let: a `(` with whitespace before it on the same line is
+not part of the chain but the next argument group, so `f 21 (2)` is f(21)(2) while
+`f 21(2)` is f(21(2)), and a spaced group goes on applying: `f (g x) y` is
+f(g(x))(y) (SLC syntax §2.4). A chain `(` that would start a line is written at the
+end of the previous line, so Lua 5.1 never sees a line that starts with '(' after an
+expression ("ambiguous syntax"). A lambda on the line after its call is still the
+call's argument, and an expression body goes on to the next line when it can.
 
 Lua's own `do` stays Lua's in two places: the `do` of a `while` or `for` header, and
 `do ... end` where a statement starts (after `then`, `else`, `end`, `do`, `repeat`,
@@ -120,6 +121,8 @@ function lexer.scan_lua_tokenlist (input)
     end
     local out, prev = {}, nil                    -- prev: index in out of the last significant token
     local newline = false                        -- a line break since prev
+    local spaced = false                         -- whitespace since prev
+    local groups = {}                            -- open '(': whether each is a spaced argument group
     for i, token in ipairs(tokens) do
         local t, v = token[1], token[2]
         if t == 'keyword' and v == 'do' then t = 'iden'; token[1] = 'iden' end
@@ -140,10 +143,19 @@ function lexer.scan_lua_tokenlist (input)
                 table.insert(out, prev + 1, { 'iden', APPLY, p[3] })
                 token.applied = true
             end
+            -- `f (g x) y`: a group spaced from the operand it applies to is an
+            -- argument, so names after it go on applying
+            if t == '(' then
+                groups[#groups + 1] = p and spaced and not newline
+                    and (p.applied or CALLABLE[p[1]]) and not (p[1] == 'iden' and not plain_name(p[2]))
+            elseif t == ')' and #groups > 0 then
+                if table.remove(groups) then token.applied = true end
+            end
             out[#out + 1] = token
             prev = #out
-            newline = false
+            newline, spaced = false, false
         else
+            spaced = true
             if t == 'space' and v:find '\n' then newline = true end
             out[#out + 1] = token
         end
@@ -482,6 +494,10 @@ function argument_text (get)
             chain[#chain + 1] = gap; chain[#chain + 1] = b
             balanced(get, '[', ']', chain)
         elseif next_t == '(' then
+            -- a spaced `(` on the same line starts the next argument instead:
+            -- `f 21 (2)` is f(21)(2), while `f 21(2)` keeps the chain
+            local rt, rv = get:peek(1, true)
+            if (rt == 'space' and not rv:find '\n') or rt == 'comment' then break end
             local _, b, gap = significant(get)
             if gap:find '\n' then
                 -- write the '(' on the line of the expression it applies to

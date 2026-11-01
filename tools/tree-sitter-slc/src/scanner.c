@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-enum { LONG_STRING, LONG_COMMENT, NAME_ARGUMENT, ENDALL, IMPLICIT_END, ERROR_SENTINEL, ENDALL_RESET };
+enum { LONG_STRING, LONG_COMMENT, NAME_ARGUMENT, ENDALL, IMPLICIT_END, ERROR_SENTINEL, ENDALL_RESET, ATTACHED_PAREN };
 typedef struct { bool endall; uint32_t column; int32_t next; } Scanner;
 void *tree_sitter_slc_external_scanner_create(void) { return calloc(1, sizeof(Scanner)); }
 void tree_sitter_slc_external_scanner_destroy(void *p) { free(p); }
@@ -30,6 +30,11 @@ bool tree_sitter_slc_external_scanner_scan(void *p, TSLexer *l, const bool *vali
   // allow it to reappear at a later token with the same column.
   if (s->endall && valid[ENDALL_RESET]) {
     s->endall = false; l->mark_end(l); l->result_symbol = ENDALL_RESET; return true;
+  }
+  // A `(` with no whitespace before it continues an argument's postfix chain;
+  // a spaced one is left to the grammar as the next argument group.
+  if (valid[ATTACHED_PAREN] && l->lookahead == '(') {
+    advance(l); l->mark_end(l); l->result_symbol = ATTACHED_PAREN; return true;
   }
   // Unlike literal arguments, a juxtaposed name must stay on the same line.
   // Scan it externally so skipped whitespace cannot erase that distinction.

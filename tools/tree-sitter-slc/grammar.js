@@ -3,7 +3,7 @@ const sep = (rule, delimiter = ',') => seq(rule, repeat(seq(delimiter, rule)));
 module.exports = grammar({
   name: 'slc',
   extras: $ => [/\s/, $.comment, $._endall_reset],
-  externals: $ => [$.long_string, $.long_comment, $.name_argument, $._endall, $._implicit_end, $._error_sentinel, $._endall_reset],
+  externals: $ => [$.long_string, $.long_comment, $.name_argument, $._endall, $._implicit_end, $._error_sentinel, $._endall_reset, $._attached_paren],
   word: $ => $.identifier,
   conflicts: $ => [[$.expression_statement, $._expression], [$.bare_method_call, $._expression], [$.parameter, $._expression], [$.field, $._expression], [$.parameter, $.vararg_expression], [$.handler, $._expression]],
   rules: {
@@ -71,9 +71,11 @@ module.exports = grammar({
     call_expression: $ => prec.left(14, seq(field('function', $._expression), optional(seq(':', field('method', $.identifier))), field('arguments', $.arguments))),
     arguments: $ => choice(seq('(', optional(sep($._expression)), ')'), $.table_constructor, $.string, $.number, $.boolean, $.lambda, alias($.name_argument, $.identifier), $.member_argument),
     // `f a.b[i]` is f(a.b[i]): a juxtaposed name argument keeps its postfix chain
-    // (spec 3.3, rule 3), so the call is a complete statement.
+    // (spec 3.3, rule 3), so the call is a complete statement. Only an attached
+    // `(` continues it: `f a(b)` is f(a(b)), `f a (b)` is f(a)(b) (spec 10.4).
     member_argument: $ => prec.left(16, seq(choice(alias($.name_argument, $.identifier), $.member_argument),
-      choice(seq('.', field('member', $.identifier)), seq('[', $._expression, ']'), seq('(', optional(sep($._expression)), ')')))),
+      choice(seq('.', field('member', $.identifier)), seq('[', $._expression, ']'),
+        seq(alias($._attached_paren, '('), optional(sep($._expression)), ')')))),
     unary_expression: $ => prec(11, seq(field('operator', choice('not', '-', '#')), $._expression)),
     binary_expression: $ => choice(...[
       ['or', 1], ['and', 2], [choice('<', '>', '<=', '>=', '~=', '=='), 3], ['..', 5, true],
