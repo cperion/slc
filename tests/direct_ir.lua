@@ -149,4 +149,5 @@ local ok, err = pcall(direct.compile, unsupported)
 check(not ok and tostring(err):find('unresolved native symbol slc_direct_missing_fixture',1,true), tostring(err))
 check(not pcall(actual.deep), 'arity mismatch was accepted')
 for _, handle in ipairs(c_handles) do check(ffi.C.dlclose(handle) == 0, 'C baseline unload') end
+checks = checks + require('tests.storage_boundaries')(slc, true)
 print(('direct prepared IR: %d differential/diagnostic checks passed (C/gccjit/direct)'):format(checks))

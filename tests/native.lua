@@ -55,6 +55,10 @@ for i = 0, 16 do
     check('compact nested configuration ' .. i, compact.compact_nested(i) == 11 + 5 * i)
 end
 
+local boundaries_ok, boundaries = pcall(require('tests.storage_boundaries'), slc)
+check('separate native units preserve record ABI', boundaries_ok, boundaries)
+if boundaries_ok then print(('native storage boundaries: %d checks passed'):format(boundaries)) end
+
 -- the guide's program
 local g = slc.load(root .. '/examples/guide.slc')
 check('outline_demo', g.outline_demo(5) == 10)

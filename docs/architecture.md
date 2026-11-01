@@ -662,6 +662,21 @@ rewriting byte-oriented operations. C record definitions and gccjit descriptors 
 the same field lists; aggregate construction is unchanged because it retains its
 layout. An otherwise empty private record has one anonymous-to-SLC byte for C99.
 
+Preparation belongs to the exact module/export view. A `native(word)` view inherits
+source definitions from its parent, but must not inherit the parent's preparation
+cache: its own exported signature can make a formerly private record ABI-visible.
+Split C units share one prepared layout and header. Separately loaded units exchange
+records through pinned export, pointer and callback interfaces, not through their
+private FFI type descriptors (which are unit-local).
+
+The experimental/deprecated direct backend still uses declared record layouts; it
+does not get these storage savings. It shares the C-built runtime, whose record
+interfaces come from foreign headers. Runtime operations receive task-frame sizes
+or opaque byte buffers; they do not interpret a program's private record fields.
+Cross-backend record calls use the same pinned native interfaces as separate units.
+Regression tests exchange records between native words and loaded units, and call
+in both directions between direct and gccjit while private layouts differ.
+
 ### 11.1 The same IR, the same rules
 
 `slc.jitgen` mirrors cgen method by method: `place`, `expr`, `stmt`, `wait`, task frames and step functions, blocking functions, spawns, externs. Where cgen writes `xs.ptr[i]`, the emitter asks for an array access; where cgen writes `if (call == SLC_PENDING) { f->task.state = 2; return SLC_WAIT; } resume2:;`, it builds the same blocks, and the step function's resume `switch` becomes a gccjit switch over them. Bodies are built as a control-flow graph in Lua and handed to gccjit when complete, so labels, `goto`, `break` and resume points are just edges.

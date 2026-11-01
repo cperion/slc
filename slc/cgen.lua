@@ -1648,7 +1648,10 @@ end
 -- every loop round of a task. Done once per module, whichever backends run.
 function G.prepare(mod)
     local fns = reachable(mod)
-    if mod.prepared and #fns == mod.prepared_n then return fns end
+    -- Export views (notably native(word)) inherit names and definitions from
+    -- their parent module, but have their own reachability and ABI boundaries.
+    -- An inherited preparation cannot prove this view's storage layout safe.
+    if rawget(mod, 'prepared') and #fns == rawget(mod, 'prepared_n') then return fns end
     -- A parameter hides a function of the same name in C. A function nobody
     -- exports can be renamed, so no parameter ever hides one its function calls.
     for _, fn in ipairs(fns) do
