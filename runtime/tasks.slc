@@ -240,7 +240,7 @@ return function(t)
             if task.run == RUN_PARKED then
                 blocked_remove(blocked, task)
                 nblocked[0] = nblocked[0] - 1
-                set_active(task, 1)
+                set_active task 1
             end
             task.run = RUN_RUNNING
             task.woken = 1
@@ -325,7 +325,7 @@ return function(t)
         if me_task.blocking ~= 0 then
             lock sched
             me_task.depth = me_task.depth + 1
-            set_active(me_task, 1)
+            set_active me_task 1
             unlock sched
         end
         return scope
@@ -394,7 +394,7 @@ return function(t)
         lock sched
         if task.blocking ~= 0 then
             task.depth = task.depth - 1
-            if task.depth == 0 then set_active(task, 0) end
+            if task.depth == 0 then set_active task 0 end
         end
         task.result = 0
         if scope.live == 0 then
@@ -402,7 +402,7 @@ return function(t)
             scope_retire scope
             return NOW
         end
-        begin(task, ops, 0, site)
+        begin task ops 0 site
         set_claimable task
         scope.waiter = task
         unlock sched
@@ -606,7 +606,7 @@ return function(t)
                 task.next = blocked[0]
                 blocked[0] = task
                 nblocked[0] = nblocked[0] + 1
-                set_active(task, 0)
+                set_active task 0
             end
             while task.woken == 0 do
                 local other = pop()
@@ -619,7 +619,7 @@ return function(t)
                 lock sched
                 local on = I32 0
                 if task.depth > 0 then on = 1 end
-                set_active(task, on)
+                set_active task on
                 unlock sched
                 return
             end
@@ -701,14 +701,14 @@ return function(t)
         stacks_use(Ptr op.task.stacks)
         op.job((Ptr Void)(op.buf))
         stacks_use(null Set)
-        io_complete(op, io_done, 0)
+        io_complete op io_done 0
     end
     local run_task_job_fn = fnptr run_task_job
 
     local slc_blocking = do(task: Ptr Task, ops: Ptr Op, job: JobFn, env: Ptr Void, site: CString): I32
         ensure
         local op = Ptr ops[0]
-        begin(task, ops, 1, site)
+        begin task ops 1 site
         op.task = task
         op.kind = blocking_kind
         op.index = -1
@@ -721,7 +721,7 @@ return function(t)
         lock sched
         nio[0] = nio[0] + 1  -- outstanding: not a deadlock while it runs
         unlock sched
-        slc_run_blocking(run_task_job_fn, (Ptr Void)(op))
+        slc_run_blocking run_task_job_fn ((Ptr Void)(op))
         return PENDING
     end
     export slc_blocking

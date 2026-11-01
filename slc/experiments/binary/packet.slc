@@ -14,12 +14,12 @@ local assign = do(target: Ref Message, value: Message): Unit
     target = value
 end
 local packet_decode = do(input: Slice U8, output: Ref Message): U32
-    return binary.decode(packet, input) do(record, payload)
+    return binary.decode packet input do(record, payload)
         assign output record
     end
 end
 local compact_decode = do(input: Slice U8, output: Ref Message): U32
-    return binary.decode(compact, input) do(record, payload)
+    return binary.decode compact input do(record, payload)
         assign output record
     end
 end
@@ -30,7 +30,7 @@ export compact_decode
 -- High 32 bits distinguish successful empty input from rejection (zero).
 local packet_visit = do(input: Slice U8): U64
     local checksum: U32 = 0
-    local consumed = binary.decode(packet, input) do(record, payload)
+    local consumed = binary.decode packet input do(record, payload)
         checksum = record.sequence
         local i: U32 = 0
         while i < payload.length do

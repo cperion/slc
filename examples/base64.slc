@@ -15,10 +15,10 @@ local pad = U8 61
 
 -- one group: three input bytes become four characters, padded when `n` is short
 local encode_group = do(out: Ptr U8, b0: U32, b1: U32, b2: U32, n: U32): Unit
-    out[0] = alphabet[shr(b0, 2)]
-    out[1] = alphabet[bor(shl(band(b0, 3), 4), shr(b1, 4))]
-    out[2] = alphabet[bor(shl(band(b1, 15), 2), shr(b2, 6))]
-    out[3] = alphabet[band(b2, 63)]
+    out[0] = alphabet[shr b0 2]
+    out[1] = alphabet[bor(shl(band b0 3, 4), shr b1 4)]
+    out[2] = alphabet[bor(shl(band b1 15, 2), shr b2 6)]
+    out[3] = alphabet[band b2 63]
     if n < 3 then out[3] = pad end
     if n < 2 then out[2] = pad end
 end

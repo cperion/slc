@@ -41,8 +41,8 @@ local collatz = do(n: U32): U32
     local steps: U32 = 0
     local x = U64 n
     while x ~= 1 do
-        if band(x, 1) == 0 then
-            x = shr(x, 1)
+        if band x 1 == 0 then
+            x = shr x 1
         else
             x = 3 * x + 1
         end

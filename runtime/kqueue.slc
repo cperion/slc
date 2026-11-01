@@ -64,7 +64,7 @@ return function(t)
             local n = s.capacity
             if n == 0 then n = 64 end
             while n <= index do n = n * 2 end
-            local queues = resize(s.fds, n * size_of Queue)
+            local queues = resize s.fds (n * size_of Queue)
             if queues == null Queue then trap "out of memory for I/O" end
             zero(bytes queues[s.capacity], 0, (n - s.capacity) * size_of Queue)
             s.fds = queues
@@ -111,7 +111,7 @@ return function(t)
                 break
             end
         end
-        if w.head ~= null Op and watch(s, fd, direction, true) < 0 then
+        if w.head ~= null Op and watch s fd direction true < 0 then
             local error = errno()
             while w.head ~= null Op do
                 local op = w.head
@@ -132,7 +132,7 @@ return function(t)
                 local next = incoming.next
                 local direction = t.posix.wants_write(ReadOpPtr incoming)
                 local w = queue_of s incoming.fd direction
-                if w.head == null Op and watch(s, incoming.fd, direction, true) < 0 then
+                if w.head == null Op and watch s incoming.fd direction true < 0 then
                     local error = errno()
                     if try incoming == 0 then complete(incoming, failed, I64 error) end
                     incoming = next
@@ -174,7 +174,7 @@ return function(t)
                     local direction = I32 0
                     if ev.filter == output then direction = 1 end
                     local error = I32 0
-                    if band(ev.flags, eof) ~= 0 then error = I32 ev.fflags end
+                    if band ev.flags eof ~= 0 then error = I32 ev.fflags end
                     ready(s, I32 ev.ident, direction, error)
                 end
                 i = i + 1

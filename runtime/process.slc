@@ -62,7 +62,7 @@ return function(t)
     local seed_fn = fnptr seed
     local slc_hash_seed_word = do(index: U32): U64
         if index > 1 then trap "Map: invalid hash seed word" end
-        if pthread_once(once, seed_fn) ~= 0 or failed[0] ~= 0 then
+        if pthread_once once seed_fn ~= 0 or failed[0] ~= 0 then
             trap "Map: cannot obtain a random hash seed"
         end
         if index == 0 then return key0[0] end

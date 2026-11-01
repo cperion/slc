@@ -47,7 +47,7 @@ local exercise = do(mode: I32): U32
         failed = do(problem)
             local message = problem.message
             local bytes = (Ptr U8)(Ptr message.bytes)
-            report(problem.operation, bytes, message.len, problem.truncated)
+            report problem.operation bytes message.len problem.truncated
             return problem.operation
         end,
     }

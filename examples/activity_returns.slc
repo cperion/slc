@@ -47,16 +47,16 @@ export return_known_local
 -- A directly saturated call can mix static and dynamic parameters.
 local apply = do(body, n: U32): U32 = body n
 local return_apply = do(n: U32): U32
-    return apply(do(x) return x + 3 end, n)
+    return apply do(x) return x + 3 end n
 end
 export return_apply
 
 -- The same callback identity is preserved through recursive tail rounds.
 local function repeat_body(body, n: U32): U32
     if n == 0 then return body() end
-    return repeat_body(body, n - 1)
+    return repeat_body body (n - 1)
 end
 local return_recursive = do(n: U32): U32
-    return repeat_body(do() return n + 5 end, n)
+    return repeat_body do() return n + 5 end n
 end
 export return_recursive

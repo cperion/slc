@@ -135,7 +135,7 @@ function map.library(T, storage, Entry, Result, string_keys)
             "Map grew while it was not at the top of its data stack")
         -- the push moved the stack: resolve it once after it
         local s = stacks.at h.stack
-        local spare = stacks.span(s, fresh, bytes)
+        local spare = stacks.span s fresh bytes
         stacks.fill spare bytes
         local old_bytes = U64 old_capacity * size_of Entry
         local source = EP stacks.span(s, base, old_bytes)
@@ -146,7 +146,7 @@ function map.library(T, storage, Entry, Result, string_keys)
             if entry.hash ~= 0 then insert target capacity entry[0] end
             slot = slot + 1
         end
-        stacks.move(stacks.span(s, base, bytes), spare, bytes)
+        stacks.move (stacks.span s base bytes) spare bytes
         local top = base + bytes
         stacks.reset h.stack top
         h.cap = capacity
@@ -159,8 +159,8 @@ function map.library(T, storage, Entry, Result, string_keys)
         -- in this stack, if they were, since the push may have moved them
         local place = do(s: Ptr stacks.Stack, target: U64, pinned: U64, key: Str): Unit
             local n = U64 key.length
-            local destination = stacks.span(s, target, n)
-            if pinned ~= maximum() then stacks.move(destination, stacks.span(s, pinned, n), n)
+            local destination = stacks.span s target n
+            if pinned ~= maximum() then stacks.move destination (stacks.span s pinned n) n
             else
                 local ptr, len = slice_parts key
                 stacks.move destination ptr n
@@ -184,8 +184,8 @@ function map.library(T, storage, Entry, Result, string_keys)
                 -- compact the live keys above the arena, then move them down;
                 -- the push moved the arena, which holds no table entries
                 local s = stacks.at stack
-                local keys_now = stacks.span(s, base, length)
-                local compacted = stacks.span(s, fresh, bytes)
+                local keys_now = stacks.span s base length
+                local compacted = stacks.span s fresh bytes
                 local table = acquire m
                 local out = U64 0
                 local slot = U32 0
@@ -200,8 +200,8 @@ function map.library(T, storage, Entry, Result, string_keys)
                     slot = slot + 1
                 end
                 offset = out
-                place(s, fresh + out, pinned, key)
-                stacks.move(stacks.span(s, base, bytes), compacted, bytes)
+                place s (fresh + out) pinned key
+                stacks.move (stacks.span s base bytes) compacted bytes
                 local end_at = base + bytes
                 stacks.reset stack end_at
                 a.arena_len = bytes
@@ -209,7 +209,7 @@ function map.library(T, storage, Entry, Result, string_keys)
             else
                 stacks.extend(stack, base, length, n,
                     "StrMap grew while its arena was not at the top of its data stack")
-                place(stacks.at stack, base + offset, pinned, key)
+                place (stacks.at stack) (base + offset) pinned key
                 a.arena_len = length + n
                 a.dead = dead + n
             end

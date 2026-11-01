@@ -32,7 +32,7 @@ local add_stacks = do(context: Ptr Set, index: U64): Unit
     local n = context.n
     if n == 0 then n = 4 end
     while n <= index do n = n * 2 end
-    local data = resize_stacks(context.stacks, n * size_of Stack)
+    local data = resize_stacks context.stacks (n * size_of Stack)
     if data == null Stack then trap "out of memory for data stacks" end
     zero(bytes data[context.n], 0, (n - context.n) * size_of Stack)
     context.stacks = data
@@ -58,7 +58,7 @@ local expand = do(s: Ptr Stack, need: U64): Unit
         if cap > maximum / 2 then trap "data stack too large" end
         cap = cap * 2
     end
-    local data = resize_bytes(s.data, cap)
+    local data = resize_bytes s.data cap
     if data == null U8 then trap "out of memory for a data stack" end
     s.data = data
     s.cap = cap
@@ -76,7 +76,7 @@ stacks.top = do(index: U64): U64
 end
 stacks.begin = do(index: U64): U64
     local s = stacks.claim index
-    local top = band(s.top + 15, bnot(U64 15))
+    local top = band (s.top + 15) bnot(U64 15)
     reserve s top
     s.top = top
     return top
@@ -87,7 +87,7 @@ stacks.push = do(index: U64, n: U64): U64
     local s = stacks.claim index
     local at = s.top
     if n > maximum - at then trap "data stack too large" end
-    reserve(s, at + n)
+    reserve s (at + n)
     s.top = at + n
     return at
 end
@@ -118,7 +118,7 @@ local region = do(s: Ptr Stack, at: U64, n: U64): Ptr U8
     return Ptr s.data[at]
 end
 stacks.region = do(index: U64, at: U64, n: U64): Ptr U8
-    return region(stacks.at index, at, n)
+    return region (stacks.at index) at n
 end
 -- Regions of a stack already resolved once, for work after a push.
 stacks.span = region
@@ -130,27 +130,27 @@ stacks.extend = do(index: U64, base: U64, used: U64, n: U64, what: CString): U64
     local at = s.top
     if at - base ~= used then trap what end
     if n > maximum - at then trap "data stack too large" end
-    reserve(s, at + n)
+    reserve s (at + n)
     s.top = at + n
     return at
 end
 stacks.fill = do(at: Ptr U8, n: U64): Unit
-    if n ~= 0 then zero(at, 0, n) end
+    if n ~= 0 then zero at 0 n end
 end
 stacks.move = do(dst: Ptr U8, src: Ptr U8, n: U64): Unit
-    if n ~= 0 then move(dst, src, n) end
+    if n ~= 0 then move dst src n end
 end
 stacks.bytes = stacks.region
 stacks.copy = do(index: U64, dst: U64, src: U64, n: U64): Unit
     if n == 0 then return end
     local s = stacks.at index
-    move(region s dst n, region s src n, n)
+    move (region s dst n) (region s src n) n
 end
 stacks.write = do(index: U64, dst: U64, src: Ptr U8, n: U64): Unit
-    if n ~= 0 then move(stacks.region(index, dst, n), src, n) end
+    if n ~= 0 then move (stacks.region index dst n) src n end
 end
 stacks.zero = do(index: U64, at: U64, n: U64): Unit
-    if n ~= 0 then zero(stacks.region(index, at, n), 0, n) end
+    if n ~= 0 then zero (stacks.region index at n) 0 n end
 end
 stacks.free = do(set: Ptr Set): Unit
     local i = U64 0

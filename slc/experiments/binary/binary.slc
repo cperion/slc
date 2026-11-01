@@ -75,7 +75,7 @@ local read_integer = do(bytes: Slice U8, f): U32
     for k = 0, f.width - 1 do
         local at = f.offset + k
         if f.endian == "le" then at = f.offset + f.width - 1 - k end
-        value = bor(shl(value, 8), U32 bytes[at])
+        value = bor(shl value 8, U32 bytes[at])
     end
     return value
 end
@@ -105,7 +105,7 @@ binary.encode = do(layout)
         if size == 0 then return 0 end
         if capacity < size then return 0 end
         for _, f in ipairs layout.fields do
-            write_integer(output, f, rawmember(record, f.name))
+            write_integer output f rawmember(record, f.name)
         end
         local i: U32 = 0
         while i < payload.length do
@@ -120,7 +120,7 @@ binary.decode = do(layout, input: Slice U8, body): U32
     local header = input:sub(0, layout.header_size)
     local fields = {}
     for _, f in ipairs layout.fields do
-        fields[f.name] = read_integer(header, f)
+        fields[f.name] = read_integer header f
     end
     local record = layout.Record fields
     local valid = validator layout

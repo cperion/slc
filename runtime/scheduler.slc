@@ -164,7 +164,7 @@ local add = do(h: Ptr Heap, op: Ptr Op): Bool
         local capacity = U64 16
         if h.cap ~= 0 then capacity = h.cap * 2 end
         local bytes = capacity * size_of(Ptr Op)
-        local data = resize(h.data, bytes)
+        local data = resize h.data bytes
         if data == null(Ptr Op) then trap "out of memory for timers" end
         h.data = data
         h.cap = capacity
@@ -250,12 +250,12 @@ end
 local receive = do(r: Ptr Channel, out: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Task)): I32
     wake[0] = null Task
     if r.count > 0 then
-        copy(out, ring_slot(r, 0), r.elem)
+        copy out (ring_slot r 0) r.elem
         r.head = (r.head + 1) % r.cap
         r.count = r.count - 1
         local sender = claim_waiter(Ptr r.sendq, self)
         if sender ~= null Op then
-            copy(ring_slot(r, r.count), sender.buf, r.elem)
+            copy (ring_slot r r.count) sender.buf r.elem
             r.count = r.count + 1
             sender.task.result = done_result sender 0
             wake[0] = sender.task
@@ -264,7 +264,7 @@ local receive = do(r: Ptr Channel, out: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Ta
     end
     local sender = claim_waiter(Ptr r.sendq, self)
     if sender ~= null Op then
-        copy(out, sender.buf, r.elem)
+        copy out sender.buf r.elem
         sender.task.result = done_result sender 0
         wake[0] = sender.task
         return 1
@@ -277,13 +277,13 @@ local send = do(r: Ptr Channel, value: Ptr U8, self: Ptr Task, wake: Ptr(Ptr Tas
     wake[0] = null Task
     local receiver = claim_waiter(Ptr r.recvq, self)
     if receiver ~= null Op then
-        copy(receiver.buf, value, r.elem)
+        copy receiver.buf value r.elem
         receiver.task.result = done_result receiver 1
         wake[0] = receiver.task
         return 1
     end
     if r.count < r.cap then
-        copy(ring_slot(r, r.count), value, r.elem)
+        copy (ring_slot r r.count) value r.elem
         r.count = r.count + 1
         return 1
     end

@@ -133,7 +133,7 @@ export native_mutation
 -- Explicit tail-recursive words use the same field-wise agreement.
 local function walk(n: U32, p: Pair): U32
     if n == 0 then return p.x + p.step end
-    return walk(n - 1, Pair { x = p.x + p.step, y = p.y, step = p.step })
+    return walk (n - 1) Pair { x = p.x + p.step, y = p.y, step = p.step }
 end
 local tail_fields = do(n: U32): U32
     return walk n Pair { x = 0, y = 7, step = 3 }
@@ -180,7 +180,7 @@ local maximum = do(a: F32, b: F32): F32
 end
 local inline_early_return = do(n: U32, value: F32): F32
     local app = Layout { w = 80, gap = 12, value = 0 }
-    for i: U32 = 0, n do app.value = maximum(value, F32 i) end
+    for i: U32 = 0, n do app.value = maximum value (F32 i) end
     return app.w + app.gap
 end
 export inline_early_return

@@ -41,7 +41,7 @@ local file_roundtrip = do(path: CString): U32
         out[i] = U8(i * 7)
         i = i + 1
     end
-    io.open(path, bor(io.READ_WRITE, bor(io.CREATE, io.TRUNCATE))) {
+    io.open(path, bor io.READ_WRITE (bor io.CREATE io.TRUNCATE)) {
         done = do(f)
             io.write(f, out) { done = do(n) end, failed = do(e) end }
             local back: Array(U8, 100)

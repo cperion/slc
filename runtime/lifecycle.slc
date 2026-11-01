@@ -15,7 +15,7 @@ return function(types)
     local zero = extern("memset", { Ptr U8, I32, U64 }, Ptr U8, { header = "<string.h>" })
 
     local slc_scope_allocate = do(task: Ptr Task): Ptr Scope
-        local scope = alloc_scope(1, size_of Scope)
+        local scope = alloc_scope 1 (size_of Scope)
         if scope ~= null Scope then
             scope.parent = task.cur_scope
             task.cur_scope = scope
@@ -35,7 +35,7 @@ return function(types)
         if count[0] == capacity[0] then
             local n = initial
             if capacity[0] ~= 0 then n = capacity[0] * 2 end
-            local data = resize(items[0], n * size_of U32)
+            local data = resize items[0] (n * size_of U32)
             if data == null U32 then return false end
             items[0] = data
             capacity[0] = n
@@ -78,7 +78,7 @@ return function(types)
         local page = index / 256
         if page >= 4096 then return -1 end
         if chunks[page] == null Channel then
-            local chunk = alloc_channels(256, size_of Channel)
+            local chunk = alloc_channels 256 (size_of Channel)
             if chunk == null Channel then return -2 end
             local i = U32 0
             while i < 256 do
@@ -98,8 +98,8 @@ return function(types)
         local page = index / 256
         if page >= 4096 then return -1 end
         if chunks[page] == null Pool then
-            local chunk = alloc_pools(256, size_of Pool)
-            local metadata = alloc_metas(256, size_of PoolMeta)
+            local chunk = alloc_pools 256 (size_of Pool)
+            local metadata = alloc_metas 256 (size_of PoolMeta)
             if chunk == null Pool or metadata == null PoolMeta then return -2 end
             local i = U32 0
             while i < 256 do
@@ -148,7 +148,7 @@ return function(types)
             r.cap_bytes = U64 n * elem
             r.cap_slots = n
         else
-            zero(r.m.data, 0, U64 n * elem)
+            zero r.m.data 0 (U64 n * elem)
         end
         local i = U32 0
         while i < n do

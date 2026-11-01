@@ -74,7 +74,7 @@ end
 
 -- each byte of a file, until its end; false if it could not be opened
 local each_byte = do(path: CString, body): Bool
-    return with_file(path, "rb") do(..)
+    return with_file path ("rb") do(..)
         local b: I32 = next_byte()
         while b >= 0 do
             body(U8 b)

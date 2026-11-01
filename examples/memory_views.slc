@@ -65,7 +65,7 @@ local parse = do(buf: Slice U8): Packet
     local h = buf:sub(0, size)
     local fields = {}
     for _, f in ipairs format do
-        fields[f[1]] = read_be(h, f[2], f[3])
+        fields[f[1]] = read_be h f[2] f[3]
     end
     return Packet fields
 end

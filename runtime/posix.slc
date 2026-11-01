@@ -82,7 +82,7 @@ return function(types)
     local slc_io_prepare = do(op: Ptr Op): I32
         if op.kind == open_kind or op.kind == close_kind then offload_open_close op; return 1 end
         if op.kind ~= connect_kind then return 0 end
-        local fd = socket(family, stream, 0)
+        local fd = socket family stream 0
         if fd < 0 then complete(op, failed, I64 errno()); return 1 end
         slc_io_nonblocking fd
         local a = address(U32 op.offset, op.len)
@@ -152,8 +152,8 @@ return function(types)
     local slc_io_offload_file = do(op: Ptr Op): I32
         if op.kind ~= read_kind and op.kind ~= write_kind then return 0 end
         local st = Stat { mode = 0 }
-        if fstat(op.fd, Ptr st) ~= 0 then return 0 end
-        if band(st.mode, mode_mask) ~= regular_mode then return 0 end
+        if fstat op.fd (Ptr st) ~= 0 then return 0 end
+        if band st.mode mode_mask ~= regular_mode then return 0 end
         offload_file op
         return 1
     end
@@ -172,12 +172,12 @@ return function(types)
         return done
     end
     local slc_io_listen = do(host: U32, port: U32, value: Ptr I64): I32
-        local fd = socket(family, stream, 0)
+        local fd = socket family stream 0
         if fd < 0 then value[0] = I64 errno(); return failed end
         local one = I32 1
         setsockopt(fd, socket_level, reuseaddr, VP(Ptr one), U32(size_of I32))
         local a = address host port
-        if bind(fd, AP(Ptr a), U32(size_of Address)) < 0 or listen(fd, 128) < 0 then
+        if bind(fd, AP(Ptr a), U32(size_of Address)) < 0 or listen fd 128 < 0 then
             local error = errno()
             close fd
             value[0] = I64 error
@@ -199,8 +199,8 @@ return function(types)
     local open_close_job = do(arg: VP): Unit = slc_posix_open_close((Ptr Op)(arg))
     local file_io_job = do(arg: VP): Unit = slc_posix_file_io((Ptr Op)(arg))
     local open_close_fn, file_io_fn = fnptr open_close_job, fnptr file_io_job
-    local slc_posix_submit_open_close = do(op: Ptr Op): Unit = run_blocking(open_close_fn, (VP)(op))
-    local slc_posix_submit_file = do(op: Ptr Op): Unit = run_blocking(file_io_fn, (VP)(op))
+    local slc_posix_submit_open_close = do(op: Ptr Op): Unit = run_blocking open_close_fn ((VP)(op))
+    local slc_posix_submit_file = do(op: Ptr Op): Unit = run_blocking file_io_fn ((VP)(op))
     export slc_posix_submit_open_close
     export slc_posix_submit_file
     export slc_io_nonblocking

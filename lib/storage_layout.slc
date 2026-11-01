@@ -97,7 +97,7 @@ function layout.storage(T, R, Elem, Slot, view, make_id, components)
     p.components = components
     p.pin = do(self: Ref T, text: Str): U64
         local ptr, len = slice_parts text
-        return pin(view(self).stack, ptr, U64 len)
+        return pin view(self).stack ptr (U64 len)
     end
     p.maximum = do(): U64 = maximum
     return p
@@ -123,11 +123,11 @@ function layout.maps(T, Entry, view)
     local p = { .View, .header, .entries }
     p.init = do(self: Ref T, stack: U64, arena: U64): Unit
         local h = view self
-        if str then h[0] = layout.strmap_new(stack, arena, size_of Entry)
-        else h[0] = layout.map_new(stack, size_of Entry) end
+        if str then h[0] = layout.strmap_new stack arena (size_of Entry)
+        else h[0] = layout.map_new stack (size_of Entry) end
     end
     p.iter = do(self: Ref T, guard: Ptr layout.Grow, stack: U64): Unit
-        guard[0] = layout.iter_new(stack, header self)
+        guard[0] = layout.iter_new stack (header self)
     end
     p.strmap = do(self: Ref T): Ptr layout.StrMap return view self end
     p.acquire = do(self: Ref T): View
@@ -135,7 +135,7 @@ function layout.maps(T, Entry, view)
         local table = entries self h.base h.cap
         if str then
             local s = view self
-            local arena = stacks.region(s.arena_stack, s.arena_base, s.arena_len)
+            local arena = stacks.region s.arena_stack s.arena_base s.arena_len
             return View { entries = table, cap = h.cap, .arena }
         end
         return View { entries = table, cap = h.cap }
@@ -148,7 +148,7 @@ function layout.maps(T, Entry, view)
     p.maximum = do(): U64 = maximum
     p.pin = do(self: Ref T, text: Str): U64
         local ptr, len = slice_parts text
-        return pin(view(self).arena_stack, ptr, U64 len)
+        return pin view(self).arena_stack ptr (U64 len)
     end
     return p
 end

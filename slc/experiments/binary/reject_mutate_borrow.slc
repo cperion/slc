@@ -6,7 +6,7 @@ local bad = do(n: U32): U32
         storage:push(U8 i)
     end
     return storage:view() do(input)
-        return schema.binary.decode(schema.packet, input) do(record, payload)
+        return schema.binary.decode schema.packet input do(record, payload)
             storage:push 0
         end
     end

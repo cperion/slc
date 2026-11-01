@@ -95,8 +95,8 @@ local function attach(ui)
                     width_mode, available_width, window_width, available_width)
                 local constraint_height = dimension(requested_height,
                     height_mode, available_height, window_height, available_height)
-                local inner_width = maximum(constraint_width - left - right, 0)
-                local inner_height = maximum(constraint_height - top - bottom, 0)
+                local inner_width = maximum (constraint_width - left - right) 0
+                local inner_height = maximum (constraint_height - top - bottom) 0
                 local content_width = F32 0
                 local content_height = F32 0
                 if node.container then
@@ -115,10 +115,10 @@ local function attach(ui)
                             if node.kind == "grid" then
                                 if column > 0 then line_width = line_width + gap_x end
                                 line_width = line_width + item.measured_width
-                                line_height = maximum(line_height, item.measured_height)
+                                line_height = maximum line_height item.measured_height
                                 column = column + 1
                                 if column == box.columns then
-                                    content_width = maximum(content_width, line_width)
+                                    content_width = maximum content_width line_width
                                     if seen then content_height = content_height + gap_y end
                                     content_height = content_height + line_height
                                     column = 0
@@ -127,23 +127,23 @@ local function attach(ui)
                                     seen = true
                                 end
                             elseif node.kind == "stack" then
-                                content_width = maximum(content_width, item.measured_width)
-                                content_height = maximum(content_height, item.measured_height)
+                                content_width = maximum content_width item.measured_width
+                                content_height = maximum content_height item.measured_height
                             elseif horizontal then
                                 if seen then content_width = content_width + gap_x end
                                 content_width = content_width + item.measured_width
-                                content_height = maximum(content_height, item.measured_height)
+                                content_height = maximum content_height item.measured_height
                                 seen = true
                             else
                                 if seen then content_height = content_height + gap_y end
                                 content_height = content_height + item.measured_height
-                                content_width = maximum(content_width, item.measured_width)
+                                content_width = maximum content_width item.measured_width
                                 seen = true
                             end
                         end
                     end
                     if node.kind == "grid" and column > 0 then
-                        content_width = maximum(content_width, line_width)
+                        content_width = maximum content_width line_width
                         if seen then content_height = content_height + gap_y end
                         content_height = content_height + line_height
                     end
@@ -166,12 +166,12 @@ local function attach(ui)
                     box.max_width_mode, available_width, window_width, width)
                 local max_height = dimension(box.max_height,
                     box.max_height_mode, available_height, window_height, height)
-                width = maximum(width, min_width)
-                height = maximum(height, min_height)
+                width = maximum width min_width
+                height = maximum height min_height
                 if width > max_width then width = max_width end
                 if height > max_height then height = max_height end
-                box.measured_width = maximum(width, 0)
-                box.measured_height = maximum(height, 0)
+                box.measured_width = maximum width 0
+                box.measured_height = maximum height 0
             end
             arrange[node] = do(owner: Ref T, x: F32, y: F32, width: F32, height: F32,
                 window_width: F32, window_height: F32): Unit
@@ -190,8 +190,8 @@ local function attach(ui)
                     local horizontal = get(owner, node, "direction", window_width) == 0
                     local items = get(owner, node, "items", window_width)
                     local justify = get(owner, node, "justify", window_width)
-                    local inner_width = maximum(width - left - right, 0)
-                    local inner_height = maximum(height - top - bottom, 0)
+                    local inner_width = maximum (width - left - right) 0
+                    local inner_height = maximum (height - top - bottom) 0
                     local used = F32 0
                     local count = F32 0
                     for _, child in ipairs node.children do
@@ -206,7 +206,7 @@ local function attach(ui)
                     local extent = inner_height
                     if horizontal then gap = gap_x; extent = inner_width end
                     if count > 0 then used = used + (count - 1) * gap end
-                    local extra = maximum(extent - used, 0)
+                    local extra = maximum (extent - used) 0
                     local cursor = F32 0
                     if justify == 2 then cursor = extra / 2
                     elseif justify == 3 then cursor = extra
@@ -235,7 +235,7 @@ local function attach(ui)
                                 if alignment == 4 then child_width = track_width
                                 elseif alignment == 2 then child_x = child_x + (track_width - child_width) / 2
                                 elseif alignment == 3 then child_x = child_x + track_width - child_width end
-                                line_height = maximum(line_height, child_height)
+                                line_height = maximum line_height child_height
                                 column = column + 1
                                 if column == box.columns then
                                     column = 0

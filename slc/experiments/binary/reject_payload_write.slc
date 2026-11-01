@@ -1,6 +1,6 @@
 local schema = require "schema"
 local bad = do(input: Slice U8): U32
-    return schema.binary.decode(schema.packet, input) do(record, payload)
+    return schema.binary.decode schema.packet input do(record, payload)
         payload[0] = 42
     end
 end

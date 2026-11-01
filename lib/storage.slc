@@ -15,7 +15,7 @@ local function extend(T, p, what)
     return do(owner: Ref T, length: U32, width: U64): Unit
         local h = p.header owner
         local count = U64 length
-        stacks.extend(h.stack, h.base, count * width, width, message)
+        stacks.extend h.stack h.base (count * width) width message
     end
 end
 

@@ -47,7 +47,7 @@ local push = do(r: Ref Ring, v: U32): Bool
     if tail - head > r.mask then
         return false  -- full
     end
-    r.slots[band(tail, r.mask)] = v
+    r.slots[band tail r.mask] = v
     r.tail:store(tail + 1, "release")
     return true
 end
@@ -60,7 +60,7 @@ local pop = do(r: Ref Ring): Taken
     if head == tail then
         return Taken.empty()
     end
-    local v: U32 = r.slots[band(head, r.mask)]
+    local v: U32 = r.slots[band head r.mask]
     r.head:store(head + 1, "release")
     return Taken.value v
 end

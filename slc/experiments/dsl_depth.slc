@@ -64,7 +64,7 @@ export map_first
 -- Known callback identity does not imply known captured data.
 local threshold_sum = do(n: U32, threshold: U32): U32
     local total: U32 = 0
-    filtered(range, do(x) = x > threshold, n) do(x)
+    filtered range (do(x) = x > threshold) n do(x)
         total = total + x
     end
     return total
@@ -85,7 +85,7 @@ local script = { Instruction.multiply 3, Instruction.add 7, Instruction.ceiling 
 local scripted = do(x: U32): U32
     local result = x
     for i = 1, #script do
-        result = execute(script[i], result)
+        result = execute script[i] result
     end
     return result
 end

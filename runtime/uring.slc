@@ -68,13 +68,13 @@ return function(t)
         local extra = null Extra
         local n = U32 1
         if op.deadline ~= 0 or op.kind == connect_kind then
-            extra = alloc(1, size_of Extra)
+            extra = alloc 1 (size_of Extra)
             if extra == null Extra then trap "out of memory for I/O" end
         end
         op.backend = BytePtr extra
         if op.kind == connect_kind then
             local flags = bor sock_stream sock_cloexec
-            local fd = socket(af_inet, flags, 0)
+            local fd = socket af_inet flags 0
             if fd < 0 then
                 free(BytePtr extra)
                 complete(op, failed, I64 errno())

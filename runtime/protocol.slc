@@ -84,7 +84,7 @@ return function(t)
     end
     local slc_send = do(task: Ptr Task, ops: Ptr Op, handle: Handle, value: Ptr Void, site: CString): I32
         begin task ops 1 site
-        initialize(task, ops, 2, handle, BytePtr value)
+        initialize task ops 2 handle (BytePtr value)
         local r = lock_channel handle
         local w = null Task
         if checked_send(r, BytePtr value, task, Ptr w) ~= 0 then
@@ -101,7 +101,7 @@ return function(t)
     end
     local slc_recv = do(task: Ptr Task, ops: Ptr Op, handle: Handle, out: Ptr Void, site: CString): I32
         begin task ops 1 site
-        initialize(task, ops, 1, handle, BytePtr out)
+        initialize task ops 1 handle (BytePtr out)
         local r = lock_channel handle
         local w = null Task
         local got = recv(r, BytePtr out, task, Ptr w)
@@ -248,7 +248,7 @@ return function(t)
                 if got < 0 then nclosed = nclosed + 1 end
             elseif op.kind == 2 then
                 local r = lock_channel op.chan
-                local done = checked_send(r, op.buf, task, Ptr w)
+                local done = checked_send r op.buf task (Ptr w)
                 unlock(Ptr r.mu)
                 if w ~= null Task then wake w end
                 if done ~= 0 then return i end
@@ -304,7 +304,7 @@ return function(t)
                         if not claim task then unlock(Ptr r.mu); return pending end
                         local done = Bool false
                         if op.kind == 1 then done = recv(r, op.buf, task, Ptr w) == 1
-                        else done = checked_send(r, op.buf, task, Ptr w) ~= 0 end
+                        else done = checked_send r op.buf task (Ptr w) ~= 0 end
                         unlock(Ptr r.mu)
                         if w ~= null Task then wake w end
                         withdraw task
@@ -345,7 +345,7 @@ return function(t)
     local slc_poll_send = do(task: Ptr Task, op: Ptr Op): I32
         local r = lock_channel op.chan
         local w = null Task
-        local done = checked_send(r, op.buf, task, Ptr w)
+        local done = checked_send r op.buf task (Ptr w)
         unlock(Ptr r.mu)
         if w ~= null Task then wake w end
         if done ~= 0 then return 1 end
@@ -361,7 +361,7 @@ return function(t)
     local slc_select_arm = do(task: Ptr Task, ops: Ptr Op, n: I32, site: CString): I32
         task.site = site
         claimable task
-        if arm(task, ops, n) == 0 then task.nops = 0; return 0 end
+        if arm task ops n == 0 then task.nops = 0; return 0 end
         return pending
     end
     local slc_resume_wait = do(task: Ptr Task): Bool
@@ -372,7 +372,7 @@ return function(t)
             local r = scan task task.ops task.nops
             if r ~= none then task.result = r; task.nops = 0; return true end
             claimable task
-            if arm(task, task.ops, task.nops) == pending then return false end
+            if arm task task.ops task.nops == pending then return false end
         end
         task.nops = 0
         return true

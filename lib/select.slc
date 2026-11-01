@@ -62,12 +62,12 @@ function select.scan(kinds, has_default)
                 if i == k - 1 then
                     local op = Ptr ops[k - 1]
                     if kind == 'recv' then
-                        local got = poll_recv(task, op)
+                        local got = poll_recv task op
                         if got == 1 then pick = i elseif got < 0 then drained = drained + 1 end
                     elseif kind == 'send' then
-                        if poll_send(task, op) ~= 0 then pick = i end
+                        if poll_send task op ~= 0 then pick = i end
                     elseif kind == 'take' then
-                        if poll_take(task, op) ~= 0 then pick = i end
+                        if poll_take task op ~= 0 then pick = i end
                     elseif op.deadline <= time then
                         pick = i
                     end

@@ -1,7 +1,7 @@
 -- Fixed arrays and Chars are values before they need addresses. These host
 -- checks also exercise their known-input paths; the harnesses use dynamic inputs.
 local constant = Chars 4 "abc"
-local empty = Chars(4)()
+local empty = Chars 4 ()
 assert(host constant.length == 3 and host empty.length == 0)
 
 local stage_filled = do(s: Str): U32
@@ -22,7 +22,7 @@ assert(binary.len == 3 and binary.bytes[1] == 97 and binary.bytes[2] == 0 and bi
 export stage_binary_value
 
 local stage_empty = do(): Bool
-    local c = Chars(4)()
+    local c = Chars 4 ()
     return c.length == 0 and c:str():equals ""
 end
 assert(host(stage_empty()))

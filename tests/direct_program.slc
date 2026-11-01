@@ -94,7 +94,7 @@ end
 export mutate
 
 local sum10 = extern("cp_fixture_sum10", { U64, U64, U64, U64, U64, U64, U64, U64, U64, U64 }, U64)
-local native_sum = do(x: U64): U64 = sum10(x, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+local native_sum = do(x: U64): U64 = sum10 x 2 3 4 5 6 7 8 9 10
 export native_sum
 
 local callback_word = do(a: U64, b: U64): U64 = a * 2 + b
@@ -128,7 +128,7 @@ end
 export float_pointer
 local float10 = extern("cp_fixture_float10",
     { F64, F64, F64, F64, F64, F64, F64, F64, F64, F64 }, F64)
-local native_float = do(a: F64): F64 = float10(a, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+local native_float = do(a: F64): F64 = float10 a 2 3 4 5 6 7 8 9 10
 export native_float
 local varsum = extern("cp_fixture_variadic", { U32 }, F64, { variadic = true })
 local native_varargs = do(a: F32, b: F64): F64 = varsum(3, a, b, F32 0.5)
@@ -154,7 +154,7 @@ local native_record = do(a: U64, b: F64): F64
 end
 export native_record
 local native_large = do(a: U64, b: U64): U64
-    local m = large_external(a, b)
+    local m = large_external a b
     return m.a + m.b + m.c
 end
 export native_large
@@ -171,7 +171,7 @@ export native_large_callback
 
 local function mixed_recursive(m: Mixed, n: U64): Mixed
     if n == 0 then return m end
-    local previous = mixed_recursive(m, n - 1)
+    local previous = mixed_recursive m (n - 1)
     return Mixed { a = previous.a + 1, b = previous.b + 0.5 }
 end
 local recursive_record_callback = do(a: U64, b: F64): F64 = call_mixed(fnptr mixed_recursive,

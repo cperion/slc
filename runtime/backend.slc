@@ -45,7 +45,7 @@ return function(t)
     local start_fn = fnptr start
     local slc_io_backend = do(): CString = t.name
     local slc_backend_submit = do(op: Ptr Op): Unit
-        pthread_once(once, start_fn)
+        pthread_once once start_fn
         t.submit(state, op)
     end
     export slc_io_backend

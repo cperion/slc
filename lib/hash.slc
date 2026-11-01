@@ -118,7 +118,7 @@ local key1 = global(U64, { name = "slc_hash_key1", imported = true, header = h }
 local seed_word = extern("slc_hash_seed_word", { U32 }, U64, { header = h })
 hash.process = do(): State
     if atomic_ptr(ready)[0]:load "acquire" == 0 then seed_word 0 end
-    return hash.init(key0[0], key1[0])
+    return hash.init key0[0] key1[0]
 end
 hash.text = do(text: Str): U64
     local h = hash.process()

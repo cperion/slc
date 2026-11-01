@@ -28,7 +28,7 @@ local pick = do(flag: Bool, x: U32): U32
     if flag then
         o = Opt.some x
     end
-    return unwrap_or(o, 7)
+    return unwrap_or o 7
 end
 export pick
 
@@ -70,7 +70,7 @@ local script = {
 }
 local run_script = do(e: Ref Editor): Unit
     for i = 1, #script do
-        apply(e, script[i])
+        apply e script[i]
     end
 end
 export run_script
@@ -80,7 +80,7 @@ local Program = Grow Command
 local run_program = do(e: Ref Editor, prog: Ref Program): Unit
     local i: U32 = 0
     while i < prog.length do
-        apply(e, prog[i])
+        apply e prog[i]
         i = i + 1
     end
 end

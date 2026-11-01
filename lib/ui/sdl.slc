@@ -50,7 +50,7 @@ function Painter:checked(ok: Bool, operation: U32): Unit
 end
 function Painter:measure(text: Str, size: F32): ui.Size
     local width, height = I32 0, I32 0
-    if self.failure.operation == 0 then self:checked(set_font_size(self.font, size),
+    if self.failure.operation == 0 then self:checked(set_font_size self.font size,
             Operation.font_size) end
     if self.failure.operation == 0 and text.length > 0 then
         text:cstring() do(c: CString): Unit
@@ -73,7 +73,7 @@ function Painter:rectangle(x: F32, y: F32, width: F32, height: F32, color: ui.Co
 end
 function Painter:text(text: Str, x: F32, y: F32, size: F32, color: ui.Color, opacity: F32): Unit
     if text.length > 0 and self.failure.operation == 0 then
-        self:checked(set_font_size(self.font, size), Operation.font_size)
+        self:checked(set_font_size self.font size, Operation.font_size)
         if self.failure.operation == 0 then
             local native_color = NativeColor { r = color.r,
                 g = color.g, b = color.b, a = U8(F32 color.a * opacity / 100) }
@@ -83,7 +83,7 @@ function Painter:text(text: Str, x: F32, y: F32, size: F32, color: ui.Color, opa
             if surface == null Surface then
                 self:checked(false, Operation.text)
             else
-                local texture = create_texture(self.renderer, surface)
+                local texture = create_texture self.renderer surface
                 if texture == null Texture then self:checked(false, Operation.texture) end
                 destroy_surface surface
                 if texture ~= null Texture then
@@ -122,14 +122,14 @@ local run = function(T, config)
             local window_result = sdl.with_window window_config do(window: Ptr sdl.Window): sdl.Result
                 local renderer_result = sdl.with_renderer window do(renderer: Ptr sdl.Renderer): sdl.Result
                     if not init_font() then return sdl.Result.failed(sdl.failure Operation.font_init) end
-                    local font = open_font(config.font, 16)
+                    local font = open_font config.font 16
                     if font == null Font then
                         local failure = sdl.failure Operation.font_open
                         quit_font
                         return sdl.Result.failed failure
                     end
                     local painter = Painter { .renderer, .font, failure = sdl.no_failure }
-                    painter:checked(blend(renderer, blend_alpha), Operation.blend)
+                    painter:checked(blend renderer blend_alpha, Operation.blend)
                     local app = ui.new T
                     local id = sdl.window_id window
                     local event = Event { kind = 0,
@@ -170,7 +170,7 @@ local run = function(T, config)
                                     if event.kind == sdl.close_event then input.kind = 1
                                     elseif event.kind == focus_lost then input.kind = 5
                                     elseif event.kind == motion or event.kind == down or event.kind == up then
-                                        painter:checked(convert(renderer, Ptr event),
+                                        painter:checked(convert renderer (Ptr event),
                                             Operation.coordinates)
                                         input.x = event.x
                                         input.y = event.y

@@ -21,7 +21,7 @@ local affine = do(
 
 local transform = affine(4, 3)
 local use = do(x: U32): U32 =
-affine(4, 3, x)
+affine 4 3 x
 assert(host(affine(4, 3, 10)) == 43)
 export transform
 export use
@@ -43,7 +43,7 @@ end
 local times8 = choose(true, 8)
 assert(host(choose(true, 8, 7)) == 56)
 local choose_use = do(flag: Bool, x: U32): U32
-    return choose(flag, 8, x)
+    return choose flag 8 x
 end
 export times8
 export choose_use

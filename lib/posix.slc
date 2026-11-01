@@ -84,7 +84,7 @@ end
 -- the size of the open file
 function Fd:size(): I64
     local st = Stat { size = I64 0 }
-    if c_fstat(self.fd, Ptr st) ~= 0 then
+    if c_fstat self.fd (Ptr st) ~= 0 then
         return I64(-1)
     end
     return st.size
@@ -98,7 +98,7 @@ function Fd:mapped(n: U32, body): Bool
         return false
     end
     view_of(p, n, body)
-    c_munmap(p, U64 n)
+    c_munmap p (U64 n)
     return true
 end
 
@@ -139,7 +139,7 @@ local Poll = struct { epfd: I32 }
 
 function Poll:watch(fd: I32): I32
     local ev = Event { events = EPOLLIN, .fd }
-    return c_epoll_ctl(self.epfd, EPOLL_CTL_ADD, fd, Ptr ev)
+    return c_epoll_ctl self.epfd EPOLL_CTL_ADD fd (Ptr ev)
 end
 
 -- the descriptor that became ready, or -1 when the timeout passed

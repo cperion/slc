@@ -43,7 +43,7 @@ return function(t)
         if state.count == state.capacity then
             local n = U64 16
             if state.capacity ~= 0 then n = state.capacity * 2 end
-            local data = resize_ops(state.pending, n * size_of(Ptr Op))
+            local data = resize_ops state.pending (n * size_of(Ptr Op))
             if data == null(Ptr Op) then unlock(Ptr state.mu); trap "out of memory for I/O" end
             state.pending = data
             state.capacity = n
@@ -65,7 +65,7 @@ return function(t)
             lock(Ptr state.mu)
             local n = state.count
             if n + 1 > capacity then
-                local data = resize_fds(fds, (n + 1) * size_of Fd)
+                local data = resize_fds fds ((n + 1) * size_of Fd)
                 if data == null Fd then unlock(Ptr state.mu); trap "out of memory for I/O" end
                 fds = data
                 capacity = n + 1
@@ -89,9 +89,9 @@ return function(t)
                 i = i + 1
             end
             unlock(Ptr state.mu)
-            poll(fds, n + 1, timeout)
+            poll fds (n + 1) timeout
             local bytes = (Ptr U8)(Ptr buf)
-            while read(state.reader, bytes, 64) > 0 do end
+            while read state.reader bytes 64 > 0 do end
             -- Appenders may have relocated pending while poll ran, but only
             -- this thread removes: the first n entries still match fds.
             lock(Ptr state.mu)

@@ -117,7 +117,7 @@ local logged = do(f, ..args): U32
     log_call args.length
     return f(..args)
 end
-local use_logged = do(x: U32, y: U32): U32 = logged(twice, x) + logged(add3, x, y, 1)
+local use_logged = do(x: U32, y: U32): U32 = logged twice x + logged add3 x y 1
 export use_logged
 
 -- a vocabulary table opened in a body
@@ -148,10 +148,10 @@ export import_rows
 -- callbacks: staged control flow; `return` leaves only the callback
 local apply = do(f, x: U32): U32 = f x
 local clamp_cb = do(x: U32): U32
-    return apply(do(v)
-            if v > 10 then return v - 10 end
-            return v
-        end, x) + 1
+    return apply do(v)
+        if v > 10 then return v - 10 end
+        return v
+    end x + 1
 end
 export clamp_cb
 
@@ -288,6 +288,6 @@ local two_dot_values = do(x: U32): U32
     local a, b = ..pair x
     local text = "a" .. "b" .. "c"
     local text_length = #text
-    return sum_rest(a, b) + forward_one text_length
+    return sum_rest a b + forward_one text_length
 end
 export two_dot_values
