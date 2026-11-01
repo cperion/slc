@@ -312,9 +312,10 @@ function G:block(scope, depth, size, in_loop)
             out[#out + 1] = { k = 'assign', target = self.array_var .. '[' .. P.expr(self:int_expr(local_scope, 'U32', 1)) .. ' % 4]',
                               e = self:int_expr(local_scope, 'U32', self.depth_max) }
         elseif c == 12 and depth > 0 and self.sum_var then
+            -- a handler is a body: `break` cannot leave the loop around it
             out[#out + 1] = { k = 'match', subject = self.sum_var,
                               num = { { k = 'mix', e = { k = 'raw', text = 'x' } } },
-                              none = self:block(local_scope, depth - 1, 1, in_loop) }
+                              none = self:block(local_scope, depth - 1, 1, false) }
         else
             out[#out + 1] = { k = 'mix', e = self:int_expr(local_scope, self:int_type(), 2) }
         end
