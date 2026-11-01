@@ -30,7 +30,15 @@ call('rest word collects every group', 'local f = do(a: U32, ..rest): U32 = a + 
     'f(x, y, 3)', 'f x y 3')
 call('multiline arguments', add, 'f(\n        x,\n        y\n    )', 'f x y')
 call('argument comment', add, 'f(x, --[[ keep ]] y)', 'f x  --[[ keep ]] y')
-call('compound argument still needs grouping', add, 'f(x + 1, y)', 'f(x + 1, y)')
+call('compound argument becomes a spaced group', add, 'f(x + 1, y)', 'f (x + 1) y')
+call('compound arguments in every position', 'local f = do(a: U32, b: U32, c: U32): U32 = a + b + c',
+    'f(x * 2, y, x + y)', 'f (x * 2) y (x + y)')
+call('word result in the middle', add .. '\nlocal g = do(a: U32): U32 = a', 'f(g(x), y)', 'f (g x) y')
+call('string after a name argument', 'local f = do(a: U32, b: Str): U32 = a', 'f(x, "s")', 'f x ("s")')
+call('long multiline arguments keep their lines', add,
+    'f(\n        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,\n        yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n    )',
+    'f(\n        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,', nil,
+    'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: U32, yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy: U32')
 call('postfix result still needs grouping', add, 'f(x, y).value', 'f(x, y).value')
 call('explicit boundary stays', add, 'call f(x, y)', 'call f(x, y)')
 call('overapplication stays', add, 'f(x, y, 3)', 'f(x, y, 3)')

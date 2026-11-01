@@ -10,26 +10,33 @@ local function copy(t)
     return out
 end
 
+-- The SLC source files that can provide a module, in search order. Shared with
+-- the formatter, which reads modules for their word facts without running them.
+function M.candidates(root, name, path)
+    local module_path = name:gsub('%.', '/')
+    local candidates, seen = {}, {}
+    local function add(file)
+        if not seen[file] then seen[file] = true; candidates[#candidates + 1] = file end
+    end
+    -- Bundled vocabulary names do not replace Lua's io, string, etc.
+    local bundled = name:match('^slc%.(.+)$')
+    if bundled then
+        local stem = root .. '/lib/' .. bundled:gsub('%.', '/')
+        add(stem .. '.slc'); add(stem .. '/init.slc')
+    end
+    -- Follow the current Lua source path, including program-local modules.
+    -- A custom non-.lua template belongs to its existing Lua loader.
+    for template in (path or package.path):gmatch('[^;]+') do
+        if template:sub(-4) == '.lua' then
+            add((template:sub(1, -5) .. '.slc'):gsub('%?', function() return module_path end))
+        end
+    end
+    return candidates
+end
+
 local function searcher(root, translate, prelude)
     return function(name)
-        local module_path = name:gsub('%.', '/')
-        local candidates, seen = {}, {}
-        local function add(path)
-            if not seen[path] then seen[path] = true; candidates[#candidates + 1] = path end
-        end
-        -- Bundled vocabulary names do not replace Lua's io, string, etc.
-        local bundled = name:match('^slc%.(.+)$')
-        if bundled then
-            local stem = root .. '/lib/' .. bundled:gsub('%.', '/')
-            add(stem .. '.slc'); add(stem .. '/init.slc')
-        end
-        -- Follow the current Lua source path, including program-local modules.
-        -- A custom non-.lua template belongs to its existing Lua loader.
-        for template in package.path:gmatch('[^;]+') do
-            if template:sub(-4) == '.lua' then
-                add((template:sub(1, -5) .. '.slc'):gsub('%?', function() return module_path end))
-            end
-        end
+        local candidates = M.candidates(root, name)
         local missing = {}
         for _, path in ipairs(candidates) do
             -- an embedded build serves the module from memory

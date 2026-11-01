@@ -186,26 +186,36 @@ local run = do(x: U32, y: U32): U32
 end
 ```
 
-The analysis follows local typed lambdas/functions, immutable aliases and provably
-unsaturated partial applications. It respects lexical scopes, shadowing and writes
-in captured closures. A later write conservatively invalidates the binding; an
-opened context prevents guessing which vocabulary supplies a name. Imports and
-user code are never executed, and method/field callees remain unknown.
+The facts come from the whole file without running it: local typed lambdas and
+functions, immutable aliases, provably unsaturated partial applications, the
+prelude's declared arities (`band`, `shl`, …), `extern` declarations with a
+literal parameter list, and the words an imported SLC module exports
+(`local stacks = require "slc.stacks"` makes `stacks.span(s, at, n)` a word
+call). Modules are found the way compilation finds them and are parsed, never
+executed; a Lua module on the path stays unknown. Scopes, shadowing, opened
+contexts and later writes invalidate a fact; method callees remain unknown.
 
-Native word chains collect all argument groups, including for rest words. Ordinary
-Lua functions do not. Host call sites therefore retain multi-argument groups even
-when a local word declaration is visible. Unknown callees inside typed bodies also
-retain their groups.
+A word gets every group as one supply; a function with a declared arity takes
+groups up to that arity, so only calls within it are regrouped. Host call sites
+keep their multi-argument groups.
 
-Regrouping must preserve list expansion and immediate matching: a call/spread
-argument that could return multiple values, an explicit `call` boundary, and
-non-rest overapplication stay grouped. This preserves the distinction between
-supplying a handler as an argument and applying it to a saturated producer's result.
+A compound argument becomes a spaced group (syntax §2.4, rule 3):
 
-Necessary expression grouping and uncertain rewrites remain delimited: for example,
-`f(x + 1, y)` and `f(x, y).value`. A leading line comment can still require argument
-delimiters because a bare name argument must share its callee's line. Complex
-host-macro argument rewrites remain conservative.
+```lua
+f(x + 1, y)            -- f (x + 1) y
+place(s, fresh + out)  -- place s (fresh + out)
+f(g(x), y)             -- f (g x) y      when g is a word
+f(x, "s")              -- f x ("s")      a name's chain would take the string
+```
+
+A call in the middle of the supply is regrouped only when it is a word (one
+value); spreads, explicit `call` boundaries, overapplication and postfix results
+(`f(x, y).value`) keep their groups. A group whose arguments sit on several
+lines is joined only when the call then fits `column_width`.
+
+Decisions are made once per round from the syntax tree, innermost first, and
+the whole round is verified with one reparse. If it does not verify, each
+application chain is accepted only if it verifies on its own.
 
 ## Trailing-block spines
 

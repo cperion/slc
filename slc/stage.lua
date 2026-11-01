@@ -4213,7 +4213,7 @@ end
 -- arity accumulates groups to that arity; other functions apply each group in turn.
 
 S.arity = setmetatable({}, { __mode = 'k' })
-for _, name in ipairs { 'band', 'bor', 'bxor', 'shl', 'shr' } do S.arity[S[name]] = 2 end
+for name, arity in pairs(application.prelude_arity) do S.arity[S[name]] = arity end
 
 function S.args(...)
     return { n = select('#', ...), ... }
@@ -4244,7 +4244,8 @@ function S.chain(f, ...)
         local args, n = application.word_arguments(groups)
         return f(unpack(args, 1, n))
     end
-    local arity = S.arity[f]
+    -- an extern's parameter list is a declared arity, unless it is variadic
+    local arity = S.arity[f] or (getmetatable(f) == X and not f.variadic and #f.params) or nil
     if arity then
         local gi = 1
         while gi <= #groups and k < arity do take(groups[gi]); gi = gi + 1 end

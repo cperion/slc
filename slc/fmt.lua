@@ -2,7 +2,11 @@
 -- Keep the compiler's grammar authoritative; retain tokens for comments/spelling.
 local lexer = require 'macro.lexer'
 local syntax = require 'slc.syntax'
+local application = require 'slc.application'
+local loader = require 'slc.loader'
 local M = {}
+-- the word facts of the chunk being formatted (see module_environment)
+local environment
 M.defaults = { indent_width = 4, column_width = 100, call_style = 'minimal', spine_style = 'pure',
                type_style = 'inferred', table_style = 'shorthand', opening_style = 'anonymous' }
 
@@ -99,18 +103,13 @@ local function parse(source, filename)
         local tk = next_token(self); last = tk.index; return tk
     end
     local p = syntax.parser(r)
-    local ranges, calls, colons, unary, chains = {}, {}, {}, {}, {}
+    local ranges, groups, group_of, colons, unary, chains = {}, {}, {}, {}, {}, {}
     local lambdas, body_ranges = {}, {}
     local typespans, locals, parameter_names = {}, {}, {}
     local suffixed_from = p.suffixed_from
     function p:suffixed_from(...)
-        local first = #calls + 1
         local result = suffixed_from(self, ...)
-        if #calls >= first + 1 then
-            local chain = {}
-            for i = first, #calls do chain[#chain + 1] = calls[i] end
-            chains[#chains + 1] = chain
-        end
+        chains[#chains + 1] = result
         return result
     end
     local block, args, typeexpr, funcbody, statement = p.block, p.args, p.typeexpr, p.funcbody, p.statement
@@ -179,39 +178,27 @@ local function parse(source, filename)
     function p:args()
         local start = r:peek().index
         local result = args(self)
-        if ts[start].v == '(' and #result == 0 then
-            -- Reparsing below permits omission only for named call statements;
-            -- value/return expressions and ambiguous adjacent calls keep ().
-            calls[#calls + 1] = { start, last, empty_host = native_depth == 0 }
-        elseif ts[start].v == '(' and #result > 1 and native_depth > 0 then
-            -- The compiler's application analysis will filter these once the
-            -- whole tree (including later writes and captured aliases) is known.
-            local separators = {}
-            for i = 1, #result - 1 do
-                local at = item_ends[result[i]] + 1
+        if ts[start].v == '(' then
+            -- Every delimited group, with the token span of each argument and
+            -- separator; spelling is decided once the whole tree is known.
+            local firsts, lasts, separators = {}, {}, {}
+            local at = start + 1
+            for i, item in ipairs(result) do
                 while ts[at].t == 'space' or ts[at].t == 'comment' do at = at + 1 end
-                assert(ts[at].t == ',')
-                separators[#separators + 1] = at
+                firsts[i], lasts[i] = at, item_ends[item]
+                if i < #result then
+                    local sep = item_ends[item] + 1
+                    while ts[sep].t == 'space' or ts[sep].t == 'comment' do sep = sep + 1 end
+                    assert(ts[sep].t == ',')
+                    separators[i] = sep
+                    at = sep + 1
+                end
             end
-            calls[#calls + 1] = { start, last, arguments = result, separators = separators }
-        elseif ts[start].v == '(' and #result == 1 then
-            local first = start + 1
-            while ts[first] and (ts[first].t == 'space' or ts[first].t == 'comment') do first = first + 1 end
-            -- Boundary whitespace can put do on the owning call's line without
-            -- changing any line boundaries inside its body.
-            local do_block = result[1].k == 'lambda' and result[1].fn.body ~= nil
-                and ts[first].v == 'do'
-            local arg = result[1]
-            while arg.k == 'field' do arg = arg.obj end
-            -- The outer LuaMacro layer and native-body parser differ for a
-            -- bare argument containing another application in its postfix.
-            -- Keep such host calls delimited rather than relying on native
-            -- AST equivalence to justify a host-macro rewrite.
-            local host_safe = arg.k == 'name' or arg.k == 'num' or arg.k == 'str'
-                or arg.k == 'true' or arg.k == 'false' or arg.k == 'table' or do_block
-            if native_depth > 0 or (host_safe and host_argument_depth == 0) then
-                calls[#calls + 1] = { start, last }
-            end
+            local group = { open = start, close = last, args = result, firsts = firsts, lasts = lasts,
+                            separators = separators, native = native_depth > 0,
+                            host_argument = host_argument_depth > 0 }
+            groups[#groups + 1] = group
+            group_of[result] = group
         end
         return result
     end
@@ -313,25 +300,16 @@ local function parse(source, filename)
             local open = stack[#stack]; open.commas[#open.commas + 1] = i
         end
     end
-    local facts = syntax.application_facts(ast)
-    local function eligible(list)
-        local out = {}
-        for _, call in ipairs(list) do
-            if not call.arguments or facts.arguments[call.arguments] then out[#out + 1] = call end
-        end
-        return out
-    end
-    calls = eligible(calls)
-    for i, chain in ipairs(chains) do chains[i] = eligible(chain) end
-    return { ast = ast, tokens = ts, ranges = ranges, calls = calls, colons = colons, commas = commas,
-             unary = unary, chains = chains, lambdas = lambdas, typespans = typespans, locals = locals,
-             parameter_names = parameter_names }
+    local facts = application.analyze(ast, environment)
+    return { ast = ast, tokens = ts, ranges = ranges, groups = groups, group_of = group_of, facts = facts,
+             colons = colons, commas = commas, unary = unary, chains = chains, lambdas = lambdas,
+             typespans = typespans, locals = locals, parameter_names = parameter_names }
 end
 
 -- Compare the compiler's proven application normal forms, not just spelling.
 -- Unknown argument groups and expression grouping retain their exact structure.
 local function fingerprint(root)
-    local facts = syntax.application_facts(root)
+    local facts = application.analyze(root, environment)
     local function encode(node)
         if type(node) ~= 'table' then
             local value = tostring(node)
@@ -351,6 +329,34 @@ local function fingerprint(root)
         return table.concat(out)
     end
     return encode(root)
+end
+
+-- The environment of a chunk's word facts: prelude names, and the exports of
+-- the SLC modules it requires, found the way compilation finds them and read
+-- (never run) with this parser. A Lua module on the path takes precedence.
+local root = (debug.getinfo(1, 'S').source:match('^@(.*)/slc/[^/]*$')) or '.'
+local function module_environment(filename)
+    local dir = filename and filename:match('^(.*)/[^/]*$') or '.'
+    local path = dir .. '/?.lua;' .. dir .. '/?/init.lua;' .. package.path
+    local cache, env = {}, { globals = true }
+    function env.module(name)
+        if cache[name] ~= nil then return cache[name] or nil end
+        cache[name] = false -- a cycle resolves to unknown
+        if package.preload[name] or package.searchpath(name, path) then return nil end
+        for _, file in ipairs(loader.candidates(root, name, path)) do
+            local f = io.open(file, 'rb')
+            if f then
+                local source = f:read('*a'); f:close()
+                local saved = environment
+                environment = env
+                local ok, info = pcall(parse, source, file)
+                environment = saved
+                cache[name] = ok and info.facts.exports or false
+                return cache[name] or nil
+            end
+        end
+    end
+    return env
 end
 
 -- A spine is a maximal chain of trailing block lambdas whose bodies end at the
@@ -630,70 +636,256 @@ local function shorthand(source, info, filename)
     return source
 end
 
-local function minimal(source, info, filename, signature)
-    -- Same-length replacements keep token offsets valid even for nested calls.
-    table.sort(info.calls, function(a, b) return a[1] > b[1] end)
-    local function attempt(calls)
-        local candidate = source
-        for _, call in ipairs(calls) do
-            local a, b = info.tokens[call[1]], info.tokens[call[2]]
-            if call.empty_host then
-                local next = call[2] + 1
-                while info.tokens[next] and (info.tokens[next].t == 'space' or info.tokens[next].t == 'comment') do
-                    next = next + 1
-                end
-                -- A following '(' is ambiguous in Lua host code. Retain the
-                -- explicit call rather than reinterpret f()\n(g)() as f(g)().
-                if info.tokens[next] and info.tokens[next].t == '(' then return end
-            end
-            if call.arguments then
-                local function blank(tk)
-                    candidate = candidate:sub(1, tk.first - 1) .. string.rep(' ', tk.last - tk.first + 1)
-                        .. candidate:sub(tk.last + 1)
-                end
-                -- Parser-owned separators, not every comma at this delimiter
-                -- depth: a do argument can itself contain local/return lists.
-                for _, i in ipairs(call.separators) do
-                    blank(info.tokens[i])
-                    local before = i - 1
-                    while info.tokens[before].t == 'space' do before = before - 1 end
-                    if info.tokens[before].t ~= 'comment' then
-                        for j = before + 1, i - 1 do blank(info.tokens[j]) end
-                    end
-                    local after = i + 1
-                    while info.tokens[after].t == 'space' do
-                        blank(info.tokens[after]); after = after + 1
-                    end
-                end
-            end
-            -- Join only boundary whitespace inside the delimiters. A bare name
-            -- argument must share its callee's line. Never flatten the argument
-            -- itself: it may contain a block, a comment or a long literal.
-            local first = a.last + 1
-            local i = call[1] + 1
-            while i < call[2] and info.tokens[i].t == 'space' do
-                first = info.tokens[i].last + 1
-                i = i + 1
-            end
-            local finish = b.first - 1
-            local j = call[2] - 1
-            while j >= i and info.tokens[j].t == 'space' do j = j - 1 end
-            -- Keep the newline terminating a line comment (and conservatively
-            -- any trailing comment); otherwise a following token can be eaten.
-            if j >= i and info.tokens[j].t ~= 'comment' then finish = info.tokens[j].last end
-            candidate = candidate:sub(1, a.first - 1) .. string.rep(' ', first - a.first)
-                .. candidate:sub(first, finish) .. string.rep(' ', b.last - finish)
-                .. candidate:sub(b.last + 1)
-        end
-        local ok, result = pcall(parse, candidate, filename)
-        if ok and fingerprint(result.ast) == signature then source = candidate end
+-- Call spelling. Each '(' group is decided once, innermost first, from the tree
+-- and the word facts: a group loses its delimiters when its arguments can be
+-- juxtaposed (syntax 2.4), and a compound argument becomes a spaced group.
+-- Edits replace or surround whole tokens, so nested decisions compose and
+-- comments stay where they are. Decisions are grouped by application chain,
+-- the unit a fallback can accept or refuse on its own.
+local KEYWORDS = {}
+for w in ([[and break do else elseif end false for function if in local nil not or
+repeat return then true until while goto]]):gmatch '%S+' do KEYWORDS[w] = true end
+
+local function line_comment(tk) return tk.t == 'comment' and not tk.v:match('^%-%-%[=*%[') end
+
+local function name_headed(e)
+    while e.k == 'field' or e.k == 'index' or e.k == 'call' or e.k == 'method' do
+        e = e.k == 'call' and e.fn or e.obj
     end
-    -- f(a)(b) needs both pairs removed together; removing either alone can
-    -- attach b to a or end the application chain. Multi-argument candidates
-    -- have already been proved to be regroupable native-word applications.
-    for _, chain in ipairs(info.chains) do attempt(chain) end
-    for _, call in ipairs(info.calls) do attempt { call } end
-    return source
+    return e.k == 'name'
+end
+
+local HOST_SAFE = { name = true, num = true, str = true, ['true'] = true, ['false'] = true, table = true }
+
+local function decide_calls(info, column_width)
+    local ts, facts, group_of = info.tokens, info.facts, info.group_of
+    local parent, order = {}, {}
+    local function walk(node, up, key)
+        local here = up
+        if node.k then parent[node] = { node = up, key = key }; here = node end
+        for k, child in pairs(node) do
+            if type(child) == 'table' then walk(child, here, node.k and k or key) end
+        end
+        local group = (node.k == 'call' or node.k == 'method') and node.args and group_of[node.args]
+        if group then group.call = node; order[#order + 1] = group end
+    end
+    walk(info.ast, nil, nil)
+    local function after(i)
+        local j, newline = i + 1, false
+        while ts[j] and (ts[j].t == 'space' or ts[j].t == 'comment') do
+            if ts[j].v:find('\n', 1, true) then newline = true end
+            j = j + 1
+        end
+        return ts[j], newline
+    end
+    local function decided(node)
+        local group = group_of[node.args]
+        return node.juxta or (group and (group.bare or group.spaced))
+    end
+    -- 'primary' and 'call' can be juxtaposed as they are; 'compound' needs a
+    -- spaced group; 'group' already is one; 'never' cannot be regrouped
+    local function form(e)
+        local k = e.k
+        if k == 'name' or k == 'num' or k == 'str' or k == 'true' or k == 'false' or k == 'table' then return 'primary' end
+        if k == 'paren' then return (e.e.k == 'num' or e.e.k == 'str') and 'primary' or 'group' end
+        if k == 'lambda' then return e.fn.body and 'primary' or 'compound' end
+        if k == 'field' or k == 'index' then
+            local base = form(e.obj)
+            return (base == 'primary' or base == 'call') and 'primary' or 'compound'
+        end
+        if k == 'call' or k == 'method' then
+            local base = form(k == 'method' and e.obj or e.fn)
+            if (base ~= 'primary' and base ~= 'call') or decided(e) then return 'compound call' end
+            return 'call'
+        end
+        if k == 'vararg' or k == 'spread' or k == 'home' then return 'never' end
+        return 'compound'
+    end
+    local function callee_end(C)
+        if C.k == 'method' then return 'name' end
+        local f = C.fn
+        if f.k == 'name' or f.k == 'field' then return 'name' end
+        if f.k == 'call' or f.k == 'method' then
+            if decided(f) then return 'arg' end
+            return 'call', group_of[f.args]
+        end
+        return 'other'
+    end
+    -- only a word is known to return one value; any other call may expand
+    local function single_valued(e)
+        if e.k ~= 'call' then return e.k ~= 'method' end
+        return facts.single(e)
+    end
+    local function decide(G)
+        local C = G.call
+        local up = parent[C] or {}
+        local P = up.node
+        -- a postfix on the result would attach to the last argument instead
+        if P and (P.k == 'field' or P.k == 'index' or P.k == 'method') and up.key == 'obj' then return end
+        local outer = P and P.k == 'call' and up.key == 'fn' and P or nil
+        local n = #G.args
+        local next_tk, newline = after(G.close)
+        if n == 0 then
+            -- only a named call statement omits empty parentheses; a following
+            -- '(' would be read as an argument in host Lua
+            if not (P and P.k == 'callstat') then return end
+            if C.k == 'call' and C.fn.k ~= 'name' and C.fn.k ~= 'field' then return end
+            if next_tk and next_tk.t == '(' then return end
+            G.bare = true
+            return
+        end
+        -- a name after the call would become one more argument
+        if not outer and next_tk and not newline and next_tk.t == 'iden' and not KEYWORDS[next_tk.v] then return end
+        local wraps = {}
+        if n == 1 then
+            local a = G.args[1]
+            local f = form(a)
+            if f ~= 'primary' and f ~= 'call' then return end
+            if not G.native and (G.host_argument or not (HOST_SAFE[a.k] or (a.k == 'lambda' and a.fn.body))) then
+                return
+            end
+        else
+            if not G.native or not facts.arguments[G.args] then return end
+            -- Arguments on several lines are joined only when the call then fits
+            -- the column width: an application chain cannot be wrapped later.
+            local gaps = { { G.open, G.firsts[1] }, { G.lasts[n], G.close } }
+            for i = 1, n - 1 do gaps[#gaps + 1] = { G.lasts[i], G.firsts[i + 1] } end
+            local split = false
+            for _, range in ipairs(gaps) do
+                for k = range[1] + 1, range[2] - 1 do
+                    if ts[k].t == 'space' and ts[k].v:find('\n', 1, true) then split = true end
+                end
+            end
+            if split then
+                local width = 0
+                local k = G.open - 1
+                while k > 0 and not (ts[k].t == 'space' and ts[k].v:find('\n', 1, true)) do
+                    width = width + #ts[k].v; k = k - 1
+                end
+                for i = 1, n do
+                    for j = G.firsts[i], G.lasts[i] do
+                        if ts[j].v:find('\n', 1, true) then return end
+                        width = width + #ts[j].v
+                    end
+                    width = width + 3 -- a separating space, or a spaced group's brackets
+                end
+                if width > column_width then return end
+            end
+            for i, a in ipairs(G.args) do
+                local f = form(a)
+                if f == 'never' then return end
+                -- a group expands its last call; only a word is one value elsewhere
+                if (f == 'call' or f == 'compound call') and i < n and not single_valued(a) then return end
+                if f == 'compound' or f == 'compound call' then wraps[i] = true end
+                -- a name argument's chain would take a string or table after it
+                if i > 1 and (a.k == 'str' or a.k == 'table') and not wraps[i - 1] and name_headed(G.args[i - 1]) then
+                    wraps[i] = true
+                end
+            end
+        end
+        -- the same holds across groups: `f(a)("x")` keeps its second group
+        if n == 1 and (G.args[1].k == 'str' or G.args[1].k == 'table') and C.k == 'call'
+            and (C.fn.k == 'call' or C.fn.k == 'method') then
+            local inner = group_of[C.fn.args]
+            local last = inner and inner.bare and inner.args[#inner.args]
+            if (last and name_headed(last) and not inner.wraps[#inner.args]) or C.fn.juxta then return end
+        end
+        -- a name argument needs a name, an argument or a spaced group before it
+        local ends, inner = callee_end(C)
+        if name_headed(G.args[1]) and not wraps[1] and ends ~= 'name' and ends ~= 'arg' then
+            if ends == 'call' and inner and G.native then inner.spaced = true else return end
+        end
+        -- a name argument's chain would take a following string or table
+        if outer and not group_of[outer.args] and not outer.juxta and name_headed(G.args[n]) and not wraps[n] then
+            return
+        end
+        G.bare, G.wraps = true, wraps
+        if outer and group_of[outer.args] then group_of[outer.args].after_bare = true end
+    end
+    for _, G in ipairs(order) do
+        decide(G)
+        -- a kept group right after a bare one is spaced, so it stays an argument
+        if G.after_bare and not G.bare then G.spaced = true end
+    end
+    -- the application chain each group belongs to
+    for _, G in ipairs(order) do
+        local node = G.call
+        while parent[node] and parent[node].node and parent[node].node.k == 'call' and parent[node].key == 'fn' do
+            node = parent[node].node
+        end
+        G.unit = node
+    end
+    return order
+end
+
+local function render_calls(info, order, accept)
+    local ts = info.tokens
+    local replace, before, behind = {}, {}, {}
+    local function blank(i, j)
+        for k = i, j do
+            if ts[k].t == 'space' then
+                -- the newline ending a line comment stays
+                replace[k] = (line_comment(ts[k - 1]) and ts[k].v:find('\n', 1, true)) and '\n' or ''
+            end
+        end
+    end
+    local changed = false
+    for _, G in ipairs(order) do
+        if accept(G.unit) and G.bare then
+            changed = true
+            local n = #G.args
+            if n == 0 then
+                replace[G.open], replace[G.close] = '', ''
+                blank(G.open + 1, G.close - 1)
+            else
+                replace[G.open], replace[G.close] = ' ', ''
+                blank(G.open + 1, G.firsts[1] - 1)
+                for i = 1, n do
+                    local stop = G.lasts[i]
+                    if i < n then
+                        blank(stop + 1, G.separators[i] - 1)
+                        replace[G.separators[i]] = ' '
+                        blank(G.separators[i] + 1, G.firsts[i + 1] - 1)
+                    else
+                        blank(stop + 1, G.close - 1)
+                    end
+                    if G.wraps[i] then
+                        before[G.firsts[i]] = '(' .. (before[G.firsts[i]] or '')
+                        behind[stop] = (behind[stop] or '') .. ')'
+                    end
+                end
+            end
+        elseif accept(G.unit) and G.spaced and ts[G.open - 1].t ~= 'space' then
+            changed = true
+            before[G.open] = ' ' .. (before[G.open] or '')
+        end
+    end
+    if not changed then return end
+    local out = {}
+    for i, tk in ipairs(ts) do out[i] = (before[i] or '') .. (replace[i] or tk.v) .. (behind[i] or '') end
+    return table.concat(out)
+end
+
+-- One round: decide every group, render, and verify once. If the whole round
+-- does not verify, accept the chains that verify on their own.
+local function spell(source, info, filename, signature, column_width)
+    local order = decide_calls(info, column_width)
+    local function verified(candidate)
+        if not candidate then return end
+        local ok, reparsed = pcall(parse, candidate, filename)
+        if ok and fingerprint(reparsed.ast) == signature then return candidate end
+    end
+    local all = render_calls(info, order, function() return true end)
+    if not all then return source end
+    if verified(all) then return all end
+    local units, seen, accepted = {}, {}, {}
+    for _, G in ipairs(order) do
+        if (G.bare or G.spaced) and not seen[G.unit] then seen[G.unit] = true; units[#units + 1] = G.unit end
+    end
+    for _, unit in ipairs(units) do
+        if verified(render_calls(info, order, function(u) return u == unit end)) then accepted[unit] = true end
+    end
+    return verified(render_calls(info, order, function(u) return accepted[u] end)) or source
 end
 
 local function gap(prev, tk, colon, unary, spaced)
@@ -790,7 +982,17 @@ local function layout(info, options)
     return table.concat(out) .. '\n'
 end
 
+local format
 function M.format(source, options, filename)
+    local saved = environment
+    environment = module_environment(filename)
+    local ok, result = pcall(format, source, options, filename)
+    environment = saved
+    if not ok then error(result, 0) end
+    return result
+end
+
+function format(source, options, filename)
     options = M.options(options)
     filename = filename or '<stdin>'
     local prefix = ''
@@ -817,12 +1019,12 @@ function M.format(source, options, filename)
         -- parentheses, and only then are the spine's closers adjacent.
         -- A successful removal can unlock another candidate or chain. Reparse
         -- and reach a fixed point so a second formatting is a no-op.
-        repeat
+        for _ = 1, 8 do
             local previous = source
-            source = minimal(source, info, filename, signature)
-            info = parse(source, filename)
+            source = spell(source, info, filename, signature, options.column_width)
             if source == previous then break end
-        until false
+            info = parse(source, filename)
+        end
         source = fold_spines(source, info, filename, signature)
         info = parse(source, filename)
     end
