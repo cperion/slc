@@ -2301,6 +2301,8 @@ A foreign function is an opaque effect: it is never executed at compile time, wh
 
 Structs with fixed C layouts cross the boundary directly; exported words taking `Ref T` take `T *`, and `Slice T` is a `{ T *ptr; uint32_t len; }` struct passed by value. Resizable values and stores cross only by pointer, with their header layout from `slc_rt.h`. Raw pointers (`Ptr T`, §12) are the foreign boundary, not provenance-checked references.
 
+Private records need not retain storage for every declared field. After specialization, a field with no remaining runtime read, write or observable address may be omitted from the native layout. This decision applies across all reachable instances of that type; known configuration values can differ between instances. Source-level fields and their values do not change. Exported and foreign interfaces retain the declared layout, including nested records and types reached through pointers or callbacks. C and libgccjit use the same storage decisions.
+
 libc is C, and slc emits C, so wrapping it is a matter of externs. What the language adds is the shape: **every libc resource with a lifetime becomes an activity**, and an activity's completion cannot be skipped, because a body's `return` leaves only the body. A file opened by `with_file` is always closed and a buffer from `with_buffer` always freed, short of a trap: RAII without destructors, `defer` without `defer`. Everything is evaluated in place, so the wrappers leave no calls of their own in the C.
 
 ### 17.2 What wrapping C needs

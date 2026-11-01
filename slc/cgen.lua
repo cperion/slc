@@ -8,6 +8,7 @@
 local types = require 'slc.types'
 local fold = require 'slc.fold'
 local S = require 'slc.stage'
+local layout = require 'slc.layout'
 
 local G = {}
 
@@ -1666,6 +1667,13 @@ function G.prepare(mod)
     end
     -- cleanup first: it can only remove uses
     for _, fn in ipairs(fns) do G.cleanup(fn) end
+    -- Native representation hooks cache per module, not per source type.
+    local saved_module = S.module
+    S.module = mod
+    local ok, layouts = pcall(layout.analyze, fns, walk_block)
+    S.module = saved_module
+    if not ok then error(layouts, 0) end
+    mod.storage_layouts = layouts
     plan_stacks(fns)
     for _, fn in ipairs(fns) do
         if not fn.prepared then
@@ -1769,7 +1777,7 @@ local function module_parts(mod, opts)
             -- its layout comes from its header
         elseif t.kind == 'struct' then
             add('types', 'typedef struct ' .. ctype(t) .. ' {')
-            for _, f in ipairs(t.fields) do add('types', '    ' .. decl_of(f.type, f.name) .. ';') end
+            for _, f in ipairs(layout.fields(mod, t)) do add('types', '    ' .. decl_of(f.type, f.name) .. ';') end
             add('types', '} ' .. ctype(t) .. ';')
             add('types', '')
         elseif t.kind == 'sum' then

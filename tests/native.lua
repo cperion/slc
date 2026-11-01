@@ -44,6 +44,17 @@ for i = 0, 16 do
     check('loop boolean exit ' .. i, lf.bool_exit(i) == (i >= 3))
 end
 
+-- Native type descriptors use the same compact layouts as generated C.
+local compact = slc.load(root .. '/examples/storage_layout.slc', { check_layouts = true })
+check('compact record size', ffi.sizeof(compact.types.CompactCounter) == 4)
+check('compact nested size', ffi.sizeof(compact.types.CompactEnvelope) == 4)
+check('cross-instance write retains field', ffi.sizeof(compact.types.SharedCounter) == 8)
+check('exported nested ABI size', ffi.sizeof(compact.types.PublicEnvelope) == 16)
+for i = 0, 16 do
+    check('compact configuration ' .. i, compact.compact_count(i) == 7 + 3 * i)
+    check('compact nested configuration ' .. i, compact.compact_nested(i) == 11 + 5 * i)
+end
+
 -- the guide's program
 local g = slc.load(root .. '/examples/guide.slc')
 check('outline_demo', g.outline_demo(5) == 10)

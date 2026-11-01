@@ -650,6 +650,18 @@ C. Both start from one preparation of the IR (`G.prepare`: cleanup, data-stack
 planning, give-backs at every exit, a yield point in every loop round of a task),
 done once per module whichever backends run, so neither can see a different program.
 
+After cleanup, `slc.layout` computes a module-local storage-field list for private
+records. A field used by any remaining read or write stays; folded configuration
+fields can disappear even when their known values differ between instances. The
+source type tables are not modified. Export/foreign signatures, globals, callbacks,
+pointer/reference reachability and foreign/native representations preserve layouts
+transitively. Address-taking preserves the containing record. The current proof is
+conservative: whole-record operations (including aggregate initializers) and explicit
+size observations retain declared storage, rather than attempting alias analysis or
+rewriting byte-oriented operations. C record definitions and gccjit descriptors use
+the same field lists; aggregate construction is unchanged because it retains its
+layout. An otherwise empty private record has one anonymous-to-SLC byte for C99.
+
 ### 11.1 The same IR, the same rules
 
 `slc.jitgen` mirrors cgen method by method: `place`, `expr`, `stmt`, `wait`, task frames and step functions, blocking functions, spawns, externs. Where cgen writes `xs.ptr[i]`, the emitter asks for an array access; where cgen writes `if (call == SLC_PENDING) { f->task.state = 2; return SLC_WAIT; } resume2:;`, it builds the same blocks, and the step function's resume `switch` becomes a gccjit switch over them. Bodies are built as a control-flow graph in Lua and handed to gccjit when complete, so labels, `goto`, `break` and resume points are just edges.

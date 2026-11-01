@@ -208,6 +208,19 @@ do
                     .. '-I%s %s -pthread -o %s.asan && ASAN_OPTIONS=detect_leaks=1 %s.asan')
                     :format(sq(root .. '/runtime'), c .. ' ' .. main .. ' ' .. rt_sources, sq(c), sq(c)))
             end
+            if name == 'storage_layout' then
+                local input = assert(io.open(c)); local text = input:read('*a'); input:close()
+                local path = c .. '.layouts.c'
+                local out = assert(io.open(path, 'w')); out:write(text)
+                for record, size in pairs { CompactCounter = 4, CompactEnvelope = 4,
+                    SharedCounter = 8, PublicCounter = 8, PublicEnvelope = 16 } do
+                    out:write(('\ntypedef char check_%s[(sizeof(%s) == %d) ? 1 : -1];\n')
+                        :format(record, record, size))
+                end
+                out:close()
+                add(name .. ': compact C sizes and preserved ABI',
+                    ('%s -c %s -o %s'):format(CC, sq(path), sq(c .. '.layouts.o')))
+            end
             if name == 'loop_fields' then
                 for _, opt in ipairs { 0, 2 } do
                     add(name .. ': C O' .. opt,
@@ -349,6 +362,9 @@ local oka, erra = pcall(dofile, root .. '/tests/array_value.lua')
 check('immutable array contents: persistence and sparse zeros', oka, erra)
 local okm, errm = pcall(dofile, root .. '/tests/map_types.lua')
 check('map types: recursive key/value rules', okm, errm)
+
+local okl, errl = pcall(dofile, root .. '/tests/storage_layout.lua')
+check('record storage layouts: residual use and ABI preservation', okl, errl)
 
 local okr, errr = pcall(dofile, root .. '/tests/recursive_foreign.lua')
 check('recursive foreign layouts: construction and rejection', okr, errr)

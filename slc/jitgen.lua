@@ -11,6 +11,7 @@ local G = require 'slc.cgen'
 local S = require 'slc.stage'
 local fold = require 'slc.fold'
 local types = require 'slc.types'
+local layout = require 'slc.layout'
 
 local JG = {}
 local fail = C.fail
@@ -72,7 +73,7 @@ function U:ct(t)
         d = C.record('struct', 'slc_' .. name)
         self.cts[t] = d
         local fs = {}
-        for i, f in ipairs(t.fields) do fs[i] = { f.name, self:ct(f.type) } end
+        for i, f in ipairs(layout.fields(self.mod, t)) do fs[i] = { f.name, self:ct(f.type) } end
         d:set_fields(fs)
         self.scope.types[name] = d
         return d
