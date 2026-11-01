@@ -365,6 +365,21 @@ local function copy(t)
     return r
 end
 
+-- An aggregate's field names in declaration order. pairs() order over string
+-- keys differs between runs (LuaJIT seeds its string hash), and work that can
+-- emit code must not depend on it.
+local function field_order(t, fields)
+    local names, seen = {}, {}
+    for _, fd in ipairs(t and t.fields or {}) do
+        if fields[fd.name] ~= nil then names[#names + 1] = fd.name; seen[fd.name] = true end
+    end
+    local rest = {}
+    for k in pairs(fields) do if not seen[k] then rest[#rest + 1] = k end end
+    table.sort(rest, function(a, b) return tostring(a) < tostring(b) end)
+    for _, k in ipairs(rest) do names[#names + 1] = k end
+    return names
+end
+
 -- places -----------------------------------------------------------------------------------
 -- local / field places of locals are tracked: their abstract value lives in the
 -- builder state. Each tracked leaf has an entry:
@@ -764,7 +779,9 @@ function Builder:freeze_bound_reads(e)
         if type(child) == 'table' and child.op then self:freeze_bound_reads(child) end
     end
     for _, child in ipairs(e.args or {}) do self:freeze_bound_reads(child) end
-    for _, child in pairs(e.fields or {}) do self:freeze_bound_reads(child) end
+    if e.fields then
+        for _, k in ipairs(field_order(e.T, e.fields)) do self:freeze_bound_reads(e.fields[k]) end
+    end
 end
 
 -- place p is about to get a new version: values bound lazily from its current
@@ -902,7 +919,7 @@ function Builder:bind(v)
     end
     if v.k == 'agg' then
         local f = {}
-        for k, fv in pairs(v.f) do f[k] = self:bind(fv) end
+        for _, k in ipairs(field_order(v.T, v.f)) do f[k] = self:bind(v.f[k]) end
         local r = agg(v.T, f)
         local view = rawget(v, 'view')
         if view then rawset(r, 'view', view) end     -- a view stays a view
@@ -1639,7 +1656,7 @@ function S.dynamic(x)
     if v.k == 'array' then return dyn(v.T, ex(v)) end
     if v.k == 'agg' then
         local f = {}
-        for k, fv in pairs(v.f) do f[k] = S.dynamic(fv) end
+        for _, k in ipairs(field_order(v.T, v.f)) do f[k] = S.dynamic(v.f[k]) end
         return agg(v.T, f)
     end
     return v
@@ -2483,7 +2500,7 @@ end
 h.widen_value = function(v)
     if v.k == 'agg' then
         local fields = {}
-        for k, x in pairs(v.f) do fields[k] = h.widen_value(x) end
+        for _, k in ipairs(field_order(v.T, v.f)) do fields[k] = h.widen_value(v.f[k]) end
         return agg(v.T, fields)
     end
     return dyn(v.T, ex(v))
